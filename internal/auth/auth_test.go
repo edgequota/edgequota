@@ -227,17 +227,37 @@ func TestCheckHTTP(t *testing.T) {
 }
 
 func TestBuildCheckRequest(t *testing.T) {
-	t.Run("builds request from http.Request", func(t *testing.T) {
+	t.Run("builds request from http.Request and filters sensitive headers by default", func(t *testing.T) {
+		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
+		r.Header.Set("Authorization", "Bearer token")
+		r.Header.Set("X-Tenant-Id", "tenant-1")
+		r.Header.Set("Content-Type", "application/json")
+		r.RemoteAddr = "192.168.1.1:5000"
+
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
+		cr := c.BuildCheckRequest(r)
+
+		assert.Equal(t, "POST", cr.Method)
+		assert.Equal(t, "/api/v1/resource", cr.Path)
+		assert.Equal(t, "192.168.1.1:5000", cr.RemoteAddr)
+		// Authorization is in DefaultSensitiveHeaders — should be stripped.
+		assert.NotContains(t, cr.Headers, "Authorization")
+		// Non-sensitive headers should pass through.
+		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
+		assert.Equal(t, "application/json", cr.Headers["Content-Type"])
+	})
+
+	t.Run("allow list includes Authorization when explicitly allowed", func(t *testing.T) {
 		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
 		r.Header.Set("Authorization", "Bearer token")
 		r.Header.Set("X-Tenant-Id", "tenant-1")
 		r.RemoteAddr = "192.168.1.1:5000"
 
-		cr := BuildCheckRequest(r)
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{
+			AllowList: []string{"Authorization", "X-Tenant-Id"},
+		})}
+		cr := c.BuildCheckRequest(r)
 
-		assert.Equal(t, "POST", cr.Method)
-		assert.Equal(t, "/api/v1/resource", cr.Path)
-		assert.Equal(t, "192.168.1.1:5000", cr.RemoteAddr)
 		assert.Equal(t, "Bearer token", cr.Headers["Authorization"])
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
 	})
@@ -248,7 +268,8 @@ func TestBuildCheckRequest(t *testing.T) {
 		r.Header = http.Header{}
 		r.RemoteAddr = "127.0.0.1:1234"
 
-		cr := BuildCheckRequest(r)
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
+		cr := c.BuildCheckRequest(r)
 
 		assert.Equal(t, "GET", cr.Method)
 		assert.Equal(t, "/", cr.Path)

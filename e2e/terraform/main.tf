@@ -53,9 +53,10 @@ module "tls_certs" {
 }
 
 locals {
-  ns              = kubernetes_namespace_v1.e2e.metadata[0].name
-  backend_url     = module.whoami.endpoint
-  testbackend_url = module.testbackend.endpoint
+  ns                  = kubernetes_namespace_v1.e2e.metadata[0].name
+  backend_url         = module.whoami.endpoint
+  testbackend_url     = module.testbackend.endpoint
+  testbackend_tls_url = module.testbackend.tls_endpoint
 
   # Redis endpoints for each topology.
   redis_single_ep    = module.redis_single.endpoint
@@ -96,6 +97,7 @@ module "eq_single_pt" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "single-pt"
       key_strategy:
         type: "clientIP"
     redis:
@@ -141,6 +143,7 @@ module "eq_single_fc" {
       burst: 10
       period: "1s"
       failure_policy: "failClosed"
+      key_prefix: "single-fc"
       key_strategy:
         type: "clientIP"
     redis:
@@ -186,6 +189,7 @@ module "eq_single_fb" {
       burst: 10
       period: "1s"
       failure_policy: "inMemoryFallback"
+      key_prefix: "single-fb"
       key_strategy:
         type: "clientIP"
     redis:
@@ -231,6 +235,7 @@ module "eq_repl_basic" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "repl-basic"
       key_strategy:
         type: "clientIP"
     redis:
@@ -277,6 +282,7 @@ module "eq_sentinel_basic" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "sentinel-basic"
       key_strategy:
         type: "clientIP"
     redis:
@@ -323,6 +329,7 @@ module "eq_cluster_basic" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "cluster-basic"
       key_strategy:
         type: "clientIP"
     redis:
@@ -370,6 +377,7 @@ module "eq_key_header" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "key-header"
       key_strategy:
         type: "header"
         header_name: "X-Tenant-Id"
@@ -416,6 +424,7 @@ module "eq_key_composite" {
       burst: 10
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "key-composite"
       key_strategy:
         type: "composite"
         header_name: "X-Tenant-Id"
@@ -463,6 +472,7 @@ module "eq_burst_test" {
       burst: 3
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "burst-test"
       key_strategy:
         type: "clientIP"
     redis:
@@ -508,6 +518,7 @@ module "eq_no_limit" {
       burst: 1
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "no-limit"
       key_strategy:
         type: "clientIP"
     redis:
@@ -557,6 +568,7 @@ module "eq_protocol" {
       burst: 1
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "protocol"
       key_strategy:
         type: "clientIP"
     redis:
@@ -602,6 +614,7 @@ module "eq_protocol_rl" {
       burst: 3
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "protocol-rl"
       key_strategy:
         type: "clientIP"
     redis:
@@ -666,15 +679,17 @@ module "eq_protocol_h3" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.testbackend_url}"
+      url: "${local.testbackend_tls_url}"
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      tls_insecure_skip_verify: true
     rate_limit:
       average: 0
       burst: 1
       period: "1s"
       failure_policy: "passThrough"
+      key_prefix: "protocol-h3"
       key_strategy:
         type: "clientIP"
     redis:

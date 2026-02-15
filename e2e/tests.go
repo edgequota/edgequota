@@ -34,8 +34,9 @@ type testResult struct {
 }
 
 type testCase struct {
-	name string
-	fn   func() testResult
+	name     string
+	scenario string // EdgeQuota deployment scenario name (for log collection)
+	fn       func() testResult
 }
 
 // scenarioNodePorts maps scenario names to their Kubernetes NodePort.
@@ -58,8 +59,9 @@ var scenarioNodePorts = map[string]int{
 }
 
 // runAllTests resolves the minikube IP, builds base URLs for every scenario,
-// and runs all tests locally against the cluster.
+// runs all tests locally against the cluster, and writes a report file.
 func runAllTests() bool {
+	runStart := time.Now()
 	minikubeIP := getMinikubeIP()
 	info("Minikube IP: %s", minikubeIP)
 
@@ -83,38 +85,77 @@ func runAllTests() bool {
 	}
 
 	cases := allTestCases(baseURLs)
-	results := make([]testResult, 0, len(cases))
+	entries := make([]TestEntry, 0, len(cases))
 	passCount, failCount := 0, 0
 
 	for i, tc := range cases {
 		fmt.Printf("\n[%d/%d] %s\n", i+1, len(cases), tc.name)
 
+		tStart := time.Now()
 		r := tc.fn()
-		results = append(results, r)
+		elapsed := time.Since(tStart)
+
+		entry := TestEntry{
+			Index:         i + 1,
+			Name:          tc.name,
+			TestID:        r.name,
+			Passed:        r.passed,
+			Detail:        r.detail,
+			Duration:      elapsed,
+			DurationHuman: elapsed.Round(time.Millisecond).String(),
+		}
+		entries = append(entries, entry)
 
 		if r.passed {
 			passCount++
-			fmt.Printf("  ✅ PASS: %s\n", r.detail)
+			fmt.Printf("  ✅ PASS: %s (%s)\n", r.detail, entry.DurationHuman)
 		} else {
 			failCount++
-			fmt.Printf("  ❌ FAIL: %s\n", r.detail)
+			fmt.Printf("  ❌ FAIL: %s (%s)\n", r.detail, entry.DurationHuman)
 		}
 	}
+
+	allPassed := failCount == 0
 
 	// Summary.
 	fmt.Printf("\n%s\n", strings.Repeat("-", 60))
-	fmt.Printf("Results: %d passed, %d failed, %d total\n", passCount, failCount, len(cases))
+	fmt.Printf("Results: %d passed, %d failed, %d total\n", passCount, failCount, len(entries))
 	fmt.Printf("%s\n", strings.Repeat("-", 60))
 
-	for _, r := range results {
+	for _, e := range entries {
 		mark := "✅"
-		if !r.passed {
+		if !e.Passed {
 			mark = "❌"
 		}
-		fmt.Printf("  %s %s\n", mark, r.name)
+		fmt.Printf("  %s %s\n", mark, e.TestID)
 	}
 
-	return failCount == 0
+	// Collect pod logs when there are failures.
+	var podLogs []PodLog
+	if !allPassed {
+		info("Collecting EdgeQuota pod logs for failure diagnostics...")
+		podLogs = collectEdgeQuotaLogs()
+	}
+
+	// Build and write report.
+	report := &Report{
+		Timestamp:  runStart,
+		Duration:   time.Since(runStart),
+		MinikubeIP: minikubeIP,
+		PassCount:  passCount,
+		FailCount:  failCount,
+		TotalCount: len(entries),
+		AllPassed:  allPassed,
+		Tests:      entries,
+		PodLogs:    podLogs,
+	}
+
+	reportPath := writeReport(report)
+	if reportPath != "" {
+		fmt.Printf("\n📄 Report: %s\n", reportPath)
+	}
+
+	return allPassed
 }
 
 // ---------------------------------------------------------------------------
@@ -124,53 +165,54 @@ func runAllTests() bool {
 func allTestCases(urls map[string]string) []testCase {
 	return []testCase{
 		// Topology: single
-		{"Single mode — passThrough (happy path)", func() testResult { return testSinglePassThrough(urls["single-pt"]) }},
-		{"Single mode — failClosed (Redis down)", func() testResult { return testSingleFailClosed(urls["single-fc"]) }},
-		{"Single mode — inMemoryFallback (Redis down)", func() testResult { return testSingleFallback(urls["single-fb"]) }},
+		{"Single mode — passThrough (happy path)", "single-pt", func() testResult { return testSinglePassThrough(urls["single-pt"]) }},
+		{"Single mode — failClosed (Redis down)", "single-fc", func() testResult { return testSingleFailClosed(urls["single-fc"]) }},
+		{"Single mode — inMemoryFallback (Redis down)", "single-fb", func() testResult { return testSingleFallback(urls["single-fb"]) }},
 
 		// Topology: replication
-		{"Replication mode — basic rate limiting", func() testResult { return testReplicationBasic(urls["repl-basic"]) }},
+		{"Replication mode — basic rate limiting", "repl-basic", func() testResult { return testReplicationBasic(urls["repl-basic"]) }},
 
 		// Topology: sentinel
-		{"Sentinel mode — basic master discovery", func() testResult { return testSentinelBasic(urls["sentinel-basic"]) }},
+		{"Sentinel mode — basic master discovery", "sentinel-basic", func() testResult { return testSentinelBasic(urls["sentinel-basic"]) }},
 
 		// Topology: cluster
-		{"Cluster mode — basic with MOVED redirects", func() testResult { return testClusterBasic(urls["cluster-basic"]) }},
+		{"Cluster mode — basic with MOVED redirects", "cluster-basic", func() testResult { return testClusterBasic(urls["cluster-basic"]) }},
 
 		// Key strategies
-		{"Key strategy — header-based", func() testResult { return testKeyHeader(urls["key-header"]) }},
-		{"Key strategy — composite (header + path)", func() testResult { return testKeyComposite(urls["key-composite"]) }},
+		{"Key strategy — header-based", "key-header", func() testResult { return testKeyHeader(urls["key-header"]) }},
+		{"Key strategy — composite (header + path)", "key-composite", func() testResult { return testKeyComposite(urls["key-composite"]) }},
 
 		// Rate limiting behavior
-		{"Burst exhaustion — 429 after burst", func() testResult { return testBurstExhaustion(urls["burst-test"]) }},
-		{"No limit — average=0 passes all", func() testResult { return testNoLimit(urls["no-limit"]) }},
-		{"Retry-After header present on 429", func() testResult { return testRetryAfterHeader(urls["burst-test"]) }},
+		{"Burst exhaustion — 429 after burst", "burst-test", func() testResult { return testBurstExhaustion(urls["burst-test"]) }},
+		{"No limit — average=0 passes all", "no-limit", func() testResult { return testNoLimit(urls["no-limit"]) }},
+		{"Retry-After header present on 429", "burst-test", func() testResult { return testRetryAfterHeader(urls["burst-test"]) }},
 
 		// Failure injection
-		{"Failure injection — kill single Redis, passThrough", func() testResult { return testKillSinglePassThrough(urls["single-pt"]) }},
-		{"Failure injection — kill single Redis, inMemoryFallback", func() testResult { return testKillSingleFallback(urls["single-fb"]) }},
+		{"Failure injection — kill single Redis, passThrough", "single-pt", func() testResult { return testKillSinglePassThrough(urls["single-pt"]) }},
+		{"Failure injection — kill single Redis, inMemoryFallback", "single-fb", func() testResult { return testKillSingleFallback(urls["single-fb"]) }},
 
 		// Recovery
-		{"Recovery — Redis killed then restarted, limiting resumes", func() testResult { return testRecoveryAfterRestart(urls["burst-test"]) }},
+		{"Recovery — Redis killed then restarted, limiting resumes", "burst-test", func() testResult { return testRecoveryAfterRestart(urls["burst-test"]) }},
 
 		// Concurrency
-		{"Concurrent burst — no 500s under load", func() testResult { return testConcurrentBurst(urls["single-pt"]) }},
+		{"Concurrent burst — no 500s under load", "single-pt", func() testResult { return testConcurrentBurst(urls["single-pt"]) }},
 
 		// Protocol tests — no rate limit
-		{"Protocol — HTTP/1.1 proxies correctly", func() testResult { return testProtocolHTTP(urls["protocol"]) }},
-		{"Protocol — HTTP/2 (h2c) proxies correctly", func() testResult { return testProtocolHTTP2(urls["protocol"]) }},
-		{"Protocol — gRPC unary call", func() testResult { return testProtocolGRPC(urls["protocol"]) }},
-		{"Protocol — SSE event stream", func() testResult { return testProtocolSSE(urls["protocol"]) }},
-		{"Protocol — WebSocket echo", func() testResult { return testProtocolWebSocket(urls["protocol"]) }},
+		{"Protocol — HTTP/1.1 proxies correctly", "protocol", func() testResult { return testProtocolHTTP(urls["protocol"]) }},
+		{"Protocol — HTTP/2 (h2c) proxies correctly", "protocol", func() testResult { return testProtocolHTTP2(urls["protocol"]) }},
+		{"Protocol — gRPC unary call", "protocol", func() testResult { return testProtocolGRPC(urls["protocol"]) }},
+		{"Protocol — SSE event stream", "protocol", func() testResult { return testProtocolSSE(urls["protocol"]) }},
+		{"Protocol — WebSocket echo", "protocol", func() testResult { return testProtocolWebSocket(urls["protocol"]) }},
 
 		// HTTP/3 (QUIC) — tested locally via the routable minikube IP + UDP NodePort
-		{"Protocol — HTTP/3 (QUIC)", func() testResult { return testProtocolHTTP3(urls["protocol-h3"]) }},
-		{"Protocol — HTTPS (HTTP/2 over TLS)", func() testResult { return testProtocolHTTPS(urls["protocol-h3"]) }},
+		{"Protocol — HTTP/3 (QUIC)", "protocol-h3", func() testResult { return testProtocolHTTP3(urls["protocol-h3"]) }},
+		{"Protocol — HTTPS (HTTP/2 over TLS)", "protocol-h3", func() testResult { return testProtocolHTTPS(urls["protocol-h3"]) }},
 
-		// Protocol tests — with rate limiting
-		{"Protocol+RL — gRPC gets rate limited", func() testResult { return testProtocolGRPCRateLimited(urls["protocol-rl"]) }},
-		{"Protocol+RL — SSE connects within burst", func() testResult { return testProtocolSSERateLimited(urls["protocol-rl"]) }},
-		{"Protocol+RL — WebSocket connects within burst", func() testResult { return testProtocolWebSocketRateLimited(urls["protocol-rl"]) }},
+		// Protocol tests — with rate limiting (SSE/WS first since they each use 1
+		// token; gRPC-RL last because it intentionally drains the burst bucket).
+		{"Protocol+RL — SSE connects within burst", "protocol-rl", func() testResult { return testProtocolSSERateLimited(urls["protocol-rl"]) }},
+		{"Protocol+RL — WebSocket connects within burst", "protocol-rl", func() testResult { return testProtocolWebSocketRateLimited(urls["protocol-rl"]) }},
+		{"Protocol+RL — gRPC gets rate limited", "protocol-rl", func() testResult { return testProtocolGRPCRateLimited(urls["protocol-rl"]) }},
 	}
 }
 
@@ -202,7 +244,16 @@ func testSingleFailClosed(base string) testResult {
 		return fail("single-fc", "could not kill Redis pod: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
+	// Wait for TCP RST propagation through kube-proxy.
+	time.Sleep(7 * time.Second)
+
+	// Send a priming burst to force stale Redis connection errors.
+	// The first requests after a pod kill may still use pooled TCP
+	// connections. These requests trigger the connectivity error that
+	// causes the middleware to nil-out the limiter and activate the
+	// failClosed policy.
+	sendBurst(base, nil, 3)
+	time.Sleep(2 * time.Second)
 
 	// Requests should now get 429 (failClosed).
 	_, _, codes := sendBurstDetailed(base, nil, 5)

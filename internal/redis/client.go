@@ -150,7 +150,7 @@ func parseOptions(cfg config.RedisConfig) (*options, error) {
 		mode:             mode,
 		masterName:       cfg.MasterName,
 		username:         cfg.Username,
-		password:         cfg.Password,
+		password:         cfg.Password.Value(),
 		db:               cfg.DB,
 		poolSize:         poolSize,
 		dialTimeout:      dialTimeout,
@@ -159,7 +159,7 @@ func parseOptions(cfg config.RedisConfig) (*options, error) {
 		tlsEnabled:       cfg.TLS.Enabled,
 		tlsSkipVerify:    cfg.TLS.InsecureSkipVerify,
 		sentinelUsername: cfg.SentinelUsername,
-		sentinelPassword: cfg.SentinelPassword,
+		sentinelPassword: cfg.SentinelPassword.Value(),
 	}, nil
 }
 
@@ -178,9 +178,18 @@ func makeTLSConfig(opts *options) *tls.Config {
 		MinVersion: tls.VersionTLS12,
 	}
 	if opts.tlsSkipVerify {
-		cfg.InsecureSkipVerify = true
+		cfg.InsecureSkipVerify = true //nolint:gosec // Configurable per-user choice; warning logged at startup.
 	}
 	return cfg
+}
+
+// WarnInsecureRedis logs a prominent warning if Redis TLS skip verify is enabled.
+// Called at startup from the server package.
+func WarnInsecureRedis(cfgTLS config.RedisTLSConfig, logger interface{ Warn(string, ...any) }) {
+	if cfgTLS.InsecureSkipVerify {
+		logger.Warn("SECURITY WARNING: Redis TLS certificate verification is DISABLED (insecure_skip_verify=true). " +
+			"This should NEVER be used in production — it exposes Redis traffic to man-in-the-middle attacks.")
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -190,12 +190,105 @@ type TransportConfig struct {
 	WebSocketDialTimeout  string `yaml:"websocket_dial_timeout"  env:"WEBSOCKET_DIAL_TIMEOUT"`
 }
 
+// HeaderFilterConfig controls which request headers are forwarded to external
+// services (auth and rate-limit). When AllowList is non-empty only those
+// headers are forwarded. When DenyList is non-empty those headers are stripped.
+// If both are empty, DefaultSensitiveHeaders are denied automatically. Header
+// names are compared case-insensitively.
+type HeaderFilterConfig struct {
+	// AllowList, when non-empty, is the exclusive set of headers forwarded.
+	// All other headers are dropped. Takes precedence over DenyList.
+	AllowList []string `yaml:"allow_list" env:"ALLOW_LIST" envSeparator:","`
+
+	// DenyList is a set of headers that are always stripped before forwarding.
+	// Ignored when AllowList is non-empty.
+	DenyList []string `yaml:"deny_list" env:"DENY_LIST" envSeparator:","`
+}
+
+// DefaultSensitiveHeaders are stripped from requests forwarded to external
+// auth and rate-limit services unless explicitly allowed. These represent
+// credentials and session data that external services should not receive
+// by default.
+var DefaultSensitiveHeaders = []string{
+	"Authorization",
+	"Cookie",
+	"Set-Cookie",
+	"Proxy-Authorization",
+	"Proxy-Authenticate",
+	"X-Api-Key",
+	"X-Csrf-Token",
+	"X-Xsrf-Token",
+}
+
+// HeaderFilter is the compiled, ready-to-use form of HeaderFilterConfig.
+// Use NewHeaderFilter to construct one.
+type HeaderFilter struct {
+	allowSet map[string]struct{} // canonical (lower) names; nil = no allow list
+	denySet  map[string]struct{} // canonical (lower) names; nil = no deny list
+}
+
+// NewHeaderFilter compiles a HeaderFilterConfig into an efficient runtime
+// filter. When the config has no explicit allow or deny list, the
+// DefaultSensitiveHeaders deny list is applied automatically.
+func NewHeaderFilter(cfg HeaderFilterConfig) *HeaderFilter {
+	hf := &HeaderFilter{}
+
+	if len(cfg.AllowList) > 0 {
+		hf.allowSet = make(map[string]struct{}, len(cfg.AllowList))
+		for _, h := range cfg.AllowList {
+			hf.allowSet[strings.ToLower(h)] = struct{}{}
+		}
+		return hf // Allow-list takes precedence; deny list is ignored.
+	}
+
+	deny := cfg.DenyList
+	if len(deny) == 0 {
+		deny = DefaultSensitiveHeaders
+	}
+	hf.denySet = make(map[string]struct{}, len(deny))
+	for _, h := range deny {
+		hf.denySet[strings.ToLower(h)] = struct{}{}
+	}
+
+	return hf
+}
+
+// Allowed returns true if the header name should be forwarded.
+func (hf *HeaderFilter) Allowed(name string) bool {
+	lower := strings.ToLower(name)
+
+	if hf.allowSet != nil {
+		_, ok := hf.allowSet[lower]
+		return ok
+	}
+
+	if hf.denySet != nil {
+		_, denied := hf.denySet[lower]
+		return !denied
+	}
+
+	return true
+}
+
+// FilterHeaders returns a new map containing only the headers that pass the
+// filter. The original map is not modified.
+func (hf *HeaderFilter) FilterHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if hf.Allowed(k) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // AuthConfig holds optional external authentication service settings.
 type AuthConfig struct {
-	Enabled bool           `yaml:"enabled" env:"ENABLED"`
-	Timeout string         `yaml:"timeout" env:"TIMEOUT"`
-	HTTP    AuthHTTPConfig `yaml:"http"    envPrefix:"HTTP_"`
-	GRPC    AuthGRPCConfig `yaml:"grpc"    envPrefix:"GRPC_"`
+	Enabled      bool               `yaml:"enabled"       env:"ENABLED"`
+	Timeout      string             `yaml:"timeout"       env:"TIMEOUT"`
+	HTTP         AuthHTTPConfig     `yaml:"http"          envPrefix:"HTTP_"`
+	GRPC         AuthGRPCConfig     `yaml:"grpc"          envPrefix:"GRPC_"`
+	HeaderFilter HeaderFilterConfig `yaml:"header_filter" envPrefix:"HEADER_FILTER_"`
 }
 
 // AuthHTTPConfig holds HTTP-based auth backend settings.
@@ -222,6 +315,7 @@ type RateLimitConfig struct {
 	Period        string            `yaml:"period"         env:"PERIOD"`
 	FailurePolicy FailurePolicy     `yaml:"failure_policy" env:"FAILURE_POLICY"`
 	FailureCode   int               `yaml:"failure_code"   env:"FAILURE_CODE"`
+	KeyPrefix     string            `yaml:"key_prefix"     env:"KEY_PREFIX"`
 	KeyStrategy   KeyStrategyConfig `yaml:"key_strategy"   envPrefix:"KEY_STRATEGY_"`
 	External      ExternalRLConfig  `yaml:"external"       envPrefix:"EXTERNAL_"`
 }
@@ -231,15 +325,29 @@ type KeyStrategyConfig struct {
 	Type       KeyStrategyType `yaml:"type"        env:"TYPE"`
 	HeaderName string          `yaml:"header_name" env:"HEADER_NAME"`
 	PathPrefix bool            `yaml:"path_prefix" env:"PATH_PREFIX"`
+
+	// TrustedProxies is a list of CIDR ranges whose X-Forwarded-For and
+	// X-Real-IP headers are trusted. When empty, proxy headers are always
+	// trusted (legacy behaviour). When set, proxy headers are only honoured
+	// when RemoteAddr falls within one of these ranges.
+	TrustedProxies []string `yaml:"trusted_proxies" env:"TRUSTED_PROXIES" envSeparator:","`
+
+	// TrustedIPDepth controls which entry in X-Forwarded-For to use when
+	// the request arrives through a trusted proxy chain. 0 (default) uses
+	// the leftmost (client-provided) entry. A positive value N selects the
+	// Nth entry from the right, which is the standard approach for multi-
+	// proxy chains (e.g. 1 = last entry added by the nearest trusted proxy).
+	TrustedIPDepth int `yaml:"trusted_ip_depth" env:"TRUSTED_IP_DEPTH"`
 }
 
 // ExternalRLConfig holds optional external rate limit service settings.
 type ExternalRLConfig struct {
-	Enabled  bool               `yaml:"enabled"   env:"ENABLED"`
-	Timeout  string             `yaml:"timeout"   env:"TIMEOUT"`
-	CacheTTL string             `yaml:"cache_ttl" env:"CACHE_TTL"`
-	HTTP     ExternalHTTPConfig `yaml:"http"      envPrefix:"HTTP_"`
-	GRPC     ExternalGRPCConfig `yaml:"grpc"      envPrefix:"GRPC_"`
+	Enabled      bool               `yaml:"enabled"       env:"ENABLED"`
+	Timeout      string             `yaml:"timeout"       env:"TIMEOUT"`
+	CacheTTL     string             `yaml:"cache_ttl"     env:"CACHE_TTL"`
+	HTTP         ExternalHTTPConfig `yaml:"http"          envPrefix:"HTTP_"`
+	GRPC         ExternalGRPCConfig `yaml:"grpc"          envPrefix:"GRPC_"`
+	HeaderFilter HeaderFilterConfig `yaml:"header_filter" envPrefix:"HEADER_FILTER_"`
 }
 
 // ExternalHTTPConfig holds HTTP external rate limit service settings.
@@ -259,7 +367,7 @@ type RedisConfig struct {
 	Mode             RedisMode      `yaml:"mode"              env:"MODE"`
 	MasterName       string         `yaml:"master_name"       env:"MASTER_NAME"`
 	Username         string         `yaml:"username"          env:"USERNAME"`
-	Password         string         `yaml:"password"          env:"PASSWORD"`
+	Password         RedactedString `yaml:"password"          env:"PASSWORD"`
 	DB               int            `yaml:"db"                env:"DB"`
 	PoolSize         int            `yaml:"pool_size"         env:"POOL_SIZE"`
 	DialTimeout      string         `yaml:"dial_timeout"      env:"DIAL_TIMEOUT"`
@@ -267,7 +375,36 @@ type RedisConfig struct {
 	WriteTimeout     string         `yaml:"write_timeout"     env:"WRITE_TIMEOUT"`
 	TLS              RedisTLSConfig `yaml:"tls"               envPrefix:"TLS_"`
 	SentinelUsername string         `yaml:"sentinel_username" env:"SENTINEL_USERNAME"`
-	SentinelPassword string         `yaml:"sentinel_password" env:"SENTINEL_PASSWORD"`
+	SentinelPassword RedactedString `yaml:"sentinel_password" env:"SENTINEL_PASSWORD"`
+}
+
+// RedactedString is a string that masks its value in String(), GoString(), and
+// MarshalJSON() to prevent accidental leakage in logs or serialised output.
+// Use .Value() to access the underlying secret.
+type RedactedString string
+
+const redactedPlaceholder = "[REDACTED]"
+
+// Value returns the underlying secret string.
+func (r RedactedString) Value() string { return string(r) }
+
+// String implements fmt.Stringer — always returns a redacted placeholder.
+func (r RedactedString) String() string {
+	if r == "" {
+		return ""
+	}
+	return redactedPlaceholder
+}
+
+// GoString implements fmt.GoStringer for %#v.
+func (r RedactedString) GoString() string { return r.String() }
+
+// MarshalJSON masks the value in JSON output.
+func (r RedactedString) MarshalJSON() ([]byte, error) {
+	if r == "" {
+		return []byte(`""`), nil
+	}
+	return []byte(`"` + redactedPlaceholder + `"`), nil
 }
 
 // RedisTLSConfig holds Redis TLS settings.

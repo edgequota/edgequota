@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -51,11 +52,12 @@ type CheckResponse struct {
 
 // Client calls an external authentication service to verify requests.
 type Client struct {
-	httpURL    string
-	grpcClient authv1.AuthServiceClient // generated typed client
-	grpcConn   *grpc.ClientConn
-	httpClient *http.Client
-	timeout    time.Duration
+	httpURL      string
+	grpcClient   authv1.AuthServiceClient // generated typed client
+	grpcConn     *grpc.ClientConn
+	httpClient   *http.Client
+	timeout      time.Duration
+	headerFilter *config.HeaderFilter
 }
 
 // NewClient creates an auth client from the configuration.
@@ -65,10 +67,24 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		timeout = 5 * time.Second
 	}
 
+	// Custom transport with tuned connection pool for high-concurrency auth checks.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100, // Auth is typically a single host.
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	c := &Client{
-		httpURL:    cfg.HTTP.URL,
-		httpClient: &http.Client{Timeout: timeout},
-		timeout:    timeout,
+		httpURL:      cfg.HTTP.URL,
+		httpClient:   &http.Client{Timeout: timeout, Transport: transport},
+		timeout:      timeout,
+		headerFilter: config.NewHeaderFilter(cfg.HeaderFilter),
 	}
 
 	if cfg.GRPC.Address != "" {
@@ -196,11 +212,12 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// BuildCheckRequest creates a CheckRequest from an http.Request.
-func BuildCheckRequest(r *http.Request) *CheckRequest {
+// BuildCheckRequest creates a CheckRequest from an http.Request, applying
+// the client's header filter to strip sensitive headers before forwarding.
+func (c *Client) BuildCheckRequest(r *http.Request) *CheckRequest {
 	headers := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
-		if len(v) > 0 {
+		if len(v) > 0 && c.headerFilter.Allowed(k) {
 			headers[k] = v[0]
 		}
 	}

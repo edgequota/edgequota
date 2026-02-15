@@ -16,6 +16,7 @@ import (
 	"github.com/edgequota/edgequota/internal/middleware"
 	"github.com/edgequota/edgequota/internal/observability"
 	"github.com/edgequota/edgequota/internal/proxy"
+	iredis "github.com/edgequota/edgequota/internal/redis"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -46,6 +47,12 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 
 	metrics := observability.NewMetrics(reg)
 	health := observability.NewHealthChecker()
+
+	// Warn about insecure configurations at startup.
+	iredis.WarnInsecureRedis(cfg.Redis.TLS, logger)
+	if cfg.CacheRedis != nil {
+		iredis.WarnInsecureRedis(cfg.CacheRedis.TLS, logger)
+	}
 
 	rp, err := buildProxy(cfg, logger)
 	if err != nil {
@@ -84,6 +91,8 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 
 	var proxyOpts []proxy.Option
 	if cfg.Backend.TLSInsecureVerify {
+		logger.Warn("SECURITY WARNING: backend TLS certificate verification is DISABLED (tls_insecure_skip_verify=true). " +
+			"This should NEVER be used in production — it exposes the proxy to man-in-the-middle attacks.")
 		proxyOpts = append(proxyOpts, proxy.WithBackendTLSInsecure())
 	}
 
@@ -222,8 +231,9 @@ func (s *Server) startMainServer(errCh chan<- error) {
 
 	var err error
 	if s.cfg.Server.TLS.Enabled {
-		tlsCfg := &tls.Config{ //nolint:gosec // G402 — MinVersion is config-driven; minimum is TLS 1.2.
-			MinVersion: tlsMinVersion(s.cfg),
+		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
+		tlsCfg := &tls.Config{
+			MinVersion: minVer,
 		}
 		s.mainServer.TLSConfig = tlsCfg
 		err = s.mainServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)

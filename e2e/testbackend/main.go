@@ -28,8 +28,21 @@ import (
 	"golang.org/x/net/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/status"
 )
+
+// jsonCodec is a gRPC codec that uses JSON for serialization, allowing clients
+// to call RPC methods with application/grpc+json content-type.
+type jsonCodec struct{}
+
+func (jsonCodec) Marshal(v any) ([]byte, error)      { return json.Marshal(v) }
+func (jsonCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
+func (jsonCodec) Name() string                       { return "json" }
+
+func init() {
+	encoding.RegisterCodec(jsonCodec{})
+}
 
 func main() {
 	mux := http.NewServeMux()

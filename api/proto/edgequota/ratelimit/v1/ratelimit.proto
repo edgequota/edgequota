@@ -34,6 +34,20 @@ message GetLimitsRequest {
   string path = 4;
 }
 
+// FailurePolicy controls EdgeQuota's behaviour when Redis is unavailable.
+// The external rate-limit service can override the static config on a per-
+// request basis by returning one of these values.
+enum FailurePolicy {
+  // FAILURE_POLICY_UNSPECIFIED means "no override — use static config."
+  FAILURE_POLICY_UNSPECIFIED = 0;
+  // Let all requests through without rate limiting.
+  FAILURE_POLICY_PASSTHROUGH = 1;
+  // Deny all requests with the configured (or overridden) failure_code.
+  FAILURE_POLICY_FAIL_CLOSED = 2;
+  // Fall back to a local in-memory token-bucket limiter.
+  FAILURE_POLICY_IN_MEMORY_FALLBACK = 3;
+}
+
 // GetLimitsResponse contains the rate limit parameters and optional cache
 // control directives. These fields allow the external service to control how
 // long EdgeQuota caches this response — consistent across HTTP and gRPC.
@@ -49,6 +63,25 @@ message GetLimitsResponse {
   int64 burst = 2;
   // Duration string (e.g. "1s", "1m").
   string period = 3;
+
+  // Tenant key for Redis bucket isolation (optional). When non-empty,
+  // EdgeQuota uses this as the rate-limit key instead of the extracted key.
+  // This allows the external service to assign per-tenant buckets.
+  string tenant_key = 6;
+
+  // Dynamic failure policy override (optional). When Redis is unavailable,
+  // EdgeQuota normally applies the static failure_policy from config. These
+  // fields let the external service override that decision per-request.
+  //
+  // Example: during planned Redis maintenance, return FAILURE_POLICY_PASSTHROUGH
+  // so users are not blocked. During an active attack, return
+  // FAILURE_POLICY_FAIL_CLOSED to deny all traffic.
+
+  // Override failure policy. FAILURE_POLICY_UNSPECIFIED (0) = use static config.
+  FailurePolicy failure_policy = 7;
+  // Override HTTP status code for FAIL_CLOSED policy (e.g. 503). 0 = use
+  // static config.
+  int32 failure_code = 8;
 
   // Cache control (optional). When omitted, the configured default TTL is used.
 

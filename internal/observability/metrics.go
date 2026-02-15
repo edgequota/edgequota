@@ -33,6 +33,9 @@ type Metrics struct {
 
 	// Prometheus histograms.
 	PromRequestDuration *prometheus.HistogramVec
+
+	// Rate limit headroom gauges for observability dashboards.
+	PromRLRemaining *prometheus.GaugeVec
 }
 
 // NewMetrics creates and registers Prometheus metrics.
@@ -85,6 +88,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help:      "Request duration in seconds.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"method", "status_code"}),
+		PromRLRemaining: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "ratelimit_remaining_tokens",
+			Help:      "Number of remaining tokens in the rate limit bucket (last seen value per key).",
+		}, []string{"key"}),
 	}
 
 	return m
@@ -135,6 +143,11 @@ func (m *Metrics) IncAuthErrors() {
 func (m *Metrics) IncAuthDenied() {
 	atomic.AddInt64(&m.authDenied, 1)
 	m.promAuthDenied.Inc()
+}
+
+// ObserveRemaining records the last-seen remaining tokens for a rate limit key.
+func (m *Metrics) ObserveRemaining(key string, remaining int64) {
+	m.PromRLRemaining.WithLabelValues(key).Set(float64(remaining))
 }
 
 // MetricsSnapshot holds a point-in-time copy of all atomic counters.

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,6 +46,37 @@ var (
 
 // maxTTL caps Redis key TTL to 7 days.
 const maxTTL = 7 * 24 * 3600
+
+// headerMapPool amortizes map[string]string allocations in the hot path.
+// Maps are cleared and returned to the pool after use.
+var headerMapPool = sync.Pool{
+	New: func() any {
+		m := make(map[string]string, 16)
+		return m
+	},
+}
+
+// getHeaderMap returns a map populated with the first value of each header.
+func getHeaderMap(r *http.Request) map[string]string {
+	m, ok := headerMapPool.Get().(map[string]string)
+	if !ok {
+		m = make(map[string]string, len(r.Header))
+	}
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			m[k] = v[0]
+		}
+	}
+	return m
+}
+
+// putHeaderMap clears and returns the map to the pool.
+func putHeaderMap(m map[string]string) {
+	for k := range m {
+		delete(m, k)
+	}
+	headerMapPool.Put(m)
+}
 
 // Failure policy constants — re-exported from config for local readability.
 const (
@@ -156,6 +188,9 @@ func NewChain(
 
 	p := parseRateLimitParams(&cfg.RateLimit)
 	prefix := "rl:edgequota:"
+	if cfg.RateLimit.KeyPrefix != "" {
+		prefix = "rl:" + cfg.RateLimit.KeyPrefix + ":"
+	}
 
 	chain := &Chain{
 		next:          next,
@@ -293,15 +328,55 @@ func (c *Chain) handleRedisStartupFailure(err error, fp config.FailurePolicy, lo
 	}
 }
 
+// statusWriter captures the HTTP status code written by downstream handlers.
+type statusWriter struct {
+	http.ResponseWriter
+	code    int
+	written bool
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	if !sw.written {
+		sw.code = code
+		sw.written = true
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Write(b []byte) (int, error) {
+	if !sw.written {
+		sw.code = http.StatusOK
+		sw.written = true
+	}
+	return sw.ResponseWriter.Write(b)
+}
+
+// Unwrap supports http.ResponseController and middleware that check for
+// underlying interfaces (http.Hijacker, http.Flusher, etc.).
+func (sw *statusWriter) Unwrap() http.ResponseWriter {
+	return sw.ResponseWriter
+}
+
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if c.authClient != nil && !c.checkAuth(w, r) {
+	start := time.Now()
+	sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+
+	defer func() {
+		duration := time.Since(start).Seconds()
+		c.metrics.PromRequestDuration.WithLabelValues(
+			r.Method,
+			strconv.Itoa(sw.code),
+		).Observe(duration)
+	}()
+
+	if c.authClient != nil && !c.checkAuth(sw, r) {
 		return
 	}
 
 	if c.average == 0 && c.externalRL == nil {
 		c.metrics.IncAllowed()
-		c.next.ServeHTTP(w, r)
+		c.next.ServeHTTP(sw, r)
 		return
 	}
 
@@ -309,17 +384,17 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		c.metrics.IncKeyExtractErrors()
 		c.logger.Warn("key extraction failed", "error", err)
-		http.Error(w, "could not extract rate-limit key", http.StatusInternalServerError)
+		http.Error(sw, "could not extract rate-limit key", http.StatusInternalServerError)
 		return
 	}
 
-	c.fetchExternalLimits(r, key)
+	extLimits, resolvedKey := c.fetchExternalLimits(r, key)
 
-	if c.tryRedisLimit(w, r, key) {
+	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
 		return
 	}
 
-	c.handleRedisFailurePolicy(w, r, key)
+	c.handleRedisFailurePolicy(sw, r, resolvedKey, extLimits)
 }
 
 // checkAuth verifies the request with the external auth service.
@@ -327,7 +402,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // When allowed, any request_headers from the auth response are injected into
 // the request so that downstream stages (rate limiting, backend) can read them.
 func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
-	authReq := auth.BuildCheckRequest(r)
+	authReq := c.authClient.BuildCheckRequest(r)
 	resp, err := c.authClient.Check(r.Context(), authReq)
 	if err != nil {
 		c.logger.Error("auth service error", "error", err)
@@ -360,17 +435,22 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // fetchExternalLimits queries the external rate limit service if configured.
-func (c *Chain) fetchExternalLimits(r *http.Request, key string) {
+// Returns the dynamic limits and (optionally overridden) key. When the external
+// service returns a tenant_key, it replaces the extracted key so that each tenant
+// gets its own isolated Redis bucket. When limits are returned, they override the
+// static config for this request.
+func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *ratelimit.ExternalLimits, resolvedKey string) {
+	resolvedKey = key
+
 	if c.externalRL == nil {
-		return
+		return nil, resolvedKey
 	}
 
-	headers := make(map[string]string, len(r.Header))
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			headers[k] = v[0]
-		}
-	}
+	headers := getHeaderMap(r)
+	defer putHeaderMap(headers)
+
+	// Strip sensitive headers before sending to external rate-limit service.
+	c.externalRL.FilterHeaders(headers)
 
 	extReq := &ratelimit.ExternalRequest{
 		Key:     key,
@@ -379,17 +459,28 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) {
 		Path:    r.URL.Path,
 	}
 
-	limits, extErr := c.externalRL.GetLimits(r.Context(), extReq)
+	extLimits, extErr := c.externalRL.GetLimits(r.Context(), extReq)
 	if extErr != nil {
 		c.logger.Warn("external rate limit service error, using static config", "error", extErr)
-	} else if limits.Average > 0 {
-		_ = limits // Dynamic limits are applied by the external service deciding allow/deny.
+		return nil, resolvedKey
 	}
+
+	// Use tenant key from external service for Redis bucket isolation.
+	if extLimits.TenantKey != "" {
+		resolvedKey = extLimits.TenantKey
+	}
+
+	if extLimits.Average > 0 {
+		return extLimits, resolvedKey
+	}
+
+	return nil, resolvedKey
 }
 
 // tryRedisLimit attempts to enforce rate limit via Redis.
 // Returns true if the request was fully handled (allowed or denied), false if Redis is unavailable.
-func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string) bool {
+// When extLimits is non-nil, the dynamic per-tenant/per-key limits override the static config.
+func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string, extLimits *ratelimit.ExternalLimits) bool {
 	c.mu.RLock()
 	lim := c.limiter
 	c.mu.RUnlock()
@@ -398,9 +489,24 @@ func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string
 		return false
 	}
 
-	result, limErr := lim.Allow(r.Context(), key)
+	var result *ratelimit.Result
+	var limErr error
+
+	if extLimits != nil && extLimits.Average > 0 {
+		// Apply dynamic limits from external service.
+		period, _ := time.ParseDuration(extLimits.Period)
+		if period <= 0 {
+			period = time.Second
+		}
+		ratePerSecond := float64(extLimits.Average) * float64(time.Second) / float64(period)
+		burst := max(extLimits.Burst, 1)
+		result, limErr = lim.AllowWithOverrides(r.Context(), key, ratePerSecond, burst)
+	} else {
+		result, limErr = lim.Allow(r.Context(), key)
+	}
+
 	if limErr == nil {
-		c.serveResult(w, r, result)
+		c.serveResult(w, r, key, result)
 		return true
 	}
 
@@ -432,35 +538,84 @@ func (c *Chain) handleLimiterError(limErr error) {
 	}
 }
 
-func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, result *ratelimit.Result) {
+func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, key string, result *ratelimit.Result) {
+	// Always attach rate limit headroom headers (allowed and denied).
+	setRateLimitHeaders(w, result)
+
+	// Record remaining tokens gauge for observability.
+	c.metrics.ObserveRemaining(key, result.Remaining)
+
 	if !result.Allowed {
 		c.metrics.IncLimited()
-		c.serveRateLimited(w, result.RetryAfter)
+		c.serveRateLimited(w, result)
 		return
 	}
 	c.metrics.IncAllowed()
 	c.next.ServeHTTP(w, r)
 }
 
-func (c *Chain) serveRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
-	retrySeconds := math.Ceil(retryAfter.Seconds())
+// setRateLimitHeaders writes standard rate-limit headers to every response.
+// See https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/
+func setRateLimitHeaders(w http.ResponseWriter, result *ratelimit.Result) {
+	w.Header().Set("X-RateLimit-Limit", strconv.FormatInt(result.Limit, 10))
+	w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(result.Remaining, 10))
+
+	resetSeconds := int64(math.Ceil(result.ResetAfter.Seconds()))
+	w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetSeconds, 10))
+}
+
+func (c *Chain) serveRateLimited(w http.ResponseWriter, result *ratelimit.Result) {
+	retrySeconds := math.Ceil(result.RetryAfter.Seconds())
 	if retrySeconds < 1 {
 		retrySeconds = 1
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retrySeconds))
-	w.Header().Set("X-Retry-In", retryAfter.String())
+	w.Header().Set("X-Retry-In", result.RetryAfter.String())
 	http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 }
 
-func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request, key string) {
-	switch c.failurePolicy {
+// resolveFailurePolicy returns the effective failure policy and failure code
+// for this request. The external rate limit service can override both on a
+// per-request basis (e.g. "passthrough" during planned maintenance,
+// "failclosed" during an active attack). When no override is present, the
+// static config values are used.
+func (c *Chain) resolveFailurePolicy(extLimits *ratelimit.ExternalLimits) (config.FailurePolicy, int) {
+	fp := c.failurePolicy
+	fc := c.failureCode
+
+	if extLimits == nil {
+		return fp, fc
+	}
+
+	if extLimits.FailurePolicy != "" {
+		if extLimits.FailurePolicy.Valid() {
+			fp = extLimits.FailurePolicy
+			c.logger.Debug("failure policy overridden by external service",
+				"static", c.failurePolicy, "override", fp)
+		} else {
+			c.logger.Warn("external service returned invalid failure_policy, ignoring",
+				"value", extLimits.FailurePolicy)
+		}
+	}
+
+	if extLimits.FailureCode > 0 {
+		fc = extLimits.FailureCode
+	}
+
+	return fp, fc
+}
+
+func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request, key string, extLimits *ratelimit.ExternalLimits) {
+	fp, fc := c.resolveFailurePolicy(extLimits)
+
+	switch fp {
 	case policyPassthrough:
 		c.metrics.IncAllowed()
 		c.next.ServeHTTP(w, r)
 
 	case policyFailClosed:
 		c.metrics.IncLimited()
-		http.Error(w, http.StatusText(c.failureCode), c.failureCode)
+		http.Error(w, http.StatusText(fc), fc)
 
 	case policyInMemoryFallback:
 		c.metrics.IncFallbackUsed()
@@ -469,7 +624,10 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 			c.next.ServeHTTP(w, r)
 		} else {
 			c.metrics.IncLimited()
-			c.serveRateLimited(w, time.Second)
+			c.serveRateLimited(w, &ratelimit.Result{
+				RetryAfter: time.Second,
+				Limit:      c.burst,
+			})
 		}
 	}
 }

@@ -34,7 +34,8 @@ func TestNewLimiter(t *testing.T) {
 		assert.Equal(t, int64(5), l.burst)
 		assert.Equal(t, 10, l.ttl)
 		assert.Equal(t, "rl:test:", l.keyPrefix)
-		assert.NotEmpty(t, l.script)
+		assert.NotEmpty(t, l.src)
+		assert.NotEmpty(t, l.hash)
 	})
 }
 
@@ -117,26 +118,32 @@ func TestLimiterClient(t *testing.T) {
 
 func TestParseScriptResult(t *testing.T) {
 	t.Run("parses allowed result", func(t *testing.T) {
-		mock := &mockSliceCmd{result: []any{int64(1), int64(0)}}
+		mock := &mockSliceCmd{result: []any{int64(1), int64(0), int64(4), int64(5), int64(1000000)}}
 		result, err := parseScriptResult(mock)
 		require.NoError(t, err)
 		assert.True(t, result.Allowed)
 		assert.Equal(t, time.Duration(0), result.RetryAfter)
+		assert.Equal(t, int64(4), result.Remaining)
+		assert.Equal(t, int64(5), result.Limit)
+		assert.Equal(t, time.Second, result.ResetAfter)
 	})
 
 	t.Run("parses denied result", func(t *testing.T) {
-		mock := &mockSliceCmd{result: []any{int64(0), int64(500000)}} // 500ms
+		mock := &mockSliceCmd{result: []any{int64(0), int64(500000), int64(0), int64(5), int64(5000000)}} // 500ms retry, 5s reset
 		result, err := parseScriptResult(mock)
 		require.NoError(t, err)
 		assert.False(t, result.Allowed)
 		assert.Equal(t, 500*time.Millisecond, result.RetryAfter)
+		assert.Equal(t, int64(0), result.Remaining)
+		assert.Equal(t, int64(5), result.Limit)
+		assert.Equal(t, 5*time.Second, result.ResetAfter)
 	})
 
 	t.Run("returns error for wrong element count", func(t *testing.T) {
 		mock := &mockSliceCmd{result: []any{int64(1)}}
 		_, err := parseScriptResult(mock)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "want 2")
+		assert.Contains(t, err.Error(), "want 5")
 	})
 
 	t.Run("returns error when Slice() fails", func(t *testing.T) {

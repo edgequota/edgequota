@@ -33,6 +33,65 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// FailurePolicy controls EdgeQuota's behaviour when Redis is unavailable.
+// The external rate-limit service can override the static config on a per-
+// request basis by returning one of these values.
+type FailurePolicy int32
+
+const (
+	// FAILURE_POLICY_UNSPECIFIED means "no override — use static config."
+	FailurePolicy_FAILURE_POLICY_UNSPECIFIED FailurePolicy = 0
+	// Let all requests through without rate limiting.
+	FailurePolicy_FAILURE_POLICY_PASSTHROUGH FailurePolicy = 1
+	// Deny all requests with the configured (or overridden) failure_code.
+	FailurePolicy_FAILURE_POLICY_FAIL_CLOSED FailurePolicy = 2
+	// Fall back to a local in-memory token-bucket limiter.
+	FailurePolicy_FAILURE_POLICY_IN_MEMORY_FALLBACK FailurePolicy = 3
+)
+
+// Enum value maps for FailurePolicy.
+var (
+	FailurePolicy_name = map[int32]string{
+		0: "FAILURE_POLICY_UNSPECIFIED",
+		1: "FAILURE_POLICY_PASSTHROUGH",
+		2: "FAILURE_POLICY_FAIL_CLOSED",
+		3: "FAILURE_POLICY_IN_MEMORY_FALLBACK",
+	}
+	FailurePolicy_value = map[string]int32{
+		"FAILURE_POLICY_UNSPECIFIED":        0,
+		"FAILURE_POLICY_PASSTHROUGH":        1,
+		"FAILURE_POLICY_FAIL_CLOSED":        2,
+		"FAILURE_POLICY_IN_MEMORY_FALLBACK": 3,
+	}
+)
+
+func (x FailurePolicy) Enum() *FailurePolicy {
+	p := new(FailurePolicy)
+	*p = x
+	return p
+}
+
+func (x FailurePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FailurePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes[0].Descriptor()
+}
+
+func (FailurePolicy) Type() protoreflect.EnumType {
+	return &file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes[0]
+}
+
+func (x FailurePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FailurePolicy.Descriptor instead.
+func (FailurePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP(), []int{0}
+}
+
 // GetLimitsRequest identifies the client and context for limit lookup.
 type GetLimitsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -122,6 +181,15 @@ type GetLimitsResponse struct {
 	Burst int64 `protobuf:"varint,2,opt,name=burst,proto3" json:"burst,omitempty"`
 	// Duration string (e.g. "1s", "1m").
 	Period string `protobuf:"bytes,3,opt,name=period,proto3" json:"period,omitempty"`
+	// Tenant key for Redis bucket isolation (optional). When non-empty,
+	// EdgeQuota uses this as the rate-limit key instead of the extracted key.
+	// This allows the external service to assign per-tenant buckets.
+	TenantKey string `protobuf:"bytes,6,opt,name=tenant_key,json=tenantKey,proto3" json:"tenant_key,omitempty"`
+	// Override failure policy. FAILURE_POLICY_UNSPECIFIED (0) = use static config.
+	FailurePolicy FailurePolicy `protobuf:"varint,7,opt,name=failure_policy,json=failurePolicy,proto3,enum=edgequota.ratelimit.v1.FailurePolicy" json:"failure_policy,omitempty"`
+	// Override HTTP status code for FAIL_CLOSED policy (e.g. 503). 0 = use
+	// static config.
+	FailureCode int32 `protobuf:"varint,8,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
 	// Cache duration in seconds. When present and > 0, overrides the default
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
 	CacheMaxAgeSeconds *int64 `protobuf:"varint,4,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
@@ -182,6 +250,27 @@ func (x *GetLimitsResponse) GetPeriod() string {
 	return ""
 }
 
+func (x *GetLimitsResponse) GetTenantKey() string {
+	if x != nil {
+		return x.TenantKey
+	}
+	return ""
+}
+
+func (x *GetLimitsResponse) GetFailurePolicy() FailurePolicy {
+	if x != nil {
+		return x.FailurePolicy
+	}
+	return FailurePolicy_FAILURE_POLICY_UNSPECIFIED
+}
+
+func (x *GetLimitsResponse) GetFailureCode() int32 {
+	if x != nil {
+		return x.FailureCode
+	}
+	return 0
+}
+
 func (x *GetLimitsResponse) GetCacheMaxAgeSeconds() int64 {
 	if x != nil && x.CacheMaxAgeSeconds != nil {
 		return *x.CacheMaxAgeSeconds
@@ -208,14 +297,23 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe3\x02\n" +
 	"\x11GetLimitsResponse\x12\x18\n" +
 	"\aaverage\x18\x01 \x01(\x03R\aaverage\x12\x14\n" +
 	"\x05burst\x18\x02 \x01(\x03R\x05burst\x12\x16\n" +
-	"\x06period\x18\x03 \x01(\tR\x06period\x126\n" +
+	"\x06period\x18\x03 \x01(\tR\x06period\x12\x1d\n" +
+	"\n" +
+	"tenant_key\x18\x06 \x01(\tR\ttenantKey\x12L\n" +
+	"\x0efailure_policy\x18\a \x01(\x0e2%.edgequota.ratelimit.v1.FailurePolicyR\rfailurePolicy\x12!\n" +
+	"\ffailure_code\x18\b \x01(\x05R\vfailureCode\x126\n" +
 	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x00R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
 	"\x0ecache_no_store\x18\x05 \x01(\bR\fcacheNoStoreB\x18\n" +
-	"\x16_cache_max_age_seconds2t\n" +
+	"\x16_cache_max_age_seconds*\x96\x01\n" +
+	"\rFailurePolicy\x12\x1e\n" +
+	"\x1aFAILURE_POLICY_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aFAILURE_POLICY_PASSTHROUGH\x10\x01\x12\x1e\n" +
+	"\x1aFAILURE_POLICY_FAIL_CLOSED\x10\x02\x12%\n" +
+	"!FAILURE_POLICY_IN_MEMORY_FALLBACK\x10\x032t\n" +
 	"\x10RateLimitService\x12`\n" +
 	"\tGetLimits\x12(.edgequota.ratelimit.v1.GetLimitsRequest\x1a).edgequota.ratelimit.v1.GetLimitsResponseBKZIgithub.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1;ratelimitv1b\x06proto3"
 
@@ -231,21 +329,24 @@ func file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP() []byte {
 	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescData
 }
 
+var file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_edgequota_ratelimit_v1_ratelimit_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_edgequota_ratelimit_v1_ratelimit_proto_goTypes = []any{
-	(*GetLimitsRequest)(nil),  // 0: edgequota.ratelimit.v1.GetLimitsRequest
-	(*GetLimitsResponse)(nil), // 1: edgequota.ratelimit.v1.GetLimitsResponse
-	nil,                       // 2: edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
+	(FailurePolicy)(0),        // 0: edgequota.ratelimit.v1.FailurePolicy
+	(*GetLimitsRequest)(nil),  // 1: edgequota.ratelimit.v1.GetLimitsRequest
+	(*GetLimitsResponse)(nil), // 2: edgequota.ratelimit.v1.GetLimitsResponse
+	nil,                       // 3: edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
 }
 var file_edgequota_ratelimit_v1_ratelimit_proto_depIdxs = []int32{
-	2, // 0: edgequota.ratelimit.v1.GetLimitsRequest.headers:type_name -> edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
-	0, // 1: edgequota.ratelimit.v1.RateLimitService.GetLimits:input_type -> edgequota.ratelimit.v1.GetLimitsRequest
-	1, // 2: edgequota.ratelimit.v1.RateLimitService.GetLimits:output_type -> edgequota.ratelimit.v1.GetLimitsResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	3, // 0: edgequota.ratelimit.v1.GetLimitsRequest.headers:type_name -> edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
+	0, // 1: edgequota.ratelimit.v1.GetLimitsResponse.failure_policy:type_name -> edgequota.ratelimit.v1.FailurePolicy
+	1, // 2: edgequota.ratelimit.v1.RateLimitService.GetLimits:input_type -> edgequota.ratelimit.v1.GetLimitsRequest
+	2, // 3: edgequota.ratelimit.v1.RateLimitService.GetLimits:output_type -> edgequota.ratelimit.v1.GetLimitsResponse
+	3, // [3:4] is the sub-list for method output_type
+	2, // [2:3] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_edgequota_ratelimit_v1_ratelimit_proto_init() }
@@ -259,13 +360,14 @@ func file_edgequota_ratelimit_v1_ratelimit_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc), len(file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_edgequota_ratelimit_v1_ratelimit_proto_goTypes,
 		DependencyIndexes: file_edgequota_ratelimit_v1_ratelimit_proto_depIdxs,
+		EnumInfos:         file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes,
 		MessageInfos:      file_edgequota_ratelimit_v1_ratelimit_proto_msgTypes,
 	}.Build()
 	File_edgequota_ratelimit_v1_ratelimit_proto = out.File

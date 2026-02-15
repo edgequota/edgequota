@@ -8,8 +8,9 @@ bin/
 coverage.out
 *.test
 
-# Old e2e artifacts
+# E2E artifacts
 e2e/e2e
+e2e/reports/
 
 # Terraform
 e2e/terraform/.terraform/
