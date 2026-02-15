@@ -216,7 +216,9 @@ func TestRedisRecoveryConformance(t *testing.T) {
 
 		// Bring Redis up.
 		mr := miniredis.RunT(t)
-		chain.cfg.Redis.Endpoints = []string{mr.Addr()}
+		cfg2 := *chain.cfg.Load()
+		cfg2.Redis.Endpoints = []string{mr.Addr()}
+		chain.cfg.Store(&cfg2)
 
 		// Wait for recovery.
 		time.Sleep(1 * time.Second)
@@ -252,7 +254,9 @@ func TestRedisRecoveryConformance(t *testing.T) {
 
 		// Bring Redis up.
 		mr := miniredis.RunT(t)
-		chain.cfg.Redis.Endpoints = []string{mr.Addr()}
+		cfg3 := *chain.cfg.Load()
+		cfg3.Redis.Endpoints = []string{mr.Addr()}
+		chain.cfg.Store(&cfg3)
 
 		// Wait for recovery.
 		time.Sleep(1 * time.Second)

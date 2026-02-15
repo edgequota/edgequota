@@ -1,5 +1,7 @@
 # EdgeQuota
 
+> **Developer Preview** — This project is under active development and is **not production-ready**. APIs, configuration formats, and behavior may change without notice. If you choose to deploy EdgeQuota in a production environment, you do so at your own risk and accept full responsibility for any consequences. We strongly recommend thorough testing in a staging environment before any production use.
+
 **Edge-native distributed quota enforcement and authentication orchestration for Kubernetes.**
 
 EdgeQuota is a high-performance reverse proxy that sits at the edge of your infrastructure — before your ingress controller, API gateway, or core services — enforcing rate limits and validating authentication at line speed.

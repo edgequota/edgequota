@@ -234,7 +234,6 @@ func NewChain(
 
 	chain := &Chain{
 		next:          next,
-		cfg:           cfg,
 		logger:        logger,
 		metrics:       metrics,
 		keyStrategy:   ks,
@@ -249,6 +248,7 @@ func NewChain(
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+	chain.cfg.Store(cfg)
 
 	if err := chain.initRedis(cfg, logger, p); err != nil {
 		cancel()
@@ -273,7 +273,7 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 		if authErr != nil {
 			return fmt.Errorf("auth client: %w", authErr)
 		}
-		c.authClient = authClient
+		c.authClient.Store(authClient)
 		logger.Info("authentication enabled")
 	}
 
@@ -288,7 +288,7 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			}
 			return fmt.Errorf("external ratelimit client: %w", extErr)
 		}
-		c.externalRL = extClient
+		c.externalRL.Store(extClient)
 		logger.Info("external rate limit service enabled",
 			"cache_backend", cacheBackendName(cacheClient),
 			"dedicated_cache_redis", cfg.CacheRedis != nil && len(cfg.CacheRedis.Endpoints) > 0)
@@ -437,11 +437,11 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		statusWriterPool.Put(sw)
 	}()
 
-	if c.authClient != nil && !c.checkAuth(sw, r) {
+	if ac := c.authClient.Load(); ac != nil && !c.checkAuth(sw, r, ac) {
 		return
 	}
 
-	if c.average == 0 && c.externalRL == nil {
+	if c.average == 0 && c.externalRL.Load() == nil {
 		c.metrics.IncAllowed()
 		c.next.ServeHTTP(sw, r)
 		return
@@ -471,17 +471,19 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // checkAuth verifies the request with the external auth service.
 // Returns true if allowed, false if denied (response already written).
+// The auth client is passed explicitly to avoid a redundant atomic load
+// (the caller already loaded it to check for nil).
 // When allowed, any request_headers from the auth response are injected into
 // the request so that downstream stages (rate limiting, backend) can read them.
-func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
-	authReq := c.authClient.BuildCheckRequest(r)
-	resp, err := c.authClient.Check(r.Context(), authReq)
+func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Client) bool {
+	authReq := ac.BuildCheckRequest(r)
+	resp, err := ac.Check(r.Context(), authReq)
 	if err != nil {
 		c.logger.Error("auth service error", "error", err)
 		c.metrics.IncAuthErrors()
 
 		// Apply the configured auth failure policy.
-		if c.cfg.Auth.FailurePolicy == config.AuthFailurePolicyFailOpen {
+		if c.cfg.Load().Auth.FailurePolicy == config.AuthFailurePolicyFailOpen {
 			c.logger.Warn("auth service unreachable, allowing request (failure_policy=failopen)")
 			return true
 		}
@@ -525,14 +527,15 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *ratelimit.ExternalLimits, resolvedKey string) {
 	resolvedKey = key
 
-	if c.externalRL == nil {
+	ext := c.externalRL.Load()
+	if ext == nil {
 		return nil, resolvedKey
 	}
 
 	headers := getHeaderMap(r)
 
 	// Strip sensitive headers before sending to external rate-limit service.
-	c.externalRL.FilterHeaders(headers)
+	ext.FilterHeaders(headers)
 
 	extReq := &ratelimit.ExternalRequest{
 		Key:     key,
@@ -541,7 +544,7 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 		Path:    r.URL.Path,
 	}
 
-	extLimits, extErr := c.externalRL.GetLimits(r.Context(), extReq)
+	extLimits, extErr := ext.GetLimits(r.Context(), extReq)
 	if extErr != nil {
 		c.logger.Warn("external rate limit service error, using static config", "error", extErr)
 		return nil, resolvedKey
@@ -765,7 +768,7 @@ func (c *Chain) recoveryLoop() {
 			return
 		}
 
-		client, err := redis.NewClient(c.cfg.Redis)
+		client, err := redis.NewClient(c.cfg.Load().Redis)
 		if err != nil {
 			attempt++
 			sleep := backoffJitter(backoff)
@@ -883,7 +886,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	}
 
 	c.mu.Lock()
-	prevCfg := c.cfg // Capture previous config before overwriting.
+	prevCfg := c.cfg.Load() // Capture previous config before overwriting.
 	c.ratePerSecond = p.ratePerSecond
 	c.burst = p.burst
 	c.ttl = p.ttl
@@ -892,7 +895,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.failureCode = p.failureCode
 	c.average = newCfg.RateLimit.Average
 	c.keyStrategy = newKS
-	c.cfg = newCfg // Must be inside the mutex — recoveryLoop reads c.cfg.Redis without locking.
+	c.cfg.Store(newCfg) // Atomic store — recoveryLoop reads c.cfg without the mutex.
 
 	// Rebuild limiter with new params but same Redis client if available.
 	if c.limiter != nil {
@@ -923,8 +926,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		if authErr != nil {
 			c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
 		} else {
-			oldAuth := c.authClient
-			c.authClient = newAuth
+			oldAuth := c.authClient.Swap(newAuth)
 			if oldAuth != nil {
 				_ = oldAuth.Close()
 			}
@@ -938,8 +940,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		if extErr != nil {
 			c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
 		} else {
-			oldExt := c.externalRL
-			c.externalRL = newExt
+			oldExt := c.externalRL.Swap(newExt)
 			if oldExt != nil {
 				_ = oldExt.Close()
 			}
@@ -970,13 +971,13 @@ func (c *Chain) Close() error {
 			firstErr = err
 		}
 	}
-	if c.authClient != nil {
-		if err := c.authClient.Close(); err != nil && firstErr == nil {
+	if ac := c.authClient.Load(); ac != nil {
+		if err := ac.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if c.externalRL != nil {
-		if err := c.externalRL.Close(); err != nil && firstErr == nil {
+	if ext := c.externalRL.Load(); ext != nil {
+		if err := ext.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

@@ -308,7 +308,9 @@ func TestChainRecovery(t *testing.T) {
 
 		// Start Redis.
 		mr := miniredis.RunT(t)
-		chain.cfg.Redis.Endpoints = []string{mr.Addr()}
+		cfg2 := *chain.cfg.Load()
+		cfg2.Redis.Endpoints = []string{mr.Addr()}
+		chain.cfg.Store(&cfg2)
 
 		// Wait for recovery loop to pick up new Redis.
 		time.Sleep(3 * time.Second)

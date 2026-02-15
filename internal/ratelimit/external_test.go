@@ -12,6 +12,7 @@ import (
 	"github.com/edgequota/edgequota/internal/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 )
 
 func newTestCacheRedis(t *testing.T) (redis.Client, *miniredis.Miniredis) {
@@ -74,10 +75,13 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:    srv.URL,
-			httpClient: http.DefaultClient,
-			timeout:    5e9,
-			cacheTTL:   0,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       0,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		limits, err := c.GetLimits(context.Background(), &ExternalRequest{
@@ -98,9 +102,12 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:    srv.URL,
-			httpClient: http.DefaultClient,
-			timeout:    5e9,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
@@ -110,9 +117,12 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 
 	t.Run("returns error for unreachable service", func(t *testing.T) {
 		c := &ExternalClient{
-			httpURL:    "http://127.0.0.1:1/limits",
-			httpClient: http.DefaultClient,
-			timeout:    5e9,
+			httpURL:        "http://127.0.0.1:1/limits",
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
@@ -121,7 +131,11 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 	})
 
 	t.Run("returns error when no service configured", func(t *testing.T) {
-		c := &ExternalClient{}
+		c := &ExternalClient{
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
+		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
 		assert.Error(t, err)
@@ -145,11 +159,14 @@ func TestExternalClientRedisCaching(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:     srv.URL,
-			httpClient:  http.DefaultClient,
-			timeout:     5e9,
-			cacheTTL:    60e9,
-			redisClient: redisClient,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       60e9,
+			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		limits1, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cached-key"})
@@ -178,11 +195,14 @@ func TestExternalClientRedisCaching(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:     srv.URL,
-			httpClient:  http.DefaultClient,
-			timeout:     5e9,
-			cacheTTL:    60e9,
-			redisClient: redisClient,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       60e9,
+			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		limits1, _ := c.GetLimits(context.Background(), &ExternalRequest{Key: "key-a"})
@@ -202,10 +222,13 @@ func TestExternalClientRedisCaching(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:    srv.URL,
-			httpClient: http.DefaultClient,
-			timeout:    5e9,
-			cacheTTL:   60e9,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       60e9,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
@@ -316,11 +339,14 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:     srv.URL,
-			httpClient:  http.DefaultClient,
-			timeout:     5e9,
-			cacheTTL:    10e9,
-			redisClient: redisClient,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       10e9,
+			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "body-ttl"})
@@ -347,11 +373,14 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:     srv.URL,
-			httpClient:  http.DefaultClient,
-			timeout:     5e9,
-			cacheTTL:    60e9,
-			redisClient: redisClient,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       60e9,
+			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "no-store"})
@@ -375,11 +404,14 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 		defer srv.Close()
 
 		c := &ExternalClient{
-			httpURL:     srv.URL,
-			httpClient:  http.DefaultClient,
-			timeout:     5e9,
-			cacheTTL:    60e9,
-			redisClient: redisClient,
+			httpURL:        srv.URL,
+			httpClient:     http.DefaultClient,
+			timeout:        5e9,
+			cacheTTL:       60e9,
+			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "header-wins"})

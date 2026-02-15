@@ -12,6 +12,7 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			cacheTTL:       0, // no primary cache (force re-fetch)
 			redisClient:    redisClient,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    3,
 			cbResetTimeout: 5 * time.Second,
 		}
@@ -75,6 +77,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			httpClient:     http.DefaultClient,
 			timeout:        1e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    2,
 			cbResetTimeout: 30 * time.Second,
 		}
@@ -112,6 +115,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			timeout:        5e9,
 			cacheTTL:       0,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    3,
 			cbResetTimeout: 10 * time.Millisecond, // Short timeout for testing.
 		}
@@ -166,6 +170,7 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			cacheTTL:       60e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    100, // High threshold so circuit stays closed.
 			cbResetTimeout: 30 * time.Second,
 		}
@@ -203,6 +208,7 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			cacheTTL:       10e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    5,
 			cbResetTimeout: 30 * time.Second,
 		}
@@ -252,6 +258,7 @@ func TestCacheIsolationConformance(t *testing.T) {
 			cacheTTL:       60e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			cbThreshold:    5,
 			cbResetTimeout: 30 * time.Second,
 		}

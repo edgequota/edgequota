@@ -381,6 +381,12 @@ type ExternalRLConfig struct {
 	HTTP         ExternalHTTPConfig `yaml:"http"          envPrefix:"HTTP_"`
 	GRPC         ExternalGRPCConfig `yaml:"grpc"          envPrefix:"GRPC_"`
 	HeaderFilter HeaderFilterConfig `yaml:"header_filter" envPrefix:"HEADER_FILTER_"`
+
+	// MaxConcurrentRequests caps the number of simultaneous in-flight
+	// requests to the external rate limit service. This protects the
+	// control plane from thundering herd on a Redis cache flush. 0 uses
+	// the default (50).
+	MaxConcurrentRequests int `yaml:"max_concurrent_requests" env:"MAX_CONCURRENT_REQUESTS"`
 }
 
 // ExternalHTTPConfig holds HTTP external rate limit service settings.

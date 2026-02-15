@@ -17,6 +17,7 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -90,6 +91,12 @@ type ExternalClient struct {
 	// one external call, preventing thundering herd on the control plane.
 	sfGroup singleflight.Group
 
+	// fetchSem limits the number of concurrent in-flight requests to the
+	// external rate limit service. Singleflight collapses duplicate keys,
+	// but a cache flush can trigger thousands of distinct keys simultaneously.
+	// The semaphore caps total concurrency to protect the control plane.
+	fetchSem *semaphore.Weighted
+
 	// Per-tenant circuit breakers. Each tenant key gets its own breaker so
 	// that one misbehaving tenant config doesn't trip the circuit for all.
 	breakers       sync.Map // map[string]*tenantCircuitBreaker
@@ -97,12 +104,18 @@ type ExternalClient struct {
 	cbResetTimeout time.Duration
 }
 
-// Circuit breaker defaults.
+// Circuit breaker and concurrency defaults.
 const (
 	defaultCBThreshold    = 5
 	defaultCBResetTimeout = 30 * time.Second
 	staleCachePrefix      = "rl:extcache:stale:"
 	staleCacheTTL         = 5 * time.Minute
+
+	// defaultMaxConcurrentFetches caps the number of simultaneous in-flight
+	// requests to the external rate limit service across all keys. This
+	// prevents a thundering herd of distinct-key cache misses (e.g. after a
+	// Redis flush) from overwhelming the control plane.
+	defaultMaxConcurrentFetches = 50
 )
 
 // tenantCircuitBreaker holds per-tenant circuit breaker state. One bad tenant
@@ -190,6 +203,11 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	maxConcurrent := int64(cfg.MaxConcurrentRequests)
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrentFetches
+	}
+
 	ec := &ExternalClient{
 		httpURL:        cfg.HTTP.URL,
 		httpClient:     &http.Client{Timeout: timeout, Transport: transport},
@@ -197,6 +215,7 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		cacheTTL:       cacheTTL,
 		headerFilter:   config.NewHeaderFilter(cfg.HeaderFilter),
 		redisClient:    redisClient,
+		fetchSem:       semaphore.NewWeighted(maxConcurrent),
 		cbThreshold:    defaultCBThreshold,
 		cbResetTimeout: defaultCBResetTimeout,
 	}
@@ -275,6 +294,14 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		if cached := ec.getFromCache(ctx, req.Key); cached != nil {
 			return &sfResult{limits: cached}, nil
 		}
+
+		// Acquire a concurrency permit before calling the external service.
+		// This caps the total number of in-flight requests across all keys,
+		// protecting the control plane from thundering herd on cache flush.
+		if semErr := ec.fetchSem.Acquire(ctx, 1); semErr != nil {
+			return nil, fmt.Errorf("external rate limit semaphore: %w", semErr)
+		}
+		defer ec.fetchSem.Release(1)
 
 		limits, ttl, fetchErr := ec.fetchFromService(ctx, req)
 		if fetchErr != nil {

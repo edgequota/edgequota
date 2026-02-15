@@ -35,6 +35,7 @@ type Server struct {
 	mainServer      *http.Server
 	http3Server     *http3.Server // nil when HTTP/3 is disabled.
 	adminServer     *http.Server
+	adminRL         *adminRateLimiter // stopped during shutdown to avoid goroutine leak
 	chain           *middleware.Chain
 	health          *observability.HealthChecker
 	metrics         *observability.Metrics
@@ -73,7 +74,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer := buildAdminServer(cfg, health, reg)
+	adminServer, adminRL := buildAdminServer(cfg, health, reg)
 
 	return &Server{
 		cfg:         cfg,
@@ -82,6 +83,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 		mainServer:  mainServer,
 		http3Server: h3srv,
 		adminServer: adminServer,
+		adminRL:     adminRL,
 		chain:       chain,
 		health:      health,
 		metrics:     metrics,
@@ -184,33 +186,50 @@ type adminRateLimiter struct {
 	handler http.Handler
 	tokens  atomic.Int64
 	burst   int64
+	done    chan struct{}
 }
 
 func newAdminRateLimiter(handler http.Handler, burst int64) *adminRateLimiter {
-	rl := &adminRateLimiter{handler: handler, burst: burst}
+	rl := &adminRateLimiter{handler: handler, burst: burst, done: make(chan struct{})}
 	rl.tokens.Store(burst)
 	// Refill tokens every 100ms (rate = burst per second).
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		for range ticker.C {
-			refill := burst / 10
-			if refill < 1 {
-				refill = 1
-			}
-			for {
-				cur := rl.tokens.Load()
-				next := cur + refill
-				if next > burst {
-					next = burst
+		for {
+			select {
+			case <-rl.done:
+				return
+			case <-ticker.C:
+				refill := burst / 10
+				if refill < 1 {
+					refill = 1
 				}
-				if rl.tokens.CompareAndSwap(cur, next) {
-					break
+				for {
+					cur := rl.tokens.Load()
+					next := cur + refill
+					if next > burst {
+						next = burst
+					}
+					if rl.tokens.CompareAndSwap(cur, next) {
+						break
+					}
 				}
 			}
 		}
 	}()
 	return rl
+}
+
+// Stop terminates the background token-refill goroutine. Safe to call
+// multiple times; subsequent calls are no-ops.
+func (rl *adminRateLimiter) Stop() {
+	select {
+	case <-rl.done:
+		// Already stopped.
+	default:
+		close(rl.done)
+	}
 }
 
 func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +246,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry) *http.Server {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -241,18 +260,18 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 	}))
 
 	// Wrap the admin mux in a rate limiter (100 req/s burst).
-	var adminHandler http.Handler = adminMux
-	adminHandler = newAdminRateLimiter(adminHandler, 100)
+	rl := newAdminRateLimiter(adminMux, 100)
 
-	return &http.Server{
+	srv := &http.Server{
 		Addr:              cfg.Admin.Address,
-		Handler:           adminHandler,
+		Handler:           rl,
 		ReadTimeout:       adminReadTimeout,
 		WriteTimeout:      adminWriteTimeout,
 		IdleTimeout:       adminIdleTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default.
 	}
+	return srv, rl
 }
 
 // certHolder provides atomic TLS certificate hot-reload via GetCertificate.
@@ -430,6 +449,21 @@ func (s *Server) Reload(newCfg *config.Config) error {
 	return nil
 }
 
+// ReloadCerts hot-swaps TLS certificates from the given files without
+// restarting the server. This is called by the dedicated cert file
+// watcher (separate from the config watcher) to handle Kubernetes Secret
+// volume updates where the cert files change independently of the config.
+func (s *Server) ReloadCerts(certFile, keyFile string) {
+	if s.certs == nil {
+		return
+	}
+	if err := s.certs.Reload(certFile, keyFile); err != nil {
+		s.logger.Error("TLS certificate reload failed, keeping old certificate", "error", err)
+	} else {
+		s.logger.Info("TLS certificates reloaded", "cert", certFile, "key", keyFile)
+	}
+}
+
 func (s *Server) shutdown() error {
 	s.health.SetNotReady()
 
@@ -449,6 +483,11 @@ func (s *Server) shutdown() error {
 
 	if err := s.adminServer.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("admin server shutdown error", "error", err)
+	}
+
+	// Stop the admin rate limiter's background goroutine.
+	if s.adminRL != nil {
+		s.adminRL.Stop()
 	}
 
 	if err := s.chain.Close(); err != nil {

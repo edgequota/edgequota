@@ -50,6 +50,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		resp, err := c.Check(context.Background(), &CheckRequest{
@@ -72,6 +73,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		resp, err := c.Check(context.Background(), &CheckRequest{
@@ -103,6 +105,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		resp, err := c.Check(context.Background(), &CheckRequest{
@@ -132,6 +135,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		resp, err := c.Check(context.Background(), &CheckRequest{
@@ -155,6 +159,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		resp, err := c.Check(context.Background(), &CheckRequest{
@@ -171,6 +176,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    "http://127.0.0.1:1/check",
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		_, err := c.Check(context.Background(), &CheckRequest{})
@@ -190,6 +196,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpClient:             http.DefaultClient,
 			timeout:                5e9,
 			forwardOriginalHeaders: true,
+			cb:                     newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		_, err := c.Check(context.Background(), &CheckRequest{
@@ -216,6 +223,7 @@ func TestCheckHTTP(t *testing.T) {
 			httpURL:    srv.URL,
 			httpClient: http.DefaultClient,
 			timeout:    5e9,
+			cb:         newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 		}
 
 		_, err := c.Check(context.Background(), &CheckRequest{

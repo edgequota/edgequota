@@ -9,6 +9,7 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 )
 
@@ -225,7 +226,11 @@ func TestExternalClientCloseGRPC(t *testing.T) {
 
 func TestGetLimitsNoServiceConfigured(t *testing.T) {
 	t.Run("returns error when no service configured", func(t *testing.T) {
-		ec := &ExternalClient{}
+		ec := &ExternalClient{
+			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			cbThreshold:    defaultCBThreshold,
+			cbResetTimeout: defaultCBResetTimeout,
+		}
 		_, err := ec.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "no external rate limit service configured")

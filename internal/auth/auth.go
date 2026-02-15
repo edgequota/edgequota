@@ -14,10 +14,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	authv1 "github.com/edgequota/edgequota/api/gen/edgequota/auth/v1"
@@ -27,6 +29,67 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// ErrCircuitOpen is returned when the auth circuit breaker is open and the
+// call is short-circuited without contacting the auth service.
+var ErrCircuitOpen = errors.New("auth circuit breaker is open")
+
+// Circuit breaker defaults for the auth service.
+const (
+	defaultAuthCBThreshold    = 5
+	defaultAuthCBResetTimeout = 30 * time.Second
+)
+
+// circuitBreaker protects the auth service from cascading failures. When the
+// auth service is down, the breaker opens after `threshold` consecutive
+// failures and short-circuits all calls for `resetTimeout`, avoiding the full
+// auth timeout on every request. After the reset timeout, one probe request
+// is allowed through (half-open state).
+type circuitBreaker struct {
+	mu           sync.Mutex
+	failures     int
+	open         bool
+	openUntil    time.Time
+	threshold    int
+	resetTimeout time.Duration
+}
+
+func newCircuitBreaker(threshold int, resetTimeout time.Duration) *circuitBreaker {
+	return &circuitBreaker{
+		threshold:    threshold,
+		resetTimeout: resetTimeout,
+	}
+}
+
+// isOpen returns true when the circuit is open and the reset timeout has not
+// yet elapsed. Once the timeout passes, the circuit enters half-open state
+// (returns false) to allow a single probe request through.
+func (cb *circuitBreaker) isOpen() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if !cb.open {
+		return false
+	}
+	// Half-open: allow a probe if enough time has passed.
+	return time.Now().Before(cb.openUntil)
+}
+
+func (cb *circuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	if cb.failures >= cb.threshold {
+		cb.open = true
+		cb.openUntil = time.Now().Add(cb.resetTimeout)
+	}
+}
+
+func (cb *circuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.open = false
+}
 
 // CheckRequest represents the data sent to the external auth service.
 // Used as the canonical internal type for both HTTP and gRPC paths.
@@ -59,6 +122,7 @@ type Client struct {
 	timeout                time.Duration
 	headerFilter           *config.HeaderFilter
 	forwardOriginalHeaders bool // when true, forward X-Original-* HTTP headers
+	cb                     *circuitBreaker
 }
 
 // NewClient creates an auth client from the configuration.
@@ -87,6 +151,7 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		timeout:                timeout,
 		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
+		cb:                     newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
 	}
 
 	if cfg.GRPC.Address != "" {
@@ -118,11 +183,27 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 
 // Check verifies the request with the external auth service.
 // Returns the CheckResponse, or an error if the service is unreachable.
+// When the circuit breaker is open, returns ErrCircuitOpen immediately
+// without contacting the auth service, avoiding the full auth timeout.
 func (c *Client) Check(ctx context.Context, req *CheckRequest) (*CheckResponse, error) {
-	if c.grpcClient != nil {
-		return c.checkGRPC(ctx, req)
+	if c.cb.isOpen() {
+		return nil, ErrCircuitOpen
 	}
-	return c.checkHTTP(ctx, req)
+
+	var resp *CheckResponse
+	var err error
+	if c.grpcClient != nil {
+		resp, err = c.checkGRPC(ctx, req)
+	} else {
+		resp, err = c.checkHTTP(ctx, req)
+	}
+
+	if err != nil {
+		c.cb.recordFailure()
+		return nil, err
+	}
+	c.cb.recordSuccess()
+	return resp, nil
 }
 
 func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckResponse, error) {

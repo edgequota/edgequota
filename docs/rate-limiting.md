@@ -45,7 +45,7 @@ local now   = tonumber(ARGV[4])   -- current time in microseconds
 
 -- Rate <= 0 means rate limiting is disabled; allow everything.
 if rate <= 0 then
-  return {1, 0}
+  return {1, 0, burst, burst, 0}
 end
 
 -- Read current bucket state.
@@ -62,19 +62,39 @@ end
 local elapsed = now - last
 tokens = math.min(burst, tokens + rate * elapsed)
 
+-- Compute time until bucket is fully replenished (for X-RateLimit-Reset).
+local reset_after = 0
+if tokens < burst then
+  reset_after = math.ceil((burst - tokens) / rate)
+end
+
+-- Only refresh EXPIRE when remaining TTL is below 50% of target. This
+-- halves Redis write amplification for steady-state keys that are accessed
+-- frequently.
+local needs_expire = true
+local cur_ttl = redis.call('ttl', key)
+if cur_ttl > 0 and cur_ttl > ttl / 2 then
+  needs_expire = false
+end
+
 -- Try to consume one token.
 if tokens >= 1 then
   tokens = tokens - 1
   redis.call('hset', key, 'last', now, 'tokens', tokens)
-  redis.call('expire', key, ttl)
-  return {1, 0}            -- {allowed, retry_after_micros}
+  if needs_expire then
+    redis.call('expire', key, ttl)
+  end
+  local remaining = math.floor(tokens)
+  return {1, 0, remaining, burst, reset_after}
 end
 
 -- Bucket empty: compute retry delay.
 redis.call('hset', key, 'last', now, 'tokens', tokens)
-redis.call('expire', key, ttl)
+if needs_expire then
+  redis.call('expire', key, ttl)
+end
 local retry = math.ceil((1 - tokens) / rate)
-return {0, retry}           -- {denied, retry_after_micros}
+return {0, retry, 0, burst, reset_after}
 ```
 
 ### Script Arguments
@@ -89,10 +109,19 @@ return {0, retry}           -- {denied, retry_after_micros}
 
 ### Return Value
 
-A two-element array: `{allowed, retry_after_micros}`.
+A five-element array: `{allowed, retry_after_micros, remaining_tokens, limit, reset_after_micros}`.
 
-- `allowed = 1`: request permitted; `retry_after` is `0`.
-- `allowed = 0`: request denied; `retry_after` is the number of microseconds until one token is available.
+| Element | Type | Description |
+|---------|------|-------------|
+| `allowed` | 0 or 1 | `1` = request permitted, `0` = request denied |
+| `retry_after_micros` | integer | Microseconds until one token is available. `0` when allowed. |
+| `remaining_tokens` | integer | Tokens remaining in the bucket after this request |
+| `limit` | integer | Bucket capacity (burst) |
+| `reset_after_micros` | integer | Microseconds until the bucket is fully replenished |
+
+### Conditional EXPIRE Optimization
+
+The script checks the current TTL of the Redis key before calling `EXPIRE`. If the remaining TTL is still above 50% of the configured target, the `EXPIRE` call is skipped entirely. This halves Redis write amplification for steady-state keys that are accessed frequently — a significant optimization for high-throughput deployments where each `EXPIRE` is an additional write to the Redis keyspace.
 
 ### Why Microsecond Precision
 
@@ -120,7 +149,7 @@ In Redis Cluster, each key is assigned to a single shard (based on the hash slot
 
 ### Script Caching
 
-Redis caches the compiled Lua script after the first `EVAL`. Subsequent calls to `EVAL` with the same script body reuse the cached bytecode. EdgeQuota does not use `EVALSHA` explicitly — Redis handles this transparently.
+EdgeQuota uses `EVALSHA` to execute the Lua script by its SHA1 hash, avoiding sending ~800 bytes of Lua source on every request. On a `NOSCRIPT` error (e.g., after a Redis restart or failover), it falls back to `EVAL` which loads the script and caches it for subsequent `EVALSHA` calls.
 
 ---
 

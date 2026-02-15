@@ -66,6 +66,28 @@ func main() {
 	}()
 	defer watcher.Stop()
 
+	// Start a separate TLS cert watcher when TLS is enabled. The cert
+	// files live in a different volume mount (Kubernetes Secret) than the
+	// config file (ConfigMap), so the config watcher cannot detect cert
+	// changes. This watcher polls the cert file hash and triggers a
+	// reload when the certificate content changes on disk.
+	if cfg.Server.TLS.Enabled && cfg.Server.TLS.CertFile != "" {
+		certWatcher := config.NewCertWatcher(
+			cfg.Server.TLS.CertFile,
+			cfg.Server.TLS.KeyFile,
+			func(certFile, keyFile string) {
+				srv.ReloadCerts(certFile, keyFile)
+			},
+			logger,
+		)
+		go func() {
+			if watchErr := certWatcher.Start(ctx); watchErr != nil {
+				logger.Error("TLS cert watcher error", "error", watchErr)
+			}
+		}()
+		defer certWatcher.Stop()
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server exited with error", "error", err)
 		os.Exit(1)

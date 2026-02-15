@@ -1050,11 +1050,19 @@ func testConfigReload(base string) testResult {
 		return fail(name, "failed to patch ConfigMap: %v", err)
 	}
 
-	// 3. Wait for file-watcher debounce + reload (3s should be enough).
-	time.Sleep(3 * time.Second)
+	// 3. Poll until the new rate limits take effect. Kubernetes ConfigMap
+	//    volume propagation can take up to ~60s (syncFrequency + cache TTL),
+	//    plus the watcher poll interval and debounce.
+	deadline := time.Now().Add(90 * time.Second)
+	var ok200After, ok429After int
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		ok200After, ok429After = sendBurst(base, nil, 10)
+		if ok429After > 0 {
+			break
+		}
+	}
 
-	// 4. Send a burst — with burst=3, we should see at most 3 allowed.
-	ok200After, ok429After := sendBurst(base, nil, 10)
 	if ok429After == 0 {
 		return fail(name, "post-reload: expected 429s but got 0 (ok200=%d)", ok200After)
 	}
@@ -1076,52 +1084,48 @@ func testCertReload(base string) testResult {
 	}
 
 	// 2. Generate a new self-signed cert and update the TLS Secret.
-	// This uses a kubectl command to create a new secret (the cert itself
-	// is generated via openssl in-cluster or by the test harness).
-	// For now we create a new cert via openssl and replace the secret.
+	// Uses a two-step openssl flow (ecparam + req) that works across
+	// OpenSSL 1.x and 3.x — the single-command "-newkey ec -pkeyopt"
+	// form produces invalid ECDSA parameters on OpenSSL 3.x.
+	ip := strings.Split(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), ":")[0]
 	_, genErr := run("bash", "-c", fmt.Sprintf(
-		`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes `+
-			`-keyout /tmp/e2e-newkey.pem -out /tmp/e2e-newcert.pem `+
-			`-days 1 -subj '/CN=edgequota-e2e' -addext 'subjectAltName=IP:%s' 2>/dev/null`,
-		strings.Split(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), ":")[0],
+		`openssl ecparam -name prime256v1 -genkey -noout -out /tmp/e2e-newkey.pem && `+
+			`openssl req -new -x509 -key /tmp/e2e-newkey.pem `+
+			`-out /tmp/e2e-newcert.pem -days 1 `+
+			`-subj '/CN=edgequota-e2e' -addext 'subjectAltName=DNS:localhost,IP:%s' 2>/dev/null`, ip,
 	))
 	if genErr != nil {
 		return fail(name, "openssl cert generation failed: %v", genErr)
 	}
 
-	_, secretErr := kubectl("create", "secret", "tls", "edgequota-tls-protocol-h3",
-		"-n", namespace,
-		"--cert=/tmp/e2e-newcert.pem", "--key=/tmp/e2e-newkey.pem",
-		"--dry-run=client", "-o", "yaml")
-	if secretErr != nil {
-		// Apply the generated YAML to replace the existing secret.
-		_, applyErr := run("bash", "-c",
-			`kubectl create secret tls edgequota-tls-protocol-h3 -n `+namespace+
-				` --cert=/tmp/e2e-newcert.pem --key=/tmp/e2e-newkey.pem `+
-				`--dry-run=client -o yaml | kubectl apply -f -`)
-		if applyErr != nil {
-			return fail(name, "failed to update TLS secret: %v", applyErr)
+	_, applyErr := run("bash", "-c",
+		`kubectl create secret tls edgequota-tls -n `+namespace+
+			` --cert=/tmp/e2e-newcert.pem --key=/tmp/e2e-newkey.pem `+
+			`--dry-run=client -o yaml | kubectl apply -f -`)
+	if applyErr != nil {
+		return fail(name, "failed to update TLS secret: %v", applyErr)
+	}
+
+	// 3. Wait for Kubelet to propagate the Secret update and the cert
+	//    watcher to detect the change. Kubelet syncs projected volumes
+	//    periodically (default ~60s); the cert watcher polls every 2s.
+	//    Use a poll loop with a generous timeout to avoid flakes.
+	deadline := time.Now().Add(90 * time.Second)
+	var serial2 *big.Int
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		serial2, err = getTLSSerial(base)
+		if err != nil {
+			continue // TLS handshake may briefly fail during reload.
 		}
-	} else {
-		_, applyErr := run("bash", "-c",
-			`kubectl create secret tls edgequota-tls-protocol-h3 -n `+namespace+
-				` --cert=/tmp/e2e-newcert.pem --key=/tmp/e2e-newkey.pem `+
-				`--dry-run=client -o yaml | kubectl apply -f -`)
-		if applyErr != nil {
-			return fail(name, "failed to apply TLS secret: %v", applyErr)
+		if serial1.Cmp(serial2) != 0 {
+			break
 		}
 	}
 
-	// 3. Wait for the cert file to be remounted + reload (kubelet can take
-	//    up to ~60s for secret volume sync; add buffer).
-	time.Sleep(10 * time.Second)
-
-	// 4. Reconnect and check for a different serial.
-	serial2, err := getTLSSerial(base)
-	if err != nil {
-		return fail(name, "post-reload TLS connect failed: %v", err)
+	if serial2 == nil {
+		return fail(name, "post-reload TLS connect never succeeded within timeout")
 	}
-
 	if serial1.Cmp(serial2) == 0 {
 		return fail(name, "certificate serial unchanged after secret update (serial=%s)", serial1.String())
 	}
