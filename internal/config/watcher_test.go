@@ -361,13 +361,13 @@ func TestHashFile(t *testing.T) {
 
 	t.Run("follows symlinks", func(t *testing.T) {
 		dir := t.TempDir()
-		real := filepath.Join(dir, "real.txt")
+		realFile := filepath.Join(dir, "real.txt")
 		link := filepath.Join(dir, "link.txt")
 
-		require.NoError(t, os.WriteFile(real, []byte("data"), 0o644))
-		require.NoError(t, os.Symlink(real, link))
+		require.NoError(t, os.WriteFile(realFile, []byte("data"), 0o644))
+		require.NoError(t, os.Symlink(realFile, link))
 
-		assert.Equal(t, hashFile(real), hashFile(link))
+		assert.Equal(t, hashFile(realFile), hashFile(link))
 	})
 }
 

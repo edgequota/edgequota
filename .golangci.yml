@@ -78,6 +78,7 @@ linters:
           - errcheck
           - goconst
           - funlen
+          - gocyclo
           - godot
           - gosec
           - revive

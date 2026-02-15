@@ -110,14 +110,15 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 		// After the first fallback request, pause briefly so ristretto
 		// admits the entry (ristretto applies sets asynchronously).
 		allowed, limited := 0, 0
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			reqN := httptest.NewRequest(http.MethodGet, "/", nil)
 			reqN.RemoteAddr = "10.0.0.1:1234"
 			rrN := httptest.NewRecorder()
 			chain.ServeHTTP(rrN, reqN)
-			if rrN.Code == http.StatusOK {
+			switch rrN.Code {
+			case http.StatusOK:
 				allowed++
-			} else if rrN.Code == http.StatusTooManyRequests {
+			case http.StatusTooManyRequests:
 				limited++
 			}
 			if i == 0 {

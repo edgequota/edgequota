@@ -221,7 +221,7 @@ func TestWebSocketSoak(t *testing.T) {
 
 		for i := 0; i < cycles; i++ {
 			wg.Add(1)
-			go func(cycle int) {
+			go func(_ int) {
 				defer wg.Done()
 
 				conn, err := net.DialTimeout("tcp", proxyServer.Listener.Addr().String(), 5*time.Second)

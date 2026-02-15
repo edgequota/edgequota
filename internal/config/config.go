@@ -361,7 +361,7 @@ type KeyStrategyConfig struct {
 
 	// TrustedProxies is a list of CIDR ranges whose X-Forwarded-For and
 	// X-Real-IP headers are trusted. When empty, proxy headers are always
-	// trusted (legacy behaviour). When set, proxy headers are only honoured
+	// trusted (legacy behavior). When set, proxy headers are only honored
 	// when RemoteAddr falls within one of these ranges.
 	TrustedProxies []string `yaml:"trusted_proxies" env:"TRUSTED_PROXIES" envSeparator:","`
 
@@ -418,7 +418,7 @@ type RedisConfig struct {
 }
 
 // RedactedString is a string that masks its value in String(), GoString(), and
-// MarshalJSON() to prevent accidental leakage in logs or serialised output.
+// MarshalJSON() to prevent accidental leakage in logs or serialized output.
 // Use .Value() to access the underlying secret.
 type RedactedString string
 

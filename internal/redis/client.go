@@ -178,7 +178,7 @@ func makeTLSConfig(opts *options) *tls.Config {
 		MinVersion: tls.VersionTLS12,
 	}
 	if opts.tlsSkipVerify {
-		cfg.InsecureSkipVerify = true //nolint:gosec // Configurable per-user choice; warning logged at startup.
+		cfg.InsecureSkipVerify = true
 	}
 	return cfg
 }

@@ -10,7 +10,7 @@ import (
 
 // FuzzClientIPExtract feeds adversarial RemoteAddr and X-Forwarded-For values
 // through the ClientIP key extractor to find panics, out-of-bounds, or
-// unexpected behaviour.
+// unexpected behavior.
 func FuzzClientIPExtract(f *testing.F) {
 	f.Add("192.168.1.1:8080", "", "")
 	f.Add("10.0.0.1:1234", "1.2.3.4, 5.6.7.8", "9.10.11.12")

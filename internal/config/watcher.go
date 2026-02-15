@@ -23,11 +23,11 @@ type WatcherCallback func(newCfg *Config)
 // Kubernetes ConfigMap/Secret volume updates, which swap symlinks at the
 // VFS layer and may not generate inotify events).
 type Watcher struct {
-	path     string
-	dir      string // parent directory — watched for Kubernetes symlink swaps.
-	callback WatcherCallback
-	logger   *slog.Logger
-	debounce time.Duration
+	path         string
+	dir          string // parent directory — watched for Kubernetes symlink swaps.
+	callback     WatcherCallback
+	logger       *slog.Logger
+	debounce     time.Duration
 	pollInterval time.Duration // how often to check content hash.
 
 	mu      sync.Mutex
@@ -48,8 +48,35 @@ func NewWatcher(path string, callback WatcherCallback, logger *slog.Logger) *Wat
 	}
 }
 
+// pollState tracks the content-hash and symlink-target state used by the
+// polling fallback in Watcher.Start.
+type pollState struct {
+	dataLink   string
+	lastHash   string
+	lastTarget string
+}
+
+// changed reports whether the config file content has changed since the
+// last snapshot, using the "..data" symlink target (fast) and then the
+// file content hash (slow) as detection signals.
+func (ps *pollState) changed(path string) bool {
+	// Fast path: Kubernetes "..data" symlink target changed.
+	if target := readlink(ps.dataLink); target != ps.lastTarget && target != "" {
+		ps.lastTarget = target
+		return true
+	}
+	// Slow path: content hash changed.
+	return hashFile(path) != ps.lastHash
+}
+
+// snapshot re-captures the current file hash and symlink target.
+func (ps *pollState) snapshot(path string) {
+	ps.lastHash = hashFile(path)
+	ps.lastTarget = readlink(ps.dataLink)
+}
+
 // Start begins watching the config file. Blocks until the context is
-// cancelled or Stop is called.
+// canceled or Stop is called.
 //
 // Two detection mechanisms run concurrently:
 //  1. fsnotify — gives sub-second reaction on real filesystems and editors
@@ -68,22 +95,15 @@ func (w *Watcher) Start(ctx context.Context) error {
 	}
 	defer watcher.Close()
 
-	// Watch the parent directory to catch Kubernetes ConfigMap/Secret
-	// symlink swaps (..data → new timestamped dir) when inotify works.
 	if err := watcher.Add(w.dir); err != nil {
 		return err
 	}
-
-	// Also watch the file directly for non-Kubernetes environments
-	// (e.g. direct file edits, editor save-and-rename).
 	_ = watcher.Add(w.path)
 
 	w.logger.Info("config watcher started", "path", w.path, "dir", w.dir)
 
-	// Capture initial state for polling comparison.
-	dataLink := filepath.Join(w.dir, "..data")
-	lastHash := hashFile(w.path)
-	lastLinkTarget := readlink(dataLink)
+	ps := &pollState{dataLink: filepath.Join(w.dir, "..data")}
+	ps.snapshot(w.path)
 
 	var debounceTimer *time.Timer
 	var debounceCh <-chan time.Time
@@ -101,48 +121,16 @@ func (w *Watcher) Start(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			// React to writes, creates (editor save-and-rename), and renames.
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.NewTimer(w.debounce)
-				debounceCh = debounceTimer.C
-
-				// Re-add the file path after a rename/create; some editors
-				// do atomic write (rename temp → target) which removes
-				// the old inode from the watch.
-				if event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-					_ = watcher.Add(w.path)
-				}
-			}
+			debounceTimer, debounceCh = w.handleFSEvent(event, watcher, debounceTimer)
 
 		case <-debounceCh:
 			debounceCh = nil
 			w.reload()
-			lastHash = hashFile(w.path)
-			lastLinkTarget = readlink(dataLink)
+			ps.snapshot(w.path)
 
 		case <-pollTicker.C:
-			// Polling fallback: detect changes that inotify missed
-			// (e.g. Kubernetes projected-volume symlink swaps).
-			//
-			// Fast path: check if the "..data" symlink target changed.
-			changed := false
-			if target := readlink(dataLink); target != lastLinkTarget && target != "" {
-				lastLinkTarget = target
-				changed = true
-			}
-
-			// Slow path: compare content hash.
-			if !changed {
-				if h := hashFile(w.path); h != lastHash {
-					changed = true
-				}
-			}
-
-			if changed {
-				lastHash = hashFile(w.path)
+			if ps.changed(w.path) {
+				ps.snapshot(w.path)
 				w.logger.Debug("config file change detected via polling", "path", w.path)
 				w.reload()
 			}
@@ -154,6 +142,36 @@ func (w *Watcher) Start(ctx context.Context) error {
 			w.logger.Error("config watcher error", "error", watchErr)
 		}
 	}
+}
+
+// handleFSEvent processes a single fsnotify event and returns the updated
+// debounce timer and channel. Only write/create/rename events trigger a
+// debounced reload.
+func (w *Watcher) handleFSEvent(
+	event fsnotify.Event,
+	watcher *fsnotify.Watcher,
+	timer *time.Timer,
+) (*time.Timer, <-chan time.Time) {
+	if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Rename) {
+		var ch <-chan time.Time
+		if timer != nil {
+			ch = timer.C
+		}
+		return timer, ch
+	}
+
+	if timer != nil {
+		timer.Stop()
+	}
+	timer = time.NewTimer(w.debounce)
+
+	// Re-add the file path after a rename/create; some editors do atomic
+	// write (rename temp → target) which removes the old inode from the watch.
+	if event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
+		_ = watcher.Add(w.path)
+	}
+
+	return timer, timer.C
 }
 
 // hashFile returns the SHA-256 hex digest of the file at path, or an
@@ -236,7 +254,7 @@ func NewCertWatcher(certFile, keyFile string, callback CertCallback, logger *slo
 }
 
 // Start begins polling the certificate files. Blocks until the context is
-// cancelled or Stop is called.
+// canceled or Stop is called.
 //
 // Detection uses two signals, whichever fires first:
 //  1. Symlink-target change on the parent directory's "..data" link

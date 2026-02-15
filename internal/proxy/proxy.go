@@ -144,7 +144,7 @@ func New(
 	}
 
 	// Apply options early so backendTLSInsecure is known before building
-	// transports. Options may set TLS behaviour for all protocol paths.
+	// transports. Options may set TLS behavior for all protocol paths.
 	p := &Proxy{
 		backendURL: target,
 		logger:     logger,

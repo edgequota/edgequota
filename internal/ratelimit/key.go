@@ -32,7 +32,7 @@ type KeyStrategy interface {
 
 // ClientIPStrategy extracts the client IP from standard proxy headers or
 // RemoteAddr. When TrustedProxies is configured, proxy headers (X-Forwarded-For,
-// X-Real-IP) are only honoured when RemoteAddr falls within a trusted CIDR range.
+// X-Real-IP) are only honored when RemoteAddr falls within a trusted CIDR range.
 // TrustedIPDepth controls which X-Forwarded-For entry is selected (0 = leftmost,
 // N > 0 = Nth from the right).
 type ClientIPStrategy struct {

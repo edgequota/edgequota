@@ -912,8 +912,20 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		oldFB.Close()
 	}
 
-	// Rebuild auth client only if auth config actually changed. This avoids
-	// destroying the HTTP transport's connection pool on rate-limit-only reloads.
+	c.reloadAuth(prevCfg, newCfg)
+	c.reloadExternalRL(newCfg)
+
+	c.logger.Info("middleware chain reloaded",
+		"average", newCfg.RateLimit.Average, "burst", p.burst,
+		"period", p.period, "policy", p.failurePolicy)
+
+	return nil
+}
+
+// reloadAuth rebuilds the auth client only if the auth config actually
+// changed. This avoids destroying the HTTP transport's connection pool on
+// rate-limit-only reloads.
+func (c *Chain) reloadAuth(prevCfg, newCfg *config.Config) {
 	authChanged := prevCfg == nil ||
 		newCfg.Auth.Enabled != prevCfg.Auth.Enabled ||
 		newCfg.Auth.HTTP.URL != prevCfg.Auth.HTTP.URL ||
@@ -921,37 +933,35 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		newCfg.Auth.Timeout != prevCfg.Auth.Timeout ||
 		newCfg.Auth.FailurePolicy != prevCfg.Auth.FailurePolicy
 
-	if newCfg.Auth.Enabled && authChanged {
-		newAuth, authErr := auth.NewClient(newCfg.Auth)
-		if authErr != nil {
-			c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
-		} else {
-			oldAuth := c.authClient.Swap(newAuth)
-			if oldAuth != nil {
-				_ = oldAuth.Close()
-			}
-		}
+	if !newCfg.Auth.Enabled || !authChanged {
+		return
 	}
-
-	// Rebuild external RL client if config changed.
-	if newCfg.RateLimit.External.Enabled {
-		cacheClient := c.resolveCacheRedis(newCfg, c.logger)
-		newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient)
-		if extErr != nil {
-			c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
-		} else {
-			oldExt := c.externalRL.Swap(newExt)
-			if oldExt != nil {
-				_ = oldExt.Close()
-			}
-		}
+	newAuth, authErr := auth.NewClient(newCfg.Auth)
+	if authErr != nil {
+		c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
+		return
 	}
+	oldAuth := c.authClient.Swap(newAuth)
+	if oldAuth != nil {
+		_ = oldAuth.Close()
+	}
+}
 
-	c.logger.Info("middleware chain reloaded",
-		"average", newCfg.RateLimit.Average, "burst", p.burst,
-		"period", p.period, "policy", p.failurePolicy)
-
-	return nil
+// reloadExternalRL rebuilds the external rate-limit client if enabled.
+func (c *Chain) reloadExternalRL(newCfg *config.Config) {
+	if !newCfg.RateLimit.External.Enabled {
+		return
+	}
+	cacheClient := c.resolveCacheRedis(newCfg, c.logger)
+	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient)
+	if extErr != nil {
+		c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
+		return
+	}
+	oldExt := c.externalRL.Swap(newExt)
+	if oldExt != nil {
+		_ = oldExt.Close()
+	}
 }
 
 func (c *Chain) Close() error {

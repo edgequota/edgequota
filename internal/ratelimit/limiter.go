@@ -19,7 +19,7 @@ import (
 // after the limiter has been closed.
 var ErrLimiterClosed = errors.New("limiter is closed")
 
-// tokenBucketSrc is the Lua source for atomic token-bucket rate limiting.
+// rateLimitLua is the Lua source for atomic token-bucket rate limiting.
 //
 // Uses HMGET for deterministic field ordering.
 // Returns {allowed (0|1), retry_after_micros, remaining_tokens, limit, reset_after_micros}.
@@ -31,7 +31,7 @@ var ErrLimiterClosed = errors.New("limiter is closed")
 //
 // Keys: KEYS[1] = rate-limit key.
 // Args: ARGV[1] = rate (tokens/μs), ARGV[2] = burst, ARGV[3] = TTL (s), ARGV[4] = now (μs).
-const tokenBucketSrc = `
+const rateLimitLua = `
 local key   = KEYS[1]
 local rate  = tonumber(ARGV[1])
 local burst = tonumber(ARGV[2])
@@ -87,7 +87,7 @@ return {0, retry, 0, burst, reset_after}
 
 // tokenBucketScript uses go-redis to compute the SHA1 hash that Redis expects
 // for EVALSHA, avoiding a direct crypto/sha1 import in this package.
-var tokenBucketScript = goredis.NewScript(tokenBucketSrc)
+var tokenBucketScript = goredis.NewScript(rateLimitLua)
 
 // Result holds the parsed result of a rate-limit check.
 type Result struct {
@@ -114,7 +114,7 @@ type Limiter struct {
 func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int, prefix string) *Limiter {
 	return &Limiter{
 		client:    client,
-		src:       tokenBucketSrc,
+		src:       rateLimitLua,
 		hash:      tokenBucketScript.Hash(),
 		rate:      ratePerSecond / 1e6, // convert to per-microsecond
 		burst:     burst,

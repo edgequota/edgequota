@@ -333,7 +333,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.certs = ch
 
 		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
-		tlsCfg := &tls.Config{
+		tlsCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
 			MinVersion:     minVer,
 			GetCertificate: ch.GetCertificate,
 		}

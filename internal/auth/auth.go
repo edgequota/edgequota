@@ -54,10 +54,10 @@ type circuitBreaker struct {
 	resetTimeout time.Duration
 }
 
-func newCircuitBreaker(threshold int, resetTimeout time.Duration) *circuitBreaker {
+func newCircuitBreaker() *circuitBreaker {
 	return &circuitBreaker{
-		threshold:    threshold,
-		resetTimeout: resetTimeout,
+		threshold:    defaultAuthCBThreshold,
+		resetTimeout: defaultAuthCBResetTimeout,
 	}
 }
 
@@ -151,7 +151,7 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		timeout:                timeout,
 		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
-		cb:                     newCircuitBreaker(defaultAuthCBThreshold, defaultAuthCBResetTimeout),
+		cb:                     newCircuitBreaker(),
 	}
 
 	if cfg.GRPC.Address != "" {

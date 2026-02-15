@@ -45,7 +45,7 @@ type ExternalLimits struct {
 
 	// FailurePolicy overrides the static failure_policy for this request when
 	// Redis is unavailable. This allows an external service to dynamically
-	// switch behaviour — e.g. "passthrough" during planned maintenance, or
+	// switch behavior — e.g. "passthrough" during planned maintenance, or
 	// "failclosed" during an active attack. Zero-value ("") means no override.
 	FailurePolicy config.FailurePolicy `json:"failure_policy,omitempty"`
 

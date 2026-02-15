@@ -7,7 +7,7 @@ import (
 )
 
 // FuzzLoadFromYAML feeds random YAML through the config loader to find panics,
-// unhandled errors, or unexpected behaviour in the parsing and validation logic.
+// unhandled errors, or unexpected behavior in the parsing and validation logic.
 func FuzzLoadFromYAML(f *testing.F) {
 	// Seed corpus with a minimal valid config.
 	f.Add([]byte(`
