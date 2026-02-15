@@ -1,0 +1,54 @@
+// EdgeQuota Auth Service API
+//
+// External authentication services must implement this gRPC service.
+// EdgeQuota calls Check() for every incoming request when auth is enabled.
+//
+// Proto definitions are published on the Buf Schema Registry:
+//   buf.build/edgequota/edgequota
+//
+// Generate Go client/server stubs:
+//   buf generate
+
+syntax = "proto3";
+
+package edgequota.auth.v1;
+
+option go_package = "github.com/edgequota/edgequota/api/gen/auth/v1;authv1";
+
+// AuthService validates incoming requests against an external auth backend.
+service AuthService {
+  // Check verifies whether a request should be allowed or denied.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// CheckRequest contains the original request metadata forwarded by EdgeQuota.
+message CheckRequest {
+  // HTTP method (GET, POST, etc.).
+  string method = 1;
+  // Request path (e.g. /api/v1/resource).
+  string path = 2;
+  // Flattened request headers (first value per key).
+  map<string, string> headers = 3;
+  // Client remote address (ip:port).
+  string remote_addr = 4;
+}
+
+// CheckResponse indicates whether the request is allowed or denied.
+message CheckResponse {
+  // Whether the request is allowed to proceed.
+  bool allowed = 1;
+  // HTTP status code to return when denied (e.g. 401, 403).
+  int32 status_code = 2;
+  
+  // Headers to inject into the upstream request when allowed.
+  // Use this to pass auth-derived metadata (e.g. tenant ID, plan tier)
+  // to downstream middleware stages such as rate limiting and the backend.
+  // These headers overwrite any client-sent headers with the same name.
+  map<string, string> request_headers = 5;
+
+  // Response body to send when denied.
+  string deny_body = 4;
+
+  // Additional headers to set on the deny response.
+  map<string, string> response_headers = 3;
+}

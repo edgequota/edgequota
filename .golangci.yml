@@ -1,0 +1,85 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - ineffassign
+    - goconst
+    - gocyclo
+    - misspell
+    - unconvert
+    - unparam
+    - nakedret
+    - prealloc
+    - revive
+    - gosec
+    - godot
+    - godox
+    - funlen
+    - whitespace
+    - predeclared
+    - nolintlint
+    - makezero
+    - thelper
+    - usestdlibvars
+    - reassign
+    - wastedassign
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    gocyclo:
+      min-complexity: 15
+    goconst:
+      min-len: 5
+      min-occurrences: 4
+    misspell:
+      locale: US
+    funlen:
+      lines: -1
+      statements: 60
+    godox:
+      keywords:
+        - FIXME
+    revive:
+      rules:
+        - name: context-as-argument
+          disabled: true
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - goconst
+          - funlen
+          - godot
+          - gosec
+          - revive
+          - staticcheck
+          - govet

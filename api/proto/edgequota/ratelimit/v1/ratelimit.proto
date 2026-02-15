@@ -1,0 +1,60 @@
+// EdgeQuota Rate Limit Service API
+//
+// External rate limit services must implement this gRPC service.
+// EdgeQuota calls GetLimits() to fetch dynamic per-key rate limits
+// when the external rate limit feature is enabled.
+//
+// Proto definitions are published on the Buf Schema Registry:
+//   buf.build/edgequota/edgequota
+//
+// Generate Go client/server stubs:
+//   buf generate
+
+syntax = "proto3";
+
+package edgequota.ratelimit.v1;
+
+option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1;ratelimitv1";
+
+// RateLimitService provides dynamic rate limit configuration.
+service RateLimitService {
+  // GetLimits returns the rate limit parameters for a given key.
+  rpc GetLimits(GetLimitsRequest) returns (GetLimitsResponse);
+}
+
+// GetLimitsRequest identifies the client and context for limit lookup.
+message GetLimitsRequest {
+  // Rate limit bucket key (e.g. tenant ID, client IP).
+  string key = 1;
+  // Flattened request headers for context.
+  map<string, string> headers = 2;
+  // HTTP method.
+  string method = 3;
+  // Request path.
+  string path = 4;
+}
+
+// GetLimitsResponse contains the rate limit parameters and optional cache
+// control directives. These fields allow the external service to control how
+// long EdgeQuota caches this response — consistent across HTTP and gRPC.
+//
+// For HTTP responses, standard Cache-Control / Expires headers take precedence
+// over these body fields. When no HTTP cache headers are present, the body
+// fields are used. For gRPC, these body fields are the only way to control
+// cache behaviour.
+message GetLimitsResponse {
+  // Maximum number of requests per period (0 = unlimited).
+  int64 average = 1;
+  // Maximum burst size.
+  int64 burst = 2;
+  // Duration string (e.g. "1s", "1m").
+  string period = 3;
+
+  // Cache control (optional). When omitted, the configured default TTL is used.
+
+  // Cache duration in seconds. When present and > 0, overrides the default
+  // cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
+  optional int64 cache_max_age_seconds = 4;
+  // If true, the response must not be cached.
+  bool cache_no_store = 5;
+}

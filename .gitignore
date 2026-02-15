@@ -1,0 +1,22 @@
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Build artifacts
+bin/
+coverage.out
+*.test
+
+# Old e2e artifacts
+e2e/e2e
+
+# Terraform
+e2e/terraform/.terraform/
+e2e/terraform/.terraform.lock.hcl
+e2e/terraform/terraform.tfstate*
+
+# Go vendor (optional, uncomment if vendoring)
+# vendor/
+
+e2e/testbackend/testbackend
