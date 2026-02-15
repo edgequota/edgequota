@@ -61,7 +61,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 		}
 
 		// Circuit should be open now.
-		assert.True(t, c.isCircuitOpen(), "circuit breaker should be open after threshold failures")
+		assert.True(t, c.isCircuitOpen("cb-fail"), "circuit breaker should be open after threshold failures")
 
 		// With circuit open, stale cache should be returned for the seeded key.
 		staleLimits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cb-test"})
@@ -120,7 +120,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "reset-test"})
 		}
-		assert.True(t, c.isCircuitOpen())
+		assert.True(t, c.isCircuitOpen("reset-test"))
 
 		// Wait for circuit to enter half-open state.
 		time.Sleep(20 * time.Millisecond)
@@ -131,7 +131,7 @@ func TestCircuitBreakerConformance(t *testing.T) {
 		assert.Equal(t, int64(200), limits.Average)
 
 		// Circuit should be closed now.
-		assert.False(t, c.isCircuitOpen())
+		assert.False(t, c.isCircuitOpen("reset-test"))
 	})
 }
 

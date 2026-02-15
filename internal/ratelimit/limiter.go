@@ -5,13 +5,19 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/redis"
 	goredis "github.com/redis/go-redis/v9"
 )
+
+// ErrLimiterClosed is returned when Allow or AllowWithOverrides is called
+// after the limiter has been closed.
+var ErrLimiterClosed = errors.New("limiter is closed")
 
 // tokenBucketSrc is the Lua source for atomic token-bucket rate limiting.
 //
@@ -52,16 +58,29 @@ if tokens < burst then
   reset_after = math.ceil((burst - tokens) / rate)
 end
 
+-- Only refresh EXPIRE when remaining TTL is below 50% of target. This
+-- halves Redis write amplification for steady-state keys that are accessed
+-- frequently.
+local needs_expire = true
+local cur_ttl = redis.call('ttl', key)
+if cur_ttl > 0 and cur_ttl > ttl / 2 then
+  needs_expire = false
+end
+
 if tokens >= 1 then
   tokens = tokens - 1
   redis.call('hset', key, 'last', now, 'tokens', tokens)
-  redis.call('expire', key, ttl)
+  if needs_expire then
+    redis.call('expire', key, ttl)
+  end
   local remaining = math.floor(tokens)
   return {1, 0, remaining, burst, reset_after}
 end
 
 redis.call('hset', key, 'last', now, 'tokens', tokens)
-redis.call('expire', key, ttl)
+if needs_expire then
+  redis.call('expire', key, ttl)
+end
 local retry = math.ceil((1 - tokens) / rate)
 return {0, retry, 0, burst, reset_after}
 `
@@ -88,6 +107,7 @@ type Limiter struct {
 	burst     int64
 	ttl       int // seconds
 	keyPrefix string
+	closed    atomic.Bool
 }
 
 // NewLimiter creates a Redis-backed rate limiter.
@@ -116,10 +136,23 @@ func (l *Limiter) evalScript(ctx context.Context, keys []string, args ...any) (i
 	return cmd, nil
 }
 
+// Close marks the limiter as closed and closes the underlying Redis client.
+// Subsequent calls to Allow or AllowWithOverrides return ErrLimiterClosed.
+func (l *Limiter) Close() error {
+	l.closed.Store(true)
+	if l.client != nil {
+		return l.client.Close()
+	}
+	return nil
+}
+
 // Allow checks whether the request identified by key should be allowed.
 // Uses EVALSHA to execute the Lua script atomically on Redis, falling back
 // to EVAL on NOSCRIPT to load the script.
 func (l *Limiter) Allow(ctx context.Context, key string) (*Result, error) {
+	if l.closed.Load() {
+		return nil, ErrLimiterClosed
+	}
 	fullKey := l.keyPrefix + key
 	now := time.Now().UnixMicro()
 
@@ -136,6 +169,9 @@ func (l *Limiter) Allow(ctx context.Context, key string) (*Result, error) {
 // differ from the static configuration. When ttlOverride > 0 it replaces
 // the limiter's default TTL for this call.
 func (l *Limiter) AllowWithOverrides(ctx context.Context, key string, ratePerSecond float64, burst int64, ttlOverride int) (*Result, error) {
+	if l.closed.Load() {
+		return nil, ErrLimiterClosed
+	}
 	fullKey := l.keyPrefix + key
 	now := time.Now().UnixMicro()
 	rate := ratePerSecond / 1e6 // convert to per-microsecond

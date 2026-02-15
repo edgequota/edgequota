@@ -60,6 +60,23 @@ jobs:
             exit 1
           fi
 
+      - name: Enforce per-package coverage minimums (70%)
+        run: |
+          FAILED=0
+          for PKG in ./internal/middleware ./internal/ratelimit ./internal/proxy ./internal/redis ./internal/auth; do
+            COV=$(go test -count=1 -coverprofile=/dev/null -covermode=atomic "$PKG" 2>&1 | \
+              grep 'coverage:' | sed 's/.*coverage: \([0-9.]*\)%.*/\1/')
+            if [ -z "$COV" ]; then COV="0.0"; fi
+            RESULT=$(echo "$COV < 70.0" | bc -l 2>/dev/null || echo 0)
+            if [ "$RESULT" = "1" ]; then
+              echo "FAIL: $PKG coverage ${COV}% < 70%"
+              FAILED=1
+            else
+              echo "OK:   $PKG coverage ${COV}%"
+            fi
+          done
+          if [ $FAILED -eq 1 ]; then exit 1; fi
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         if: always()

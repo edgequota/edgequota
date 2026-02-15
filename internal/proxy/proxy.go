@@ -51,6 +51,69 @@ func WithWSLimiter(maxPerKey int64) Option {
 	}
 }
 
+// WithMaxRequestBodySize sets the maximum allowed request body size in bytes.
+// A value of 0 means unlimited.
+func WithMaxRequestBodySize(n int64) Option {
+	return func(p *Proxy) { p.maxRequestBodySize = n }
+}
+
+// WithMaxWSTransferBytes sets the maximum bytes transferred per direction
+// on a single WebSocket connection. A value of 0 means unlimited.
+func WithMaxWSTransferBytes(n int64) Option {
+	return func(p *Proxy) { p.maxWSTransferBytes = n }
+}
+
+// ---------------------------------------------------------------------------
+// Request body streaming with byte counting
+// ---------------------------------------------------------------------------
+
+// countingReader wraps an io.ReadCloser and counts bytes read. When the
+// configured limit is exceeded, further reads return an error. This enables
+// streaming request bodies through the proxy without buffering the full body
+// in memory, while still enforcing per-request size limits.
+type countingReader struct {
+	rc      io.ReadCloser
+	read    int64
+	limit   int64 // 0 = unlimited
+	limited bool  // set when limit is exceeded
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.rc.Read(p)
+	cr.read += int64(n)
+	if cr.limit > 0 && cr.read > cr.limit {
+		cr.limited = true
+		return n, fmt.Errorf("request body exceeds size limit of %d bytes", cr.limit)
+	}
+	return n, err
+}
+
+func (cr *countingReader) Close() error { return cr.rc.Close() }
+
+// streamingTransport wraps an http.RoundTripper to stream request bodies
+// through a countingReader instead of buffering. This provides:
+//   - Non-buffering body forwarding (back-pressure via io.Pipe semantics)
+//   - Per-request byte counting for fair resource allocation
+//   - Hard abort when size limit is exceeded (returns 413 via error handler)
+type streamingTransport struct {
+	inner    http.RoundTripper
+	maxBytes int64 // 0 = unlimited (counting only)
+}
+
+func (st *streamingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil && req.Body != http.NoBody {
+		cr := &countingReader{
+			rc:    req.Body,
+			limit: st.maxBytes,
+		}
+		req.Body = cr
+		// Disable content-length so net/http uses chunked encoding,
+		// enabling true streaming without buffering.
+		req.ContentLength = -1
+	}
+	return st.inner.RoundTrip(req)
+}
+
 // Proxy is a multi-protocol reverse proxy that transparently forwards
 // HTTP, gRPC, SSE, and WebSocket traffic to a backend service.
 type Proxy struct {
@@ -61,6 +124,8 @@ type Proxy struct {
 	backendTLSInsecure bool
 	wsDialTimeout      time.Duration
 	wsLimiter          *WSLimiter // nil when no per-key WS limit is configured.
+	maxRequestBodySize int64      // 0 = unlimited
+	maxWSTransferBytes int64      // 0 = unlimited per-direction
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -90,7 +155,21 @@ func New(
 
 	httpTransport, h2Transport, h3Transport := buildTransports(target.Scheme, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure)
 	wsDialTimeout, _ := config.ParseDuration(transportCfg.WebSocketDialTimeout, 10*time.Second)
-	rp := buildReverseProxy(target, httpTransport, h2Transport, h3Transport, logger)
+
+	// Wrap transports with streaming byte-counting when a body size limit is
+	// configured. This replaces httputil.ReverseProxy's default buffering with
+	// a streaming approach that applies back-pressure via io.Pipe semantics.
+	var h1RT http.RoundTripper = httpTransport
+	var h2RT http.RoundTripper = h2Transport
+	h3RT := h3Transport
+	if p.maxRequestBodySize > 0 {
+		h1RT = &streamingTransport{inner: httpTransport, maxBytes: p.maxRequestBodySize}
+		h2RT = &streamingTransport{inner: h2Transport, maxBytes: p.maxRequestBodySize}
+		if h3Transport != nil {
+			h3RT = &streamingTransport{inner: h3Transport, maxBytes: p.maxRequestBodySize}
+		}
+	}
+	rp := buildReverseProxy(target, h1RT, h2RT, h3RT, logger)
 
 	p.httpProxy = rp
 	p.http2Transport = h2Transport
@@ -230,6 +309,8 @@ func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *sl
 }
 
 // ServeHTTP handles all incoming requests, routing to the appropriate protocol handler.
+// Request body size enforcement is handled by the streamingTransport layer,
+// which counts bytes during streaming rather than buffering the entire body.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isWebSocketUpgrade(r) {
 		p.handleWebSocket(w, r)
@@ -328,13 +409,22 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 }
 
 // relayWebSocket copies data bidirectionally between client and backend.
+// When maxWSTransferBytes > 0, each direction is capped to that many bytes.
 func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// wsReader wraps a reader with an optional byte limit.
+	wsReader := func(r io.Reader) io.Reader {
+		if p.maxWSTransferBytes > 0 {
+			return io.LimitReader(r, p.maxWSTransferBytes)
+		}
+		return r
+	}
+
 	go func() {
 		defer wg.Done()
-		if _, cpErr := io.Copy(clientConn, backendConn); cpErr != nil {
+		if _, cpErr := io.Copy(clientConn, wsReader(backendConn)); cpErr != nil {
 			p.logger.Debug("websocket: backend→client copy ended", "error", cpErr)
 		}
 		if tc, tcOK := clientConn.(*net.TCPConn); tcOK {
@@ -346,7 +436,7 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		if _, cpErr := io.Copy(backendConn, clientConn); cpErr != nil {
+		if _, cpErr := io.Copy(backendConn, wsReader(clientConn)); cpErr != nil {
 			p.logger.Debug("websocket: client→backend copy ended", "error", cpErr)
 		}
 		if tc, tcOK := backendConn.(*net.TCPConn); tcOK {

@@ -52,12 +52,13 @@ type CheckResponse struct {
 
 // Client calls an external authentication service to verify requests.
 type Client struct {
-	httpURL      string
-	grpcClient   authv1.AuthServiceClient // generated typed client
-	grpcConn     *grpc.ClientConn
-	httpClient   *http.Client
-	timeout      time.Duration
-	headerFilter *config.HeaderFilter
+	httpURL                string
+	grpcClient             authv1.AuthServiceClient // generated typed client
+	grpcConn               *grpc.ClientConn
+	httpClient             *http.Client
+	timeout                time.Duration
+	headerFilter           *config.HeaderFilter
+	forwardOriginalHeaders bool // when true, forward X-Original-* HTTP headers
 }
 
 // NewClient creates an auth client from the configuration.
@@ -81,10 +82,11 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 	}
 
 	c := &Client{
-		httpURL:      cfg.HTTP.URL,
-		httpClient:   &http.Client{Timeout: timeout, Transport: transport},
-		timeout:      timeout,
-		headerFilter: config.NewHeaderFilter(cfg.HeaderFilter),
+		httpURL:                cfg.HTTP.URL,
+		httpClient:             &http.Client{Timeout: timeout, Transport: transport},
+		timeout:                timeout,
+		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
+		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
 	}
 
 	if cfg.GRPC.Address != "" {
@@ -136,9 +138,13 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Forward original request headers for context.
-	for k, v := range req.Headers {
-		httpReq.Header.Set("X-Original-"+k, v)
+	// Optionally forward original request headers as X-Original-* HTTP headers.
+	// Disabled by default to prevent credential leakage via a secondary channel;
+	// the request body already contains the filtered headers as JSON.
+	if c.forwardOriginalHeaders {
+		for k, v := range req.Headers {
+			httpReq.Header.Set("X-Original-"+k, v)
+		}
 	}
 
 	resp, err := c.httpClient.Do(httpReq)

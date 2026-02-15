@@ -67,6 +67,11 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 		return nil, fmt.Errorf("create middleware chain: %w", err)
 	}
 
+	// Register the Redis pinger for deep health checks.
+	if pinger := chain.RedisPinger(); pinger != nil {
+		health.SetRedisPinger(pinger)
+	}
+
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
 	adminServer := buildAdminServer(cfg, health, reg)
 
@@ -100,6 +105,12 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	}
 	if cfg.Server.MaxWebSocketConnsPerKey > 0 {
 		proxyOpts = append(proxyOpts, proxy.WithWSLimiter(cfg.Server.MaxWebSocketConnsPerKey))
+	}
+	if cfg.Backend.MaxRequestBodySize > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithMaxRequestBodySize(cfg.Backend.MaxRequestBodySize))
+	}
+	if cfg.Server.MaxWebSocketTransferBytes > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithMaxWSTransferBytes(cfg.Server.MaxWebSocketTransferBytes))
 	}
 
 	rp, err := proxy.New(
@@ -165,6 +176,57 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	return srv, h3srv
 }
 
+// adminRateLimiter provides a simple in-process rate limiter for the admin
+// server. It uses a token bucket that refills at `rate` tokens per second,
+// allowing bursts up to `burst`. Protects admin endpoints from accidental
+// exposure or scraping abuse.
+type adminRateLimiter struct {
+	handler http.Handler
+	tokens  atomic.Int64
+	burst   int64
+}
+
+func newAdminRateLimiter(handler http.Handler, burst int64) *adminRateLimiter {
+	rl := &adminRateLimiter{handler: handler, burst: burst}
+	rl.tokens.Store(burst)
+	// Refill tokens every 100ms (rate = burst per second).
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			refill := burst / 10
+			if refill < 1 {
+				refill = 1
+			}
+			for {
+				cur := rl.tokens.Load()
+				next := cur + refill
+				if next > burst {
+					next = burst
+				}
+				if rl.tokens.CompareAndSwap(cur, next) {
+					break
+				}
+			}
+		}
+	}()
+	return rl
+}
+
+func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	for {
+		cur := rl.tokens.Load()
+		if cur <= 0 {
+			http.Error(w, "admin rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		if rl.tokens.CompareAndSwap(cur, cur-1) {
+			break
+		}
+	}
+	rl.handler.ServeHTTP(w, r)
+}
+
 func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry) *http.Server {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
@@ -178,9 +240,13 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 		EnableOpenMetrics: true,
 	}))
 
+	// Wrap the admin mux in a rate limiter (100 req/s burst).
+	var adminHandler http.Handler = adminMux
+	adminHandler = newAdminRateLimiter(adminHandler, 100)
+
 	return &http.Server{
 		Addr:              cfg.Admin.Address,
-		Handler:           adminMux,
+		Handler:           adminHandler,
 		ReadTimeout:       adminReadTimeout,
 		WriteTimeout:      adminWriteTimeout,
 		IdleTimeout:       adminIdleTimeout,
@@ -235,6 +301,29 @@ func (s *Server) Run(ctx context.Context) error {
 		tracingShutdown = func(_ context.Context) error { return nil }
 	}
 	s.tracingShutdown = tracingShutdown
+
+	// Initialize TLS up-front so that both the main TCP server and the
+	// HTTP/3 (QUIC) server share the same TLSConfig from the start. This
+	// eliminates a race where startHTTP3Server could call ListenAndServe
+	// before startMainServerWithReady has created and assigned TLSConfig.
+	if s.cfg.Server.TLS.Enabled {
+		ch, certErr := newCertHolder(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+		if certErr != nil {
+			return certErr
+		}
+		s.certs = ch
+
+		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
+		tlsCfg := &tls.Config{
+			MinVersion:     minVer,
+			GetCertificate: ch.GetCertificate,
+		}
+		s.mainServer.TLSConfig = tlsCfg
+
+		if s.http3Server != nil {
+			s.http3Server.TLSConfig = tlsCfg
+		}
+	}
 
 	errCh := make(chan error, 3)
 
@@ -295,28 +384,9 @@ func (s *Server) startMainServerWithReady(errCh chan<- error, readyCh chan struc
 
 	var err error
 	if s.cfg.Server.TLS.Enabled {
-		// Create a certHolder for hot-reload support.
-		ch, certErr := newCertHolder(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
-		if certErr != nil {
-			errCh <- certErr
-			return
-		}
-		s.certs = ch
-
-		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
-		tlsCfg := &tls.Config{
-			MinVersion:     minVer,
-			GetCertificate: ch.GetCertificate,
-		}
-		s.mainServer.TLSConfig = tlsCfg
-
-		// Share the same TLS config with the HTTP/3 server so both
-		// listeners enforce identical MinVersion and ciphers.
-		if s.http3Server != nil {
-			s.http3Server.TLSConfig = tlsCfg
-		}
-
-		tlsLn := tls.NewListener(ln, tlsCfg)
+		// TLSConfig and certHolder are initialized in Run() before any
+		// server goroutines start, so mainServer.TLSConfig is ready here.
+		tlsLn := tls.NewListener(ln, s.mainServer.TLSConfig)
 		err = s.mainServer.Serve(tlsLn)
 	} else {
 		err = s.mainServer.Serve(ln)
@@ -329,7 +399,12 @@ func (s *Server) startMainServerWithReady(errCh chan<- error, readyCh chan struc
 
 func (s *Server) startHTTP3Server(errCh chan<- error) {
 	s.logger.Info("HTTP/3 (QUIC) server starting", "address", s.cfg.Server.Address)
-	err := s.http3Server.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+
+	// Use ListenAndServe (not ListenAndServeTLS) so that the HTTP/3 server
+	// uses the shared TLSConfig with GetCertificate, enabling hot-reload of
+	// TLS certificates. ListenAndServeTLS reads certs from disk once at
+	// startup, bypassing the certHolder hot-reload mechanism.
+	err := s.http3Server.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
 		errCh <- fmt.Errorf("HTTP/3 server: %w", err)
 	}

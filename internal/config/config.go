@@ -8,6 +8,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -129,6 +130,22 @@ func (v TLSVersion) Valid() bool {
 	return false
 }
 
+// AuthFailurePolicy controls behavior when the auth service is unreachable.
+type AuthFailurePolicy string
+
+const (
+	AuthFailurePolicyFailClosed AuthFailurePolicy = "failclosed"
+	AuthFailurePolicyFailOpen   AuthFailurePolicy = "failopen"
+)
+
+func (p AuthFailurePolicy) Valid() bool {
+	switch p {
+	case AuthFailurePolicyFailClosed, AuthFailurePolicyFailOpen, "":
+		return true
+	}
+	return false
+}
+
 // Config is the top-level EdgeQuota configuration.
 type Config struct {
 	Server     ServerConfig    `yaml:"server"      envPrefix:"SERVER_"`
@@ -154,6 +171,10 @@ type ServerConfig struct {
 	// MaxWebSocketConnsPerKey limits the number of concurrent WebSocket
 	// connections per rate-limit key (client/tenant). 0 means unlimited.
 	MaxWebSocketConnsPerKey int64 `yaml:"max_websocket_conns_per_key" env:"MAX_WEBSOCKET_CONNS_PER_KEY"`
+
+	// MaxWebSocketTransferBytes limits the total bytes transferred per
+	// direction on a single WebSocket connection. 0 means unlimited.
+	MaxWebSocketTransferBytes int64 `yaml:"max_websocket_transfer_bytes" env:"MAX_WEBSOCKET_TRANSFER_BYTES"`
 }
 
 // ServerTLSConfig holds optional TLS termination settings.
@@ -175,12 +196,13 @@ type AdminConfig struct {
 
 // BackendConfig defines the upstream backend to proxy requests to.
 type BackendConfig struct {
-	URL               string          `yaml:"url"                      env:"URL"`
-	Timeout           string          `yaml:"timeout"                  env:"TIMEOUT"`
-	MaxIdleConns      int             `yaml:"max_idle_conns"           env:"MAX_IDLE_CONNS"`
-	IdleConnTimeout   string          `yaml:"idle_conn_timeout"        env:"IDLE_CONN_TIMEOUT"`
-	TLSInsecureVerify bool            `yaml:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
-	Transport         TransportConfig `yaml:"transport"                envPrefix:"TRANSPORT_"`
+	URL                string          `yaml:"url"                      env:"URL"`
+	Timeout            string          `yaml:"timeout"                  env:"TIMEOUT"`
+	MaxIdleConns       int             `yaml:"max_idle_conns"           env:"MAX_IDLE_CONNS"`
+	IdleConnTimeout    string          `yaml:"idle_conn_timeout"        env:"IDLE_CONN_TIMEOUT"`
+	TLSInsecureVerify  bool            `yaml:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
+	MaxRequestBodySize int64           `yaml:"max_request_body_size"    env:"MAX_REQUEST_BODY_SIZE"` // bytes; 0=unlimited
+	Transport          TransportConfig `yaml:"transport"                envPrefix:"TRANSPORT_"`
 }
 
 // TransportConfig holds low-level HTTP transport tuning for the proxy.
@@ -288,16 +310,18 @@ func (hf *HeaderFilter) FilterHeaders(headers map[string]string) map[string]stri
 
 // AuthConfig holds optional external authentication service settings.
 type AuthConfig struct {
-	Enabled      bool               `yaml:"enabled"       env:"ENABLED"`
-	Timeout      string             `yaml:"timeout"       env:"TIMEOUT"`
-	HTTP         AuthHTTPConfig     `yaml:"http"          envPrefix:"HTTP_"`
-	GRPC         AuthGRPCConfig     `yaml:"grpc"          envPrefix:"GRPC_"`
-	HeaderFilter HeaderFilterConfig `yaml:"header_filter" envPrefix:"HEADER_FILTER_"`
+	Enabled       bool               `yaml:"enabled"        env:"ENABLED"`
+	Timeout       string             `yaml:"timeout"        env:"TIMEOUT"`
+	FailurePolicy AuthFailurePolicy  `yaml:"failure_policy" env:"FAILURE_POLICY"`
+	HTTP          AuthHTTPConfig     `yaml:"http"           envPrefix:"HTTP_"`
+	GRPC          AuthGRPCConfig     `yaml:"grpc"           envPrefix:"GRPC_"`
+	HeaderFilter  HeaderFilterConfig `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
 }
 
 // AuthHTTPConfig holds HTTP-based auth backend settings.
 type AuthHTTPConfig struct {
-	URL string `yaml:"url" env:"URL"`
+	URL                    string `yaml:"url"                      env:"URL"`
+	ForwardOriginalHeaders bool   `yaml:"forward_original_headers" env:"FORWARD_ORIGINAL_HEADERS"`
 }
 
 // AuthGRPCConfig holds gRPC-based auth backend settings.
@@ -408,12 +432,14 @@ func (r RedactedString) String() string {
 // GoString implements fmt.GoStringer for %#v.
 func (r RedactedString) GoString() string { return r.String() }
 
-// MarshalJSON masks the value in JSON output.
+// MarshalJSON masks the value in JSON output. Uses json.Marshal to ensure
+// the placeholder is always properly escaped, preventing injection if the
+// constant is ever changed.
 func (r RedactedString) MarshalJSON() ([]byte, error) {
 	if r == "" {
 		return []byte(`""`), nil
 	}
-	return []byte(`"` + redactedPlaceholder + `"`), nil
+	return json.Marshal(redactedPlaceholder)
 }
 
 // RedisTLSConfig holds Redis TLS settings.
@@ -453,9 +479,10 @@ func Defaults() *Config {
 			IdleTimeout:  "30s",
 		},
 		Backend: BackendConfig{
-			Timeout:         "30s",
-			MaxIdleConns:    100,
-			IdleConnTimeout: "90s",
+			Timeout:            "30s",
+			MaxIdleConns:       100,
+			IdleConnTimeout:    "90s",
+			MaxRequestBodySize: 10 << 20, // 10 MiB default
 			Transport: TransportConfig{
 				DialTimeout:           "30s",
 				DialKeepAlive:         "30s",
@@ -565,6 +592,7 @@ func (cfg *Config) normalize() {
 	if cfg.CacheRedis != nil {
 		cfg.CacheRedis.Mode = RedisMode(strings.ToLower(string(cfg.CacheRedis.Mode)))
 	}
+	cfg.Auth.FailurePolicy = AuthFailurePolicy(strings.ToLower(string(cfg.Auth.FailurePolicy)))
 	cfg.Logging.Level = LogLevel(strings.ToLower(string(cfg.Logging.Level)))
 	cfg.Logging.Format = LogFormat(strings.ToLower(string(cfg.Logging.Format)))
 	cfg.Server.TLS.MinVersion = TLSVersion(normalizeTLSVersion(string(cfg.Server.TLS.MinVersion)))
@@ -705,6 +733,9 @@ func validateAuth(cfg *Config) error {
 	if cfg.Auth.Enabled {
 		if cfg.Auth.HTTP.URL == "" && cfg.Auth.GRPC.Address == "" {
 			return fmt.Errorf("auth.http.url or auth.grpc.address is required when auth is enabled")
+		}
+		if fp := cfg.Auth.FailurePolicy; fp != "" && !fp.Valid() {
+			return fmt.Errorf("invalid auth.failure_policy %q: must be failclosed or failopen", fp)
 		}
 	}
 	return nil

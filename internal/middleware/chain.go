@@ -7,12 +7,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/auth"
@@ -21,6 +24,43 @@ import (
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/edgequota/edgequota/internal/redis"
 )
+
+// requestIDHeader is the canonical HTTP header for request correlation.
+const requestIDHeader = "X-Request-Id"
+
+// generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
+// Uses crypto/rand for uniqueness. This is simpler and faster than UUID v7
+// while still being globally unique for practical purposes.
+func generateRequestID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+// jsonErrorResponse is the structured error body returned by EdgeQuota.
+type jsonErrorResponse struct {
+	Error      string  `json:"error"`
+	Message    string  `json:"message"`
+	RetryAfter float64 `json:"retry_after,omitempty"`
+	RequestID  string  `json:"request_id,omitempty"`
+}
+
+// writeJSONError writes a structured JSON error response. The Content-Type
+// is set to application/json. Any existing rate-limit headers are preserved.
+func writeJSONError(w http.ResponseWriter, code int, errType, message string, retryAfter float64) {
+	resp := jsonErrorResponse{
+		Error:      errType,
+		Message:    message,
+		RetryAfter: retryAfter,
+		RequestID:  w.Header().Get(requestIDHeader),
+	}
+	body, _ := json.Marshal(resp)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
 
 // cryptoRandFloat64 returns a cryptographically random float64 in [0, 1).
 func cryptoRandFloat64() float64 {
@@ -47,44 +87,18 @@ var (
 // maxTTL caps Redis key TTL to 7 days.
 const maxTTL = 7 * 24 * 3600
 
-// headerMapPool amortizes map[string]string allocations in the hot path.
-// Maps are cleared and returned to the pool after use.
-var headerMapPool = sync.Pool{
-	New: func() any {
-		m := make(map[string]string, 16)
-		return m
-	},
-}
-
-// getHeaderMap returns a map populated with the first value of each header.
+// getHeaderMap returns a fresh map populated with the first value of each header.
+// Uses plain allocation instead of sync.Pool — Go 1.25's GC handles short-lived
+// maps efficiently, and the pool adds contention under high concurrency with no
+// measurable benefit (validated by BenchmarkGetHeaderMap in chain_bench_test.go).
 func getHeaderMap(r *http.Request) map[string]string {
-	m, ok := headerMapPool.Get().(map[string]string)
-	if !ok {
-		m = make(map[string]string, len(r.Header))
-	}
+	m := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
 		if len(v) > 0 {
 			m[k] = v[0]
 		}
 	}
 	return m
-}
-
-// maxPoolMapSize is the threshold above which maps are not returned to the
-// pool. This prevents adversarial requests with many headers from permanently
-// inflating pooled map capacity.
-const maxPoolMapSize = 64
-
-// putHeaderMap clears and returns the map to the pool. Oversized maps
-// (grown by requests with many headers) are dropped so the GC can reclaim them.
-func putHeaderMap(m map[string]string) {
-	if len(m) > maxPoolMapSize {
-		return // let GC reclaim oversized maps
-	}
-	for k := range m {
-		delete(m, k)
-	}
-	headerMapPool.Put(m)
 }
 
 // Failure policy constants — re-exported from config for local readability.
@@ -97,13 +111,19 @@ const (
 // Chain is the main request processing middleware. It chains authentication,
 // rate limiting, and proxying into a single http.Handler.
 type Chain struct {
-	next        http.Handler
-	cfg         *config.Config
-	logger      *slog.Logger
-	metrics     *observability.Metrics
+	next    http.Handler
+	cfg     atomic.Pointer[config.Config] // atomic: read by recoveryLoop without lock, written by Reload under mu
+	logger  *slog.Logger
+	metrics *observability.Metrics
+
+	// authClient and externalRL are accessed from the hot path (ServeHTTP)
+	// without holding mu, and swapped atomically during Reload. Using
+	// atomic.Pointer avoids a data race between concurrent readers in
+	// ServeHTTP and the writer in Reload.
+	authClient atomic.Pointer[auth.Client]
+	externalRL atomic.Pointer[ratelimit.ExternalClient]
+
 	keyStrategy ratelimit.KeyStrategy
-	authClient  *auth.Client
-	externalRL  *ratelimit.ExternalClient
 
 	mu             sync.RWMutex
 	limiter        *ratelimit.Limiter
@@ -386,10 +406,26 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// statusWriterPool amortizes statusWriter allocations on the hot path.
+var statusWriterPool = sync.Pool{
+	New: func() any { return &statusWriter{} },
+}
+
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+	sw := statusWriterPool.Get().(*statusWriter)
+	sw.ResponseWriter = w
+	sw.code = http.StatusOK
+	sw.written = false
+
+	// Propagate or generate X-Request-Id for request correlation.
+	reqID := r.Header.Get(requestIDHeader)
+	if reqID == "" {
+		reqID = generateRequestID()
+		r.Header.Set(requestIDHeader, reqID)
+	}
+	sw.Header().Set(requestIDHeader, reqID)
 
 	defer func() {
 		duration := time.Since(start).Seconds()
@@ -397,6 +433,8 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Method,
 			strconv.Itoa(sw.code),
 		).Observe(duration)
+		sw.ResponseWriter = nil // prevent dangling reference
+		statusWriterPool.Put(sw)
 	}()
 
 	if c.authClient != nil && !c.checkAuth(sw, r) {
@@ -413,7 +451,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		c.metrics.IncKeyExtractErrors()
 		c.logger.Warn("key extraction failed", "error", err)
-		http.Error(sw, "could not extract rate-limit key", http.StatusInternalServerError)
+		writeJSONError(sw, http.StatusInternalServerError, "key_extraction_failed", "could not extract rate-limit key", 0)
 		return
 	}
 
@@ -441,7 +479,14 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 	if err != nil {
 		c.logger.Error("auth service error", "error", err)
 		c.metrics.IncAuthErrors()
-		http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
+
+		// Apply the configured auth failure policy.
+		if c.cfg.Auth.FailurePolicy == config.AuthFailurePolicyFailOpen {
+			c.logger.Warn("auth service unreachable, allowing request (failure_policy=failopen)")
+			return true
+		}
+		// Default: failclosed — reject the request.
+		writeJSONError(w, http.StatusServiceUnavailable, "auth_unavailable", "authentication service unavailable", 0)
 		return false
 	}
 
@@ -454,7 +499,11 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request) bool {
 		if code == 0 {
 			code = http.StatusForbidden
 		}
-		http.Error(w, resp.DenyBody, code)
+		denyMsg := resp.DenyBody
+		if denyMsg == "" {
+			denyMsg = http.StatusText(code)
+		}
+		writeJSONError(w, code, "auth_denied", denyMsg, 0)
 		return false
 	}
 
@@ -481,7 +530,6 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 	}
 
 	headers := getHeaderMap(r)
-	defer putHeaderMap(headers)
 
 	// Strip sensitive headers before sending to external rate-limit service.
 	c.externalRL.FilterHeaders(headers)
@@ -567,6 +615,7 @@ func (c *Chain) handleLimiterError(limErr error) {
 		}
 
 		if shouldLog {
+			c.metrics.PromRedisHealthy.Set(0)
 			c.logger.Warn("redis became unhealthy, switching to fallback",
 				"error", limErr, "policy", c.failurePolicy)
 		}
@@ -621,7 +670,7 @@ func (c *Chain) serveRateLimited(w http.ResponseWriter, result *ratelimit.Result
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retrySeconds))
 	w.Header().Set("X-Retry-In", result.RetryAfter.String())
-	http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+	writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests", retrySeconds)
 }
 
 // resolveFailurePolicy returns the effective failure policy and failure code
@@ -665,7 +714,7 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 
 	case policyFailClosed:
 		c.metrics.IncLimited()
-		http.Error(w, http.StatusText(fc), fc)
+		writeJSONError(w, fc, "service_unavailable", http.StatusText(fc), 0)
 
 	case policyInMemoryFallback:
 		c.metrics.IncFallbackUsed()
@@ -729,7 +778,12 @@ func (c *Chain) recoveryLoop() {
 			timer := time.NewTimer(sleep)
 			select {
 			case <-c.ctx.Done():
-				timer.Stop()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
 			case <-timer.C:
 			}
@@ -767,6 +821,7 @@ func (c *Chain) recoveryLoop() {
 			_ = old.Close()
 		}
 
+		c.metrics.PromRedisHealthy.Set(1)
 		c.logger.Info("redis connection recovered")
 		return
 	}
@@ -789,6 +844,27 @@ func (c *Chain) markUnhealthyLocked() bool {
 	return true
 }
 
+// redisPingerAdapter wraps a redis.Client to satisfy the observability.Pinger interface.
+type redisPingerAdapter struct {
+	client redis.Client
+}
+
+func (a *redisPingerAdapter) Ping(ctx context.Context) error {
+	return a.client.Ping(ctx).Err()
+}
+
+// RedisPinger returns a Pinger that can probe the current Redis connection.
+// Returns nil if no Redis limiter is configured. The pinger delegates to the
+// underlying Redis client's Ping command. It's safe to call concurrently.
+func (c *Chain) RedisPinger() observability.Pinger {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.limiter == nil {
+		return nil
+	}
+	return &redisPingerAdapter{client: c.limiter.Client()}
+}
+
 // Close shuts down the middleware chain and releases all resources.
 // Reload hot-swaps the rate-limit parameters, key strategy, failure policy,
 // auth client, and external RL client from a new config. Components that
@@ -807,6 +883,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	}
 
 	c.mu.Lock()
+	prevCfg := c.cfg // Capture previous config before overwriting.
 	c.ratePerSecond = p.ratePerSecond
 	c.burst = p.burst
 	c.ttl = p.ttl
@@ -815,6 +892,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.failureCode = p.failureCode
 	c.average = newCfg.RateLimit.Average
 	c.keyStrategy = newKS
+	c.cfg = newCfg // Must be inside the mutex — recoveryLoop reads c.cfg.Redis without locking.
 
 	// Rebuild limiter with new params but same Redis client if available.
 	if c.limiter != nil {
@@ -831,8 +909,16 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		oldFB.Close()
 	}
 
-	// Rebuild auth client if config changed.
-	if newCfg.Auth.Enabled {
+	// Rebuild auth client only if auth config actually changed. This avoids
+	// destroying the HTTP transport's connection pool on rate-limit-only reloads.
+	authChanged := prevCfg == nil ||
+		newCfg.Auth.Enabled != prevCfg.Auth.Enabled ||
+		newCfg.Auth.HTTP.URL != prevCfg.Auth.HTTP.URL ||
+		newCfg.Auth.GRPC.Address != prevCfg.Auth.GRPC.Address ||
+		newCfg.Auth.Timeout != prevCfg.Auth.Timeout ||
+		newCfg.Auth.FailurePolicy != prevCfg.Auth.FailurePolicy
+
+	if newCfg.Auth.Enabled && authChanged {
 		newAuth, authErr := auth.NewClient(newCfg.Auth)
 		if authErr != nil {
 			c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
@@ -859,8 +945,6 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 			}
 		}
 	}
-
-	c.cfg = newCfg
 
 	c.logger.Info("middleware chain reloaded",
 		"average", newCfg.RateLimit.Average, "burst", p.burst,

@@ -351,13 +351,15 @@ func (r *ReplicationClient) getMaster() (*goredis.Client, error) {
 }
 
 func (r *ReplicationClient) refreshMaster() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	// Discover master outside the lock to avoid blocking all requests during
+	// N network round-trips. Only take the lock to swap the client.
 	addr, err := r.discoverMaster()
 	if err != nil {
 		return err
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if addr != r.masterAddr {
 		if r.master != nil {

@@ -42,6 +42,9 @@ type Metrics struct {
 	// using a label is safe from cardinality explosions.
 	promTenantAllowed *prometheus.CounterVec
 	promTenantLimited *prometheus.CounterVec
+
+	// Redis health gauge (0 = unhealthy, 1 = healthy).
+	PromRedisHealthy prometheus.Gauge
 }
 
 // NewMetrics creates and registers Prometheus metrics.
@@ -92,7 +95,8 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Namespace: "edgequota",
 			Name:      "request_duration_seconds",
 			Help:      "Request duration in seconds.",
-			Buckets:   prometheus.DefBuckets,
+			// Edge-proxy-tuned buckets with sub-millisecond granularity.
+			Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10},
 		}, []string{"method", "status_code"}),
 		PromRLRemaining: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",
@@ -110,7 +114,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "tenant_requests_limited_total",
 			Help:      "Total requests rate-limited per tenant.",
 		}, []string{"tenant"}),
+		PromRedisHealthy: factory.NewGauge(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "redis_healthy",
+			Help:      "Whether Redis is reachable (1 = healthy, 0 = unhealthy).",
+		}),
 	}
+
+	// Start as healthy (set to 1). The middleware chain will set to 0 on
+	// connectivity failure and back to 1 on recovery.
+	m.PromRedisHealthy.Set(1)
 
 	return m
 }

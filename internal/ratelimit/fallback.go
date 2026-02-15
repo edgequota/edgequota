@@ -30,7 +30,8 @@ var bucketCost = int64(unsafe.Sizeof(bucket{}))
 type InMemoryLimiter struct {
 	disabled bool // true when rate <= 0; Allow always returns true
 	cache    *ristretto.Cache[string, *bucket]
-	rate     float64 // tokens per second
+	pending  sync.Map // serializes first-insert per key to prevent duplicate buckets
+	rate     float64  // tokens per second
 	burst    int64
 	ttl      time.Duration
 }
@@ -80,19 +81,23 @@ func (l *InMemoryLimiter) Allow(key string) bool {
 
 	b, found := l.cache.Get(key)
 	if !found {
-		// New key — initialize with full burst minus one (this request).
-		b = &bucket{
+		// Serialize first-insert per key so that concurrent requests for a new
+		// key share one bucket instead of each creating an independent one.
+		// This prevents 2-3x burst allowance during the ristretto async-set window.
+		newBucket := &bucket{
 			tokens:   float64(l.burst) - 1,
 			lastTime: now,
 		}
-		l.cache.SetWithTTL(key, b, bucketCost, l.ttl)
-		// Intentionally NOT calling l.cache.Wait() here. Ristretto applies
-		// sets asynchronously, so the first 1-2 concurrent requests for a new
-		// key may each create an independent bucket. This is an acceptable
-		// trade-off: the fallback limiter is only active during Redis outages,
-		// and avoiding Wait() prevents blocking the hot path under DDoS-level
-		// traffic with many unique keys.
-		return true
+		actual, loaded := l.pending.LoadOrStore(key, newBucket)
+		b = actual.(*bucket)
+		if !loaded {
+			// We won the race — insert into ristretto and clean up pending.
+			l.cache.SetWithTTL(key, b, bucketCost, l.ttl)
+			l.cache.Wait()
+			l.pending.Delete(key)
+			return true
+		}
+		// Another goroutine created the bucket — fall through to the refill path.
 	}
 
 	b.mu.Lock()

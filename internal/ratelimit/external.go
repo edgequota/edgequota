@@ -17,6 +17,7 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -85,14 +86,15 @@ type ExternalClient struct {
 
 	redisClient redis.Client // may be nil (no caching)
 
-	// Circuit breaker state.
-	cbMu           sync.RWMutex
-	cbFailures     int
-	cbLastFailure  time.Time
-	cbOpen         bool
-	cbOpenUntil    time.Time
-	cbThreshold    int           // failures before opening
-	cbResetTimeout time.Duration // how long to keep circuit open
+	// singleflight collapses concurrent cache misses for the same key into
+	// one external call, preventing thundering herd on the control plane.
+	sfGroup singleflight.Group
+
+	// Per-tenant circuit breakers. Each tenant key gets its own breaker so
+	// that one misbehaving tenant config doesn't trip the circuit for all.
+	breakers       sync.Map // map[string]*tenantCircuitBreaker
+	cbThreshold    int
+	cbResetTimeout time.Duration
 }
 
 // Circuit breaker defaults.
@@ -102,6 +104,64 @@ const (
 	staleCachePrefix      = "rl:extcache:stale:"
 	staleCacheTTL         = 5 * time.Minute
 )
+
+// tenantCircuitBreaker holds per-tenant circuit breaker state. One bad tenant
+// config shouldn't trip the circuit for everyone.
+type tenantCircuitBreaker struct {
+	mu           sync.Mutex
+	failures     int
+	lastFailure  time.Time
+	open         bool
+	openUntil    time.Time
+	lastAccess   time.Time
+	threshold    int
+	resetTimeout time.Duration
+}
+
+func newTenantCB(threshold int, resetTimeout time.Duration) *tenantCircuitBreaker {
+	return &tenantCircuitBreaker{
+		threshold:    threshold,
+		resetTimeout: resetTimeout,
+		lastAccess:   time.Now(),
+	}
+}
+
+func (cb *tenantCircuitBreaker) isOpen() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.lastAccess = time.Now()
+	if !cb.open {
+		return false
+	}
+	// Allow a probe if enough time has passed (half-open).
+	return time.Now().Before(cb.openUntil)
+}
+
+func (cb *tenantCircuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	cb.lastFailure = time.Now()
+	cb.lastAccess = time.Now()
+	if cb.failures >= cb.threshold {
+		cb.open = true
+		cb.openUntil = time.Now().Add(cb.resetTimeout)
+	}
+}
+
+func (cb *tenantCircuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.open = false
+	cb.lastAccess = time.Now()
+}
+
+func (cb *tenantCircuitBreaker) isStale(now time.Time, maxIdle time.Duration) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return now.Sub(cb.lastAccess) > maxIdle
+}
 
 // NewExternalClient creates a client for the external rate limit service.
 // The redisClient is used for distributed caching; pass nil to disable caching.
@@ -166,6 +226,16 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		ec.grpcClient = ratelimitv1.NewRateLimitServiceClient(conn)
 	}
 
+	// Background eviction of stale per-tenant circuit breakers to prevent
+	// unbounded growth of the sync.Map.
+	go func() {
+		ticker := time.NewTicker(ec.cbResetTimeout)
+		defer ticker.Stop()
+		for range ticker.C {
+			ec.evictStaleBreakers()
+		}
+	}()
+
 	return ec, nil
 }
 
@@ -184,32 +254,47 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		return cached, nil
 	}
 
-	// If circuit breaker is open, try stale cache before failing.
-	if ec.isCircuitOpen() {
+	// If per-tenant circuit breaker is open, try stale cache before failing.
+	if ec.isCircuitOpen(req.Key) {
 		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
 			return stale, nil
 		}
-		return nil, fmt.Errorf("external rate limit service circuit breaker open")
+		return nil, fmt.Errorf("external rate limit service circuit breaker open for key %q", req.Key)
 	}
 
-	// Fetch from external service.
-	limits, ttl, err := ec.fetchFromService(ctx, req)
-	if err != nil {
-		ec.recordFailure()
-		// Try stale cache as fallback on fetch failure.
-		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
-			return stale, nil
+	// Use singleflight to collapse concurrent cache misses for the same key
+	// into one external call, preventing thundering herd on the control plane.
+	type sfResult struct {
+		limits *ExternalLimits
+		ttl    time.Duration
+	}
+
+	v, err, _ := ec.sfGroup.Do(req.Key, func() (any, error) {
+		// Double-check cache inside singleflight — another goroutine may
+		// have populated it while we were waiting.
+		if cached := ec.getFromCache(ctx, req.Key); cached != nil {
+			return &sfResult{limits: cached}, nil
 		}
+
+		limits, ttl, fetchErr := ec.fetchFromService(ctx, req)
+		if fetchErr != nil {
+			ec.recordFailure(req.Key)
+			if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
+				return &sfResult{limits: stale}, nil
+			}
+			return nil, fetchErr
+		}
+		ec.recordSuccess(req.Key)
+		ec.setInCache(ctx, req.Key, limits, ttl)
+		ec.setStaleInCache(ctx, req.Key, limits)
+		return &sfResult{limits: limits, ttl: ttl}, nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
 
-	ec.recordSuccess()
-
-	// Store in both primary and stale cache.
-	ec.setInCache(ctx, req.Key, limits, ttl)
-	ec.setStaleInCache(ctx, req.Key, limits)
-
-	return limits, nil
+	return v.(*sfResult).limits, nil
 }
 
 // fetchFromService calls the external rate limit service (gRPC or HTTP).
@@ -231,32 +316,41 @@ func (ec *ExternalClient) fetchFromService(ctx context.Context, req *ExternalReq
 // Circuit breaker
 // ---------------------------------------------------------------------------
 
-func (ec *ExternalClient) isCircuitOpen() bool {
-	ec.cbMu.RLock()
-	defer ec.cbMu.RUnlock()
-	if !ec.cbOpen {
-		return false
+// getOrCreateCB returns the per-tenant circuit breaker, creating one if needed.
+func (ec *ExternalClient) getOrCreateCB(key string) *tenantCircuitBreaker {
+	if v, ok := ec.breakers.Load(key); ok {
+		return v.(*tenantCircuitBreaker)
 	}
-	// Allow a probe if enough time has passed (half-open).
-	return time.Now().Before(ec.cbOpenUntil)
+	cb := newTenantCB(ec.cbThreshold, ec.cbResetTimeout)
+	actual, _ := ec.breakers.LoadOrStore(key, cb)
+	return actual.(*tenantCircuitBreaker)
 }
 
-func (ec *ExternalClient) recordFailure() {
-	ec.cbMu.Lock()
-	defer ec.cbMu.Unlock()
-	ec.cbFailures++
-	ec.cbLastFailure = time.Now()
-	if ec.cbFailures >= ec.cbThreshold {
-		ec.cbOpen = true
-		ec.cbOpenUntil = time.Now().Add(ec.cbResetTimeout)
-	}
+// isCircuitOpen checks the per-tenant circuit breaker for the given key.
+func (ec *ExternalClient) isCircuitOpen(key string) bool {
+	return ec.getOrCreateCB(key).isOpen()
 }
 
-func (ec *ExternalClient) recordSuccess() {
-	ec.cbMu.Lock()
-	defer ec.cbMu.Unlock()
-	ec.cbFailures = 0
-	ec.cbOpen = false
+func (ec *ExternalClient) recordFailure(key string) {
+	ec.getOrCreateCB(key).recordFailure()
+}
+
+func (ec *ExternalClient) recordSuccess(key string) {
+	ec.getOrCreateCB(key).recordSuccess()
+}
+
+// evictStaleBreakers removes per-tenant circuit breakers that haven't been
+// accessed for 2x the reset timeout. This prevents unbounded growth.
+func (ec *ExternalClient) evictStaleBreakers() {
+	now := time.Now()
+	maxIdle := 2 * ec.cbResetTimeout
+	ec.breakers.Range(func(key, value any) bool {
+		cb := value.(*tenantCircuitBreaker)
+		if cb.isStale(now, maxIdle) {
+			ec.breakers.Delete(key)
+		}
+		return true
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -186,9 +186,10 @@ func TestCheckHTTP(t *testing.T) {
 		defer srv.Close()
 
 		c := &Client{
-			httpURL:    srv.URL,
-			httpClient: http.DefaultClient,
-			timeout:    5e9,
+			httpURL:                srv.URL,
+			httpClient:             http.DefaultClient,
+			timeout:                5e9,
+			forwardOriginalHeaders: true,
 		}
 
 		_, err := c.Check(context.Background(), &CheckRequest{

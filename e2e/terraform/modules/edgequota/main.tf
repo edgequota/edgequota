@@ -99,8 +99,6 @@ resource "kubernetes_deployment_v1" "edgequota" {
           image             = var.image
           image_pull_policy = "Never" # Loaded via minikube image load
 
-          args = ["-config", "/etc/edgequota/config.yaml"]
-
           port {
             container_port = 8080
             name           = "proxy"
