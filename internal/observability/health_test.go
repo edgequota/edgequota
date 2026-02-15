@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,5 +138,67 @@ func TestReadyzHandler(t *testing.T) {
 		var body map[string]string
 		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
 		assert.Equal(t, "ready", body["status"])
+	})
+}
+
+// ---------------------------------------------------------------------------
+// SetRedisPinger + deep health check tests
+// ---------------------------------------------------------------------------
+
+type mockPinger struct {
+	err error
+}
+
+func (m *mockPinger) Ping(_ context.Context) error { return m.err }
+
+func TestSetRedisPinger(t *testing.T) {
+	t.Run("sets and clears redis pinger", func(t *testing.T) {
+		h := NewHealthChecker()
+		h.SetRedisPinger(&mockPinger{})
+		h.SetRedisPinger(nil) // clear
+	})
+}
+
+func TestReadyzHandler_DeepCheck(t *testing.T) {
+	t.Run("deep=true returns 200 when Redis is healthy", func(t *testing.T) {
+		h := NewHealthChecker()
+		h.SetReady()
+		h.SetRedisPinger(&mockPinger{err: nil})
+		handler := h.ReadyzHandler()
+
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/readyz?deep=true", nil)
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var body map[string]string
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+		assert.Equal(t, "ready", body["status"])
+		assert.Equal(t, "ok", body["redis"])
+	})
+
+	t.Run("deep=true returns 503 when Redis is unreachable", func(t *testing.T) {
+		h := NewHealthChecker()
+		h.SetReady()
+		h.SetRedisPinger(&mockPinger{err: fmt.Errorf("connection refused")})
+		handler := h.ReadyzHandler()
+
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/readyz?deep=true", nil)
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	})
+
+	t.Run("deep=true returns 200 when no pinger is set", func(t *testing.T) {
+		h := NewHealthChecker()
+		h.SetReady()
+		handler := h.ReadyzHandler()
+
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/readyz?deep=true", nil)
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 }

@@ -5,7 +5,7 @@
 
 # Build artifacts
 bin/
-coverage.out
+*.out
 *.test
 
 # E2E artifacts

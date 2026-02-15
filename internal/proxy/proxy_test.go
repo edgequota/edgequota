@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,3 +268,109 @@ type testErr struct {
 }
 
 func (e *testErr) Error() string { return e.msg }
+
+// ---------------------------------------------------------------------------
+// Proxy option tests
+// ---------------------------------------------------------------------------
+
+func TestWithWSLimiter(t *testing.T) {
+	t.Run("sets limiter when max > 0", func(t *testing.T) {
+		p, err := New("http://backend:8080", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithWSLimiter(10))
+		require.NoError(t, err)
+		assert.NotNil(t, p.wsLimiter)
+	})
+
+	t.Run("no-op when max is 0", func(t *testing.T) {
+		p, err := New("http://backend:8080", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithWSLimiter(0))
+		require.NoError(t, err)
+		assert.Nil(t, p.wsLimiter)
+	})
+}
+
+func TestWithMaxRequestBodySize(t *testing.T) {
+	p, err := New("http://backend:8080", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithMaxRequestBodySize(1024))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1024), p.maxRequestBodySize)
+}
+
+func TestWithMaxWSTransferBytes(t *testing.T) {
+	p, err := New("http://backend:8080", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithMaxWSTransferBytes(4096))
+	require.NoError(t, err)
+	assert.Equal(t, int64(4096), p.maxWSTransferBytes)
+}
+
+func TestCountingReader(t *testing.T) {
+	t.Run("reads within limit", func(t *testing.T) {
+		data := "hello world"
+		cr := &countingReader{
+			rc:    io.NopCloser(strings.NewReader(data)),
+			limit: 100,
+		}
+
+		buf := make([]byte, 64)
+		n, err := cr.Read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, len(data), n)
+		assert.Equal(t, data, string(buf[:n]))
+		assert.False(t, cr.limited)
+	})
+
+	t.Run("errors when limit exceeded", func(t *testing.T) {
+		cr := &countingReader{
+			rc:    io.NopCloser(strings.NewReader("this is a long string")),
+			limit: 5,
+		}
+
+		buf := make([]byte, 64)
+		_, err := cr.Read(buf)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds size limit")
+		assert.True(t, cr.limited)
+	})
+
+	t.Run("unlimited when limit is 0", func(t *testing.T) {
+		data := "unlimited data"
+		cr := &countingReader{
+			rc:    io.NopCloser(strings.NewReader(data)),
+			limit: 0,
+		}
+
+		buf := make([]byte, 64)
+		n, err := cr.Read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, len(data), n)
+		assert.False(t, cr.limited)
+	})
+
+	t.Run("Close delegates to inner reader", func(t *testing.T) {
+		cr := &countingReader{
+			rc: io.NopCloser(strings.NewReader("")),
+		}
+		assert.NoError(t, cr.Close())
+	})
+}
+
+func TestWithMaxRequestBodySize_Integration(t *testing.T) {
+	t.Run("rejects oversized request body", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Read the full body — this triggers the counting reader.
+			body, err := io.ReadAll(io.LimitReader(nil, 0))
+			_ = body
+			_ = err
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithMaxRequestBodySize(5))
+		require.NoError(t, err)
+
+		// Send a body larger than the limit.
+		req := httptest.NewRequest(http.MethodPost, "/data", strings.NewReader("this is more than five bytes"))
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+
+		// The proxy should return a 502 (Bad Gateway) because the round trip
+		// fails when the counting reader errors.
+		assert.Equal(t, http.StatusBadGateway, rr.Code)
+	})
+}

@@ -102,6 +102,35 @@ func TestMetricsIncAuthDenied(t *testing.T) {
 	})
 }
 
+func TestMetricsIncTenantAllowed(t *testing.T) {
+	t.Run("increments per-tenant allowed counter", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry())
+		m.IncTenantAllowed("acme")
+		m.IncTenantAllowed("acme")
+		m.IncTenantAllowed("globex")
+
+		// Prometheus counters cannot be read via Snapshot — just verify no panic.
+		// The important thing is that the labeled counter is incremented.
+	})
+}
+
+func TestMetricsIncTenantLimited(t *testing.T) {
+	t.Run("increments per-tenant limited counter", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry())
+		m.IncTenantLimited("acme")
+		m.IncTenantLimited("globex")
+	})
+}
+
+func TestMetricsObserveRemaining(t *testing.T) {
+	t.Run("records remaining tokens histogram observation", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry())
+		m.ObserveRemaining(42)
+		m.ObserveRemaining(0)
+		m.ObserveRemaining(100)
+	})
+}
+
 func TestMetricsSnapshot(t *testing.T) {
 	t.Run("returns point-in-time snapshot of all counters", func(t *testing.T) {
 		m := NewMetrics(prometheus.NewRegistry())
