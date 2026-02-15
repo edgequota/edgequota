@@ -64,16 +64,16 @@ jobs:
       - name: Enforce per-package coverage minimums (70%)
         run: |
           FAILED=0
-          for PKG in ./internal/middleware ./internal/ratelimit ./internal/proxy ./internal/redis ./internal/auth; do
-            COV=$(go test -count=1 -coverprofile=/dev/null -covermode=atomic "$PKG" 2>&1 | \
-              grep 'coverage:' | sed 's/.*coverage: \([0-9.]*\)%.*/\1/')
+          for SHORT in internal/middleware internal/ratelimit internal/proxy internal/redis internal/auth; do
+            # Filter coverage.out to this package and extract statement-level total.
+            COV=$( (echo "mode: atomic"; grep "${SHORT}/" coverage.out) | go tool cover -func=/dev/stdin | grep total: | awk '{gsub(/%/,"",$3); print $3}')
             if [ -z "$COV" ]; then COV="0.0"; fi
             RESULT=$(echo "$COV < 70.0" | bc -l 2>/dev/null || echo 0)
             if [ "$RESULT" = "1" ]; then
-              echo "FAIL: $PKG coverage ${COV}% < 70%"
+              echo "FAIL: $SHORT coverage ${COV}% < 70%"
               FAILED=1
             else
-              echo "OK:   $PKG coverage ${COV}%"
+              echo "OK:   $SHORT coverage ${COV}%"
             fi
           done
           if [ $FAILED -eq 1 ]; then exit 1; fi
@@ -91,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so git describe can find tags
 
       - uses: actions/setup-go@v6
         with:
@@ -132,6 +134,8 @@ jobs:
       IMAGE_NAME: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -158,6 +162,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
+      - name: Determine version
+        id: version
+        run: echo "value=$(git describe --tags --always --dirty 2>/dev/null || echo "${GITHUB_SHA::8}")" >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -166,6 +174,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
