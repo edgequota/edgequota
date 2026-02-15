@@ -53,6 +53,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start the config file watcher for hot-reload.
+	watcher := config.NewWatcher(config.ConfigFilePath(), func(newCfg *config.Config) {
+		if reloadErr := srv.Reload(newCfg); reloadErr != nil {
+			logger.Error("config reload failed", "error", reloadErr)
+		}
+	}, logger)
+	go func() {
+		if watchErr := watcher.Start(ctx); watchErr != nil {
+			logger.Error("config watcher error", "error", watchErr)
+		}
+	}()
+	defer watcher.Stop()
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server exited with error", "error", err)
 		os.Exit(1)

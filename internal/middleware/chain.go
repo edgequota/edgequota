@@ -70,8 +70,17 @@ func getHeaderMap(r *http.Request) map[string]string {
 	return m
 }
 
-// putHeaderMap clears and returns the map to the pool.
+// maxPoolMapSize is the threshold above which maps are not returned to the
+// pool. This prevents adversarial requests with many headers from permanently
+// inflating pooled map capacity.
+const maxPoolMapSize = 64
+
+// putHeaderMap clears and returns the map to the pool. Oversized maps
+// (grown by requests with many headers) are dropped so the GC can reclaim them.
 func putHeaderMap(m map[string]string) {
+	if len(m) > maxPoolMapSize {
+		return // let GC reclaim oversized maps
+	}
 	for k := range m {
 		delete(m, k)
 	}
@@ -155,9 +164,20 @@ func parseRateLimitParams(cfg *config.RateLimitConfig) rateLimitParams {
 		ratePerSecond = float64(cfg.Average) * float64(time.Second) / float64(period)
 	}
 
-	ttl := 2
+	// Compute TTL for Redis keys. The TTL is tied to the configured period
+	// to avoid excessive EXPIRE churn for high-cardinality keys at high rates.
+	// For sub-1-rps rates, TTL is scaled to the replenishment time instead.
+	periodSec := int(math.Ceil(period.Seconds()))
+	ttl := max(2, periodSec*2)
 	if ratePerSecond > 0 && ratePerSecond < 1 {
 		ttl = min(int(1/ratePerSecond)+2, maxTTL)
+	}
+
+	// Apply optional minimum TTL floor from config.
+	if cfg.MinTTL != "" {
+		if minTTLDur, err := time.ParseDuration(cfg.MinTTL); err == nil && minTTLDur > 0 {
+			ttl = max(ttl, int(math.Ceil(minTTLDur.Seconds())))
+		}
 	}
 
 	return rateLimitParams{
@@ -357,6 +377,15 @@ func (sw *statusWriter) Unwrap() http.ResponseWriter {
 	return sw.ResponseWriter
 }
 
+// Flush implements http.Flusher so that SSE streaming works even with
+// middleware or handlers that assert w.(http.Flusher) directly instead of
+// using Unwrap().
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -387,6 +416,11 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(sw, "could not extract rate-limit key", http.StatusInternalServerError)
 		return
 	}
+
+	// Store the rate-limit key in context for downstream handlers (e.g.
+	// the per-key WebSocket connection limiter in the proxy).
+	ctx := context.WithValue(r.Context(), ratelimit.KeyContextKey, key)
+	r = r.WithContext(ctx)
 
 	extLimits, resolvedKey := c.fetchExternalLimits(r, key)
 
@@ -466,8 +500,10 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 	}
 
 	// Use tenant key from external service for Redis bucket isolation.
+	// The "t:" prefix ensures tenant-provided keys cannot collide with
+	// the default "rl:edgequota:" prefixed keys.
 	if extLimits.TenantKey != "" {
-		resolvedKey = extLimits.TenantKey
+		resolvedKey = "t:" + extLimits.TenantKey
 	}
 
 	if extLimits.Average > 0 {
@@ -500,7 +536,7 @@ func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string
 		}
 		ratePerSecond := float64(extLimits.Average) * float64(time.Second) / float64(period)
 		burst := max(extLimits.Burst, 1)
-		result, limErr = lim.AllowWithOverrides(r.Context(), key, ratePerSecond, burst)
+		result, limErr = lim.AllowWithOverrides(r.Context(), key, ratePerSecond, burst, 0)
 	} else {
 		result, limErr = lim.Allow(r.Context(), key)
 	}
@@ -538,19 +574,33 @@ func (c *Chain) handleLimiterError(limErr error) {
 	}
 }
 
-func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, key string, result *ratelimit.Result) {
+func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey string, result *ratelimit.Result) {
 	// Always attach rate limit headroom headers (allowed and denied).
 	setRateLimitHeaders(w, result)
 
-	// Record remaining tokens gauge for observability.
-	c.metrics.ObserveRemaining(key, result.Remaining)
+	// Record remaining tokens distribution for observability.
+	c.metrics.ObserveRemaining(result.Remaining)
+
+	// Emit per-tenant metrics when a tenant-namespaced key is in use
+	// (indicated by the "t:" prefix applied in fetchExternalLimits).
+	isTenantKey := len(resolvedKey) > 2 && resolvedKey[:2] == "t:"
+	tenantID := ""
+	if isTenantKey {
+		tenantID = resolvedKey[2:]
+	}
 
 	if !result.Allowed {
 		c.metrics.IncLimited()
+		if isTenantKey {
+			c.metrics.IncTenantLimited(tenantID)
+		}
 		c.serveRateLimited(w, result)
 		return
 	}
 	c.metrics.IncAllowed()
+	if isTenantKey {
+		c.metrics.IncTenantAllowed(tenantID)
+	}
 	c.next.ServeHTTP(w, r)
 }
 
@@ -740,6 +790,85 @@ func (c *Chain) markUnhealthyLocked() bool {
 }
 
 // Close shuts down the middleware chain and releases all resources.
+// Reload hot-swaps the rate-limit parameters, key strategy, failure policy,
+// auth client, and external RL client from a new config. Components that
+// haven't changed are not replaced.
+func (c *Chain) Reload(newCfg *config.Config) error {
+	p := parseRateLimitParams(&newCfg.RateLimit)
+	prefix := "rl:edgequota:"
+	if newCfg.RateLimit.KeyPrefix != "" {
+		prefix = "rl:" + newCfg.RateLimit.KeyPrefix + ":"
+	}
+
+	// Rebuild key strategy if it changed.
+	newKS, err := ratelimit.NewKeyStrategy(newCfg.RateLimit.KeyStrategy)
+	if err != nil {
+		return fmt.Errorf("reload key strategy: %w", err)
+	}
+
+	c.mu.Lock()
+	c.ratePerSecond = p.ratePerSecond
+	c.burst = p.burst
+	c.ttl = p.ttl
+	c.prefix = prefix
+	c.failurePolicy = p.failurePolicy
+	c.failureCode = p.failureCode
+	c.average = newCfg.RateLimit.Average
+	c.keyStrategy = newKS
+
+	// Rebuild limiter with new params but same Redis client if available.
+	if c.limiter != nil {
+		oldLim := c.limiter
+		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix)
+	}
+
+	// Rebuild fallback limiter with new parameters.
+	oldFB := c.fallback
+	c.fallback = ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second)
+	c.mu.Unlock()
+
+	if oldFB != nil {
+		oldFB.Close()
+	}
+
+	// Rebuild auth client if config changed.
+	if newCfg.Auth.Enabled {
+		newAuth, authErr := auth.NewClient(newCfg.Auth)
+		if authErr != nil {
+			c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
+		} else {
+			oldAuth := c.authClient
+			c.authClient = newAuth
+			if oldAuth != nil {
+				_ = oldAuth.Close()
+			}
+		}
+	}
+
+	// Rebuild external RL client if config changed.
+	if newCfg.RateLimit.External.Enabled {
+		cacheClient := c.resolveCacheRedis(newCfg, c.logger)
+		newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient)
+		if extErr != nil {
+			c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
+		} else {
+			oldExt := c.externalRL
+			c.externalRL = newExt
+			if oldExt != nil {
+				_ = oldExt.Close()
+			}
+		}
+	}
+
+	c.cfg = newCfg
+
+	c.logger.Info("middleware chain reloaded",
+		"average", newCfg.RateLimit.Average, "burst", p.burst,
+		"period", p.period, "policy", p.failurePolicy)
+
+	return nil
+}
+
 func (c *Chain) Close() error {
 	c.cancel()
 

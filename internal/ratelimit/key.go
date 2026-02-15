@@ -16,6 +16,15 @@ const (
 	ksComposite = config.KeyStrategyComposite
 )
 
+// contextKey is an unexported type used for context value keys to prevent
+// collisions with keys from other packages.
+type contextKey string
+
+// KeyContextKey is the context key under which the resolved rate-limit key
+// is stored, allowing downstream handlers (e.g. WebSocket limiter) to
+// access it without re-extracting.
+const KeyContextKey = contextKey("rl-key")
+
 // KeyStrategy extracts a rate-limit key from an HTTP request.
 type KeyStrategy interface {
 	Extract(req *http.Request) (string, error)
@@ -40,11 +49,14 @@ func remoteIP(remoteAddr string) string {
 	return ip
 }
 
-// isTrusted returns true when trustedNets is empty (legacy mode) or when the
-// given IP falls within at least one configured CIDR.
+// isTrusted returns true when the given IP falls within at least one
+// configured trusted CIDR. When no trusted proxies are configured, proxy
+// headers (X-Forwarded-For, X-Real-IP) are NOT trusted and only RemoteAddr
+// is used. Operators must explicitly list trusted CIDRs to enable proxy
+// header extraction.
 func (s *ClientIPStrategy) isTrusted(ipStr string) bool {
 	if len(s.trustedNets) == 0 {
-		return true // no trusted proxies configured — trust everything (legacy)
+		return false // no trusted proxies configured — only use RemoteAddr
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {

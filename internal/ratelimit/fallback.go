@@ -86,10 +86,12 @@ func (l *InMemoryLimiter) Allow(key string) bool {
 			lastTime: now,
 		}
 		l.cache.SetWithTTL(key, b, bucketCost, l.ttl)
-		// Wait ensures the bucket is visible to subsequent Gets. This only
-		// blocks on the first request for a key; the hot path (cache hit)
-		// has zero extra cost. Acceptable for a fallback limiter.
-		l.cache.Wait()
+		// Intentionally NOT calling l.cache.Wait() here. Ristretto applies
+		// sets asynchronously, so the first 1-2 concurrent requests for a new
+		// key may each create an independent bucket. This is an acceptable
+		// trade-off: the fallback limiter is only active during Redis outages,
+		// and avoiding Wait() prevents blocking the hot path under DDoS-level
+		// traffic with many unique keys.
 		return true
 	}
 

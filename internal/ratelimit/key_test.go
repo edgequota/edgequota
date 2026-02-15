@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"net"
 	"net/http"
 	"testing"
 
@@ -9,10 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func trustAllNets(t *testing.T) []*net.IPNet {
+	t.Helper()
+	_, ipNet, err := net.ParseCIDR("0.0.0.0/0")
+	require.NoError(t, err)
+	_, ipNet6, err := net.ParseCIDR("::/0")
+	require.NoError(t, err)
+	return []*net.IPNet{ipNet, ipNet6}
+}
+
 func TestClientIPStrategy(t *testing.T) {
-	t.Run("extracts from X-Forwarded-For", func(t *testing.T) {
-		s := &ClientIPStrategy{}
+	t.Run("extracts from X-Forwarded-For when trusted", func(t *testing.T) {
+		s := &ClientIPStrategy{trustedNets: trustAllNets(t)}
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
 		req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
 
 		key, err := s.Extract(req)
@@ -20,14 +31,27 @@ func TestClientIPStrategy(t *testing.T) {
 		assert.Equal(t, "1.2.3.4", key)
 	})
 
-	t.Run("extracts from X-Real-IP when XFF missing", func(t *testing.T) {
-		s := &ClientIPStrategy{}
+	t.Run("extracts from X-Real-IP when trusted and XFF missing", func(t *testing.T) {
+		s := &ClientIPStrategy{trustedNets: trustAllNets(t)}
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
 		req.Header.Set("X-Real-IP", "10.0.0.1")
 
 		key, err := s.Extract(req)
 		require.NoError(t, err)
 		assert.Equal(t, "10.0.0.1", key)
+	})
+
+	t.Run("ignores proxy headers when no trusted proxies configured", func(t *testing.T) {
+		s := &ClientIPStrategy{}
+		req, _ := http.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "192.168.1.1:12345"
+		req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+		req.Header.Set("X-Real-IP", "10.0.0.1")
+
+		key, err := s.Extract(req)
+		require.NoError(t, err)
+		assert.Equal(t, "192.168.1.1", key, "should use RemoteAddr, not proxy headers")
 	})
 
 	t.Run("falls back to RemoteAddr", func(t *testing.T) {
@@ -50,9 +74,10 @@ func TestClientIPStrategy(t *testing.T) {
 		assert.Equal(t, "192.168.1.1", key)
 	})
 
-	t.Run("trims whitespace from XFF", func(t *testing.T) {
-		s := &ClientIPStrategy{}
+	t.Run("trims whitespace from XFF when trusted", func(t *testing.T) {
+		s := &ClientIPStrategy{trustedNets: trustAllNets(t)}
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
 		req.Header.Set("X-Forwarded-For", " 1.2.3.4 , 5.6.7.8")
 
 		key, err := s.Extract(req)

@@ -36,9 +36,12 @@ func TestInMemoryLimiterAllow(t *testing.T) {
 		l := NewInMemoryLimiter(2.0, 3, 10*time.Second)
 		defer l.Close()
 
-		for i := 0; i < 3; i++ {
-			assert.True(t, l.Allow("key2"))
-		}
+		// First call inserts async; wait for ristretto to admit the entry.
+		assert.True(t, l.Allow("key2"))
+		l.cache.Wait()
+
+		assert.True(t, l.Allow("key2"))
+		assert.True(t, l.Allow("key2"))
 		assert.False(t, l.Allow("key2"))
 	})
 
@@ -55,8 +58,11 @@ func TestInMemoryLimiterAllow(t *testing.T) {
 		l := NewInMemoryLimiter(100.0, 2, 10*time.Second)
 		defer l.Close()
 
-		// Exhaust burst.
+		// First call inserts async; wait for ristretto to admit the entry.
 		assert.True(t, l.Allow("key3"))
+		l.cache.Wait()
+
+		// Exhaust remaining burst.
 		assert.True(t, l.Allow("key3"))
 		assert.False(t, l.Allow("key3"))
 
@@ -70,7 +76,10 @@ func TestInMemoryLimiterAllow(t *testing.T) {
 		l := NewInMemoryLimiter(2.0, 1, 10*time.Second)
 		defer l.Close()
 
+		// First call inserts async; wait for ristretto to admit the entry.
 		assert.True(t, l.Allow("key-a"))
+		l.cache.Wait()
+
 		assert.False(t, l.Allow("key-a"))
 
 		// key-b is independent.

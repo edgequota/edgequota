@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -37,6 +39,7 @@ type Server struct {
 	health          *observability.HealthChecker
 	metrics         *observability.Metrics
 	tracingShutdown func(context.Context) error
+	certs           *certHolder // non-nil when TLS is enabled; supports hot-reload.
 }
 
 // New creates a new EdgeQuota server instance.
@@ -95,6 +98,9 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 			"This should NEVER be used in production — it exposes the proxy to man-in-the-middle attacks.")
 		proxyOpts = append(proxyOpts, proxy.WithBackendTLSInsecure())
 	}
+	if cfg.Server.MaxWebSocketConnsPerKey > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithWSLimiter(cfg.Server.MaxWebSocketConnsPerKey))
+	}
 
 	rp, err := proxy.New(
 		cfg.Backend.URL,
@@ -122,8 +128,14 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	var h3srv *http3.Server
 	if cfg.Server.TLS.HTTP3Enabled {
 		h3srv = &http3.Server{
-			Addr:    cfg.Server.Address,
-			Handler: chain,
+			Addr:           cfg.Server.Address,
+			Handler:        chain,
+			MaxHeaderBytes: 1 << 20, // 1 MiB — same as the TCP server.
+			IdleTimeout:    idleTimeout,
+			QUICConfig: &quic.Config{
+				MaxIdleTimeout: idleTimeout,
+				Allow0RTT:      false, // Disable 0-RTT to prevent replay attacks.
+			},
 		}
 
 		tcpHandler := mainHandler
@@ -138,11 +150,13 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	}
 
 	srv := &http.Server{
-		Addr:         cfg.Server.Address,
-		Handler:      mainHandler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-		IdleTimeout:  idleTimeout,
+		Addr:              cfg.Server.Address,
+		Handler:           mainHandler,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default to prevent large-header DoS.
 		BaseContext: func(_ net.Listener) context.Context {
 			return context.Background()
 		},
@@ -171,7 +185,37 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 		WriteTimeout:      adminWriteTimeout,
 		IdleTimeout:       adminIdleTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default.
 	}
+}
+
+// certHolder provides atomic TLS certificate hot-reload via GetCertificate.
+type certHolder struct {
+	cert atomic.Pointer[tls.Certificate]
+}
+
+// newCertHolder creates and loads the initial certificate.
+func newCertHolder(certFile, keyFile string) (*certHolder, error) {
+	ch := &certHolder{}
+	if err := ch.Reload(certFile, keyFile); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// Reload loads a new certificate from disk and atomically swaps it.
+func (ch *certHolder) Reload(certFile, keyFile string) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("load TLS certificate: %w", err)
+	}
+	ch.cert.Store(&cert)
+	return nil
+}
+
+// GetCertificate implements the tls.Config.GetCertificate callback.
+func (ch *certHolder) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return ch.cert.Load(), nil
 }
 
 // tlsMinVersion returns the tls.Config MinVersion from config, defaulting to TLS 1.2.
@@ -194,16 +238,28 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 3)
 
+	// readyCh is closed after the main listener has successfully bound,
+	// preventing SetReady from being called before the server can accept
+	// connections.
+	readyCh := make(chan struct{})
+
 	go s.startAdminServer(errCh)
-	go s.startMainServer(errCh)
+	go s.startMainServerWithReady(errCh, readyCh)
 
 	if s.http3Server != nil {
 		go s.startHTTP3Server(errCh)
 	}
 
 	s.health.SetStarted()
-	s.health.SetReady()
-	s.logger.Info("edgequota is ready", "version", s.version)
+
+	// Wait for the main listener to bind (or fail) before marking ready.
+	select {
+	case <-readyCh:
+		s.health.SetReady()
+		s.logger.Info("edgequota is ready", "version", s.version)
+	case srvErr := <-errCh:
+		return srvErr
+	}
 
 	select {
 	case <-ctx.Done():
@@ -222,23 +278,48 @@ func (s *Server) startAdminServer(errCh chan<- error) {
 	}
 }
 
-func (s *Server) startMainServer(errCh chan<- error) {
+func (s *Server) startMainServerWithReady(errCh chan<- error, readyCh chan struct{}) {
 	s.logger.Info("proxy server starting",
 		"address", s.cfg.Server.Address,
 		"backend", s.cfg.Backend.URL,
 		"tls", s.cfg.Server.TLS.Enabled,
 		"http3", s.cfg.Server.TLS.HTTP3Enabled)
 
+	// Separate Listen from Serve so we can signal readiness after bind.
+	ln, listenErr := net.Listen("tcp", s.cfg.Server.Address)
+	if listenErr != nil {
+		errCh <- fmt.Errorf("proxy server listen: %w", listenErr)
+		return
+	}
+	close(readyCh) // signal that the listener has bound
+
 	var err error
 	if s.cfg.Server.TLS.Enabled {
+		// Create a certHolder for hot-reload support.
+		ch, certErr := newCertHolder(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+		if certErr != nil {
+			errCh <- certErr
+			return
+		}
+		s.certs = ch
+
 		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
 		tlsCfg := &tls.Config{
-			MinVersion: minVer,
+			MinVersion:     minVer,
+			GetCertificate: ch.GetCertificate,
 		}
 		s.mainServer.TLSConfig = tlsCfg
-		err = s.mainServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+
+		// Share the same TLS config with the HTTP/3 server so both
+		// listeners enforce identical MinVersion and ciphers.
+		if s.http3Server != nil {
+			s.http3Server.TLSConfig = tlsCfg
+		}
+
+		tlsLn := tls.NewListener(ln, tlsCfg)
+		err = s.mainServer.Serve(tlsLn)
 	} else {
-		err = s.mainServer.ListenAndServe()
+		err = s.mainServer.Serve(ln)
 	}
 
 	if err != nil && err != http.ErrServerClosed {
@@ -252,6 +333,26 @@ func (s *Server) startHTTP3Server(errCh chan<- error) {
 	if err != nil && err != http.ErrServerClosed {
 		errCh <- fmt.Errorf("HTTP/3 server: %w", err)
 	}
+}
+
+// Reload hot-swaps the rate-limit, auth, external RL configuration, and
+// TLS certificates without restarting the server.
+func (s *Server) Reload(newCfg *config.Config) error {
+	if err := s.chain.Reload(newCfg); err != nil {
+		return err
+	}
+
+	// Reload TLS certificates if TLS is enabled and cert files are configured.
+	if s.certs != nil && newCfg.Server.TLS.CertFile != "" && newCfg.Server.TLS.KeyFile != "" {
+		if err := s.certs.Reload(newCfg.Server.TLS.CertFile, newCfg.Server.TLS.KeyFile); err != nil {
+			s.logger.Error("TLS certificate reload failed, keeping old certificate", "error", err)
+		} else {
+			s.logger.Info("TLS certificates reloaded")
+		}
+	}
+
+	s.cfg = newCfg
+	return nil
 }
 
 func (s *Server) shutdown() error {

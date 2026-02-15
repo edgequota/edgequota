@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
@@ -40,6 +41,16 @@ func WithBackendTLSInsecure() Option {
 	}
 }
 
+// WithWSLimiter configures per-key WebSocket connection limits. A
+// maxPerKey of 0 means unlimited.
+func WithWSLimiter(maxPerKey int64) Option {
+	return func(p *Proxy) {
+		if maxPerKey > 0 {
+			p.wsLimiter = NewWSLimiter(maxPerKey)
+		}
+	}
+}
+
 // Proxy is a multi-protocol reverse proxy that transparently forwards
 // HTTP, gRPC, SSE, and WebSocket traffic to a backend service.
 type Proxy struct {
@@ -49,6 +60,7 @@ type Proxy struct {
 	logger             *slog.Logger
 	backendTLSInsecure bool
 	wsDialTimeout      time.Duration
+	wsLimiter          *WSLimiter // nil when no per-key WS limit is configured.
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -235,6 +247,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleWebSocket performs a WebSocket upgrade and bidirectional relay.
 func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Enforce per-key WebSocket connection limit when configured.
+	if p.wsLimiter != nil {
+		wsKey, _ := r.Context().Value(ratelimit.KeyContextKey).(string)
+		if wsKey == "" {
+			wsKey = "__unknown__"
+		}
+		if !p.wsLimiter.Acquire(wsKey) {
+			p.logger.Warn("websocket: per-key connection limit reached", "key", wsKey)
+			http.Error(w, "too many WebSocket connections", http.StatusTooManyRequests)
+			return
+		}
+		defer p.wsLimiter.Release(wsKey)
+	}
+
 	backendConn, dialErr := p.dialWebSocketBackend(r)
 	if dialErr != nil {
 		p.logger.Error("websocket: dial backend failed", "error", dialErr)
@@ -274,17 +300,31 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // dialWebSocketBackend dials the backend for a WebSocket connection.
 // The backend URL is expected to already contain an explicit port
-// (normalized at config load time).
-func (p *Proxy) dialWebSocketBackend(_ *http.Request) (net.Conn, error) {
+// (normalized at config load time). The request's context is used so
+// that client cancellation propagates to the dial.
+func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 	backendAddr := p.backendURL.Host // Always host:port after config normalization.
+	ctx := r.Context()
+
+	dialer := &net.Dialer{Timeout: p.wsDialTimeout}
 
 	if p.backendURL.Scheme == "https" {
-		return tls.Dial("tcp", backendAddr, &tls.Config{
+		tlsCfg := &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: p.backendTLSInsecure, //nolint:gosec // Configurable per-user choice.
-		})
+		}
+		rawConn, err := dialer.DialContext(ctx, "tcp", backendAddr)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn := tls.Client(rawConn, tlsCfg)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("websocket TLS handshake to %s: %w", backendAddr, err)
+		}
+		return tlsConn, nil
 	}
-	return net.DialTimeout("tcp", backendAddr, p.wsDialTimeout)
+	return dialer.DialContext(ctx, "tcp", backendAddr)
 }
 
 // relayWebSocket copies data bidirectionally between client and backend.

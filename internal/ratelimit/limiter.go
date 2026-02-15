@@ -133,13 +133,19 @@ func (l *Limiter) Allow(ctx context.Context, key string) (*Result, error) {
 
 // AllowWithOverrides checks rate limits using dynamic parameters from an
 // external rate limit service. This enables per-tenant/per-key limits that
-// differ from the static configuration.
-func (l *Limiter) AllowWithOverrides(ctx context.Context, key string, ratePerSecond float64, burst int64) (*Result, error) {
+// differ from the static configuration. When ttlOverride > 0 it replaces
+// the limiter's default TTL for this call.
+func (l *Limiter) AllowWithOverrides(ctx context.Context, key string, ratePerSecond float64, burst int64, ttlOverride int) (*Result, error) {
 	fullKey := l.keyPrefix + key
 	now := time.Now().UnixMicro()
 	rate := ratePerSecond / 1e6 // convert to per-microsecond
 
-	cmd, err := l.evalScript(ctx, []string{fullKey}, rate, burst, l.ttl, now)
+	ttl := l.ttl
+	if ttlOverride > 0 {
+		ttl = ttlOverride
+	}
+
+	cmd, err := l.evalScript(ctx, []string{fullKey}, rate, burst, ttl, now)
 	if err != nil {
 		return nil, err
 	}

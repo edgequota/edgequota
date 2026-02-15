@@ -107,6 +107,8 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 		mr.Close()
 
 		// Send many requests to exhaust in-memory fallback burst.
+		// After the first fallback request, pause briefly so ristretto
+		// admits the entry (ristretto applies sets asynchronously).
 		allowed, limited := 0, 0
 		for i := 0; i < 10; i++ {
 			reqN := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -117,6 +119,9 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 				allowed++
 			} else if rrN.Code == http.StatusTooManyRequests {
 				limited++
+			}
+			if i == 0 {
+				time.Sleep(10 * time.Millisecond) // let ristretto process the async Set
 			}
 		}
 
@@ -151,7 +156,8 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 		// Kill Redis.
 		mr.Close()
 
-		// Exhaust the in-memory burst.
+		// Exhaust the in-memory burst. After first request, pause briefly
+		// so ristretto admits the entry asynchronously.
 		for i := 0; i < 5; i++ {
 			reqN := httptest.NewRequest(http.MethodGet, "/", nil)
 			reqN.RemoteAddr = "10.0.0.2:1234"
@@ -163,6 +169,9 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 				assert.NotEmpty(t, rrN.Header().Get("X-Retry-In"),
 					"429 response must include X-Retry-In header")
 				return // Found what we need.
+			}
+			if i == 0 {
+				time.Sleep(10 * time.Millisecond) // let ristretto process the async Set
 			}
 		}
 	})

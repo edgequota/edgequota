@@ -150,6 +150,10 @@ type ServerConfig struct {
 	IdleTimeout  string          `yaml:"idle_timeout"  env:"IDLE_TIMEOUT"`
 	DrainTimeout string          `yaml:"drain_timeout" env:"DRAIN_TIMEOUT"`
 	TLS          ServerTLSConfig `yaml:"tls"           envPrefix:"TLS_"`
+
+	// MaxWebSocketConnsPerKey limits the number of concurrent WebSocket
+	// connections per rate-limit key (client/tenant). 0 means unlimited.
+	MaxWebSocketConnsPerKey int64 `yaml:"max_websocket_conns_per_key" env:"MAX_WEBSOCKET_CONNS_PER_KEY"`
 }
 
 // ServerTLSConfig holds optional TLS termination settings.
@@ -318,6 +322,11 @@ type RateLimitConfig struct {
 	KeyPrefix     string            `yaml:"key_prefix"     env:"KEY_PREFIX"`
 	KeyStrategy   KeyStrategyConfig `yaml:"key_strategy"   envPrefix:"KEY_STRATEGY_"`
 	External      ExternalRLConfig  `yaml:"external"       envPrefix:"EXTERNAL_"`
+
+	// MinTTL sets a floor for the Redis key TTL (e.g. "10s"). When empty,
+	// the TTL is computed automatically from the rate and period. Use this
+	// knob to reduce EXPIRE churn for high-cardinality keys at high rates.
+	MinTTL string `yaml:"min_ttl" env:"MIN_TTL"`
 }
 
 // KeyStrategyConfig defines how the per-client rate-limit key is extracted.
@@ -492,16 +501,26 @@ func Defaults() *Config {
 	}
 }
 
-// Load reads configuration from a YAML file and overlays environment variable
-// overrides. The config file path defaults to /etc/edgequota/config.yaml and
-// can be overridden via EDGEQUOTA_CONFIG_FILE.
-func Load() (*Config, error) {
-	cfg := Defaults()
-
+// ConfigFilePath returns the resolved config file path (from env or default).
+func ConfigFilePath() string {
 	configFile := os.Getenv("EDGEQUOTA_CONFIG_FILE")
 	if configFile == "" {
 		configFile = defaultConfigFile
 	}
+	return configFile
+}
+
+// Load reads configuration from a YAML file and overlays environment variable
+// overrides. The config file path defaults to /etc/edgequota/config.yaml and
+// can be overridden via EDGEQUOTA_CONFIG_FILE.
+func Load() (*Config, error) {
+	return LoadFromPath(ConfigFilePath())
+}
+
+// LoadFromPath reads configuration from the given YAML file and overlays
+// environment variable overrides. Used by the config watcher to reload.
+func LoadFromPath(configFile string) (*Config, error) {
+	cfg := Defaults()
 
 	data, err := os.ReadFile(configFile) // config file path is intentionally user-provided.
 	if err == nil {
@@ -653,6 +672,7 @@ func validateDurations(cfg *Config) error {
 		{"backend.transport.h2_read_idle_timeout", cfg.Backend.Transport.H2ReadIdleTimeout},
 		{"backend.transport.h2_ping_timeout", cfg.Backend.Transport.H2PingTimeout},
 		{"backend.transport.websocket_dial_timeout", cfg.Backend.Transport.WebSocketDialTimeout},
+		{"rate_limit.min_ttl", cfg.RateLimit.MinTTL},
 	}
 
 	for _, d := range durations {

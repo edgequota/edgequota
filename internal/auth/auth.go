@@ -102,6 +102,7 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		conn, dialErr := grpc.NewClient(cfg.GRPC.Address,
 			grpc.WithTransportCredentials(creds),
 			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024)), // 64 KiB — bound response size from auth service.
 		)
 		if dialErr != nil {
 			return nil, fmt.Errorf("auth grpc dial: %w", dialErr)

@@ -77,17 +77,28 @@ EdgeQuota enforces policy but **does not make trust decisions about header conte
 
 When using the `clientIP` key strategy, EdgeQuota extracts the client IP in this order:
 
-1. First IP in `X-Forwarded-For` header
-2. `X-Real-IP` header
-3. `RemoteAddr` (direct connection IP)
+1. First IP in `X-Forwarded-For` header (only when the caller's `RemoteAddr` is in `trusted_proxies`)
+2. `X-Real-IP` header (only when the caller's `RemoteAddr` is in `trusted_proxies`)
+3. `RemoteAddr` (direct connection IP — always used as fallback)
 
-**Risk:** An attacker can spoof `X-Forwarded-For` to impersonate another client's IP, potentially stealing their rate limit bucket or bypassing per-IP limits.
+**Default-deny trusted proxies:** When `key_strategy.trusted_proxies` is not configured (empty list), proxy headers (`X-Forwarded-For`, `X-Real-IP`) are **ignored entirely** and only `RemoteAddr` is used. This prevents IP spoofing by default. To trust proxy headers, explicitly list trusted proxy CIDRs:
+
+```yaml
+rate_limit:
+  key_strategy:
+    type: "clientIP"
+    trusted_proxies:
+      - "10.0.0.0/8"       # Internal load balancer CIDR
+      - "172.16.0.0/12"    # Kubernetes pod CIDR
+```
+
+**Risk:** If `trusted_proxies` is configured too broadly, an attacker can spoof `X-Forwarded-For` to impersonate another client's IP.
 
 **Mitigations:**
 
-- **Deploy behind a trusted load balancer** that strips or overwrites `X-Forwarded-For` with the actual client IP.
-- **Use `header` or `composite` key strategy** with a header that is set by a trusted component (e.g., a header injected by the auth service after token validation).
-- **Do not use `clientIP` strategy** for security-critical rate limiting if EdgeQuota is directly exposed to untrusted clients without a trusted proxy in front.
+- **Keep `trusted_proxies` as narrow as possible** — only list CIDRs of your actual load balancers.
+- **Use `header` or `composite` key strategy** with a header set by a trusted component (e.g., a header injected by the auth service after token validation).
+- **Use `trusted_ip_depth`** to select the correct entry in multi-proxy chains.
 
 ### Authorization Headers
 
@@ -305,7 +316,9 @@ An attacker may try to evade rate limits by:
 
 ### Connection Exhaustion
 
-EdgeQuota configures `ReadHeaderTimeout` on all servers to prevent Slowloris-style attacks. The main server also has `ReadTimeout`, `WriteTimeout`, and `IdleTimeout` to bound connection lifetimes.
+EdgeQuota configures `ReadHeaderTimeout` and `MaxHeaderBytes` (1 MiB) on all servers to prevent Slowloris-style and large-header DoS attacks. The main server also has `ReadTimeout`, `WriteTimeout`, and `IdleTimeout` to bound connection lifetimes. The HTTP/3 (QUIC) listener enforces the same `MaxHeaderBytes` and idle timeouts as the TCP listener, with 0-RTT disabled to prevent replay attacks.
+
+**WebSocket connection limits:** The `max_websocket_conns_per_key` setting limits the number of concurrent WebSocket connections per rate-limit key (client IP, tenant ID, etc.). This prevents a single client from monopolizing WebSocket backend capacity.
 
 ### Resource Exhaustion
 
@@ -323,7 +336,7 @@ Production deployment checklist:
 - [ ] Redis TLS enabled (`redis.tls.enabled: true`)
 - [ ] Redis ACLs configured (restrict to `rl:edgequota:*` keys)
 - [ ] NetworkPolicies restrict Redis and admin port access
-- [ ] EdgeQuota deployed behind a trusted proxy that sets `X-Forwarded-For`
+- [ ] `trusted_proxies` configured if EdgeQuota is behind a load balancer (proxy headers ignored by default)
 - [ ] `readOnlyRootFilesystem: true` in pod security context
 - [ ] `runAsNonRoot: true` and `runAsUser: 65534` in pod security context
 - [ ] `allowPrivilegeEscalation: false` in pod security context

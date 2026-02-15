@@ -34,8 +34,14 @@ type Metrics struct {
 	// Prometheus histograms.
 	PromRequestDuration *prometheus.HistogramVec
 
-	// Rate limit headroom gauges for observability dashboards.
-	PromRLRemaining *prometheus.GaugeVec
+	// Rate limit remaining tokens distribution (histogram, not per-key gauge
+	// — avoids unbounded cardinality from high-cardinality keys like IPs).
+	PromRLRemaining prometheus.Histogram
+
+	// Per-tenant counters. Tenants are bounded entities (unlike IPs), so
+	// using a label is safe from cardinality explosions.
+	promTenantAllowed *prometheus.CounterVec
+	promTenantLimited *prometheus.CounterVec
 }
 
 // NewMetrics creates and registers Prometheus metrics.
@@ -88,11 +94,22 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help:      "Request duration in seconds.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"method", "status_code"}),
-		PromRLRemaining: factory.NewGaugeVec(prometheus.GaugeOpts{
+		PromRLRemaining: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",
 			Name:      "ratelimit_remaining_tokens",
-			Help:      "Number of remaining tokens in the rate limit bucket (last seen value per key).",
-		}, []string{"key"}),
+			Help:      "Distribution of remaining tokens across rate-limit checks.",
+			Buckets:   []float64{0, 1, 5, 10, 25, 50, 100, 250, 500, 1000},
+		}),
+		promTenantAllowed: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "tenant_requests_allowed_total",
+			Help:      "Total requests allowed per tenant.",
+		}, []string{"tenant"}),
+		promTenantLimited: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "tenant_requests_limited_total",
+			Help:      "Total requests rate-limited per tenant.",
+		}, []string{"tenant"}),
 	}
 
 	return m
@@ -145,9 +162,20 @@ func (m *Metrics) IncAuthDenied() {
 	m.promAuthDenied.Inc()
 }
 
-// ObserveRemaining records the last-seen remaining tokens for a rate limit key.
-func (m *Metrics) ObserveRemaining(key string, remaining int64) {
-	m.PromRLRemaining.WithLabelValues(key).Set(float64(remaining))
+// IncTenantAllowed increments the per-tenant allowed counter.
+func (m *Metrics) IncTenantAllowed(tenant string) {
+	m.promTenantAllowed.WithLabelValues(tenant).Inc()
+}
+
+// IncTenantLimited increments the per-tenant rate-limited counter.
+func (m *Metrics) IncTenantLimited(tenant string) {
+	m.promTenantLimited.WithLabelValues(tenant).Inc()
+}
+
+// ObserveRemaining records the remaining tokens as a histogram observation.
+// This provides distribution visibility without per-key cardinality.
+func (m *Metrics) ObserveRemaining(remaining int64) {
+	m.PromRLRemaining.Observe(float64(remaining))
 }
 
 // MetricsSnapshot holds a point-in-time copy of all atomic counters.

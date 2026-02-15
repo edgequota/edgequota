@@ -65,6 +65,7 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 - **Redis topologies:** single instance, replication with auto-discovery, Sentinel, and Cluster.
 - **Failure policies:** pass through, fail closed, or in-memory fallback when Redis is unavailable.
 - **Automatic recovery:** exponential backoff reconnection with jitter.
+- **Config hot-reload:** rate limits, key strategies, auth clients, and TLS certificates are reloaded on-the-fly when the config file changes — zero downtime.
 
 ### External Authentication
 

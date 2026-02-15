@@ -708,3 +708,49 @@ module "eq_protocol_h3" {
   depends_on = [module.redis_single, module.testbackend, module.tls_certs]
 }
 
+# --- config-reload: Test hot-reload of rate limit parameters ---
+module "eq_config_reload" {
+  source    = "./modules/edgequota"
+  namespace = local.ns
+  scenario  = "config-reload"
+  image     = var.edgequota_image
+  node_port = 30115
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8080"
+      read_timeout: "30s"
+      write_timeout: "30s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+    admin:
+      address: ":9090"
+    backend:
+      url: "${local.backend_url}"
+      timeout: "10s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+    rate_limit:
+      average: 100
+      burst: 50
+      period: "1s"
+      failure_policy: "passThrough"
+      key_prefix: "config-reload"
+      key_strategy:
+        type: "clientIP"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.whoami]
+}
+

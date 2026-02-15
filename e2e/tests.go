@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strings"
@@ -56,6 +57,7 @@ var scenarioNodePorts = map[string]int{
 	"protocol":       30111,
 	"protocol-rl":    30112,
 	"protocol-h3":    30214, // TLS NodePort (TCP + UDP/QUIC)
+	"config-reload":  30115,
 }
 
 // runAllTests resolves the minikube IP, builds base URLs for every scenario,
@@ -213,6 +215,10 @@ func allTestCases(urls map[string]string) []testCase {
 		{"Protocol+RL — SSE connects within burst", "protocol-rl", func() testResult { return testProtocolSSERateLimited(urls["protocol-rl"]) }},
 		{"Protocol+RL — WebSocket connects within burst", "protocol-rl", func() testResult { return testProtocolWebSocketRateLimited(urls["protocol-rl"]) }},
 		{"Protocol+RL — gRPC gets rate limited", "protocol-rl", func() testResult { return testProtocolGRPCRateLimited(urls["protocol-rl"]) }},
+
+		// Config hot-reload
+		{"Config reload — rate limit changes via ConfigMap", "config-reload", func() testResult { return testConfigReload(urls["config-reload"]) }},
+		{"Config reload — TLS cert rotation", "protocol-h3", func() testResult { return testCertReload(urls["protocol-h3"]) }},
 	}
 }
 
@@ -237,23 +243,28 @@ func testSingleFailClosed(base string) testResult {
 		return fail("single-fc", "expected ≥1 allowed before failure injection, got 0")
 	}
 
-	// Kill Redis single pod.
-	info("  Killing Redis single pod...")
+	// Scale Redis deployment to 0 so that the Deployment controller does
+	// not immediately restart the pod. Simply deleting the pod causes the
+	// Deployment to schedule a replacement, which can become Ready before
+	// the proxy detects the outage — defeating the test.
+	info("  Scaling Redis single deployment to 0 replicas...")
 
-	if err := deletePod("app=redis-single"); err != nil {
-		return fail("single-fc", "could not kill Redis pod: %v", err)
+	if _, err := kubectl("scale", "deployment", "redis-single", "-n", namespace, "--replicas=0"); err != nil {
+		return fail("single-fc", "could not scale Redis to 0: %v", err)
 	}
 
-	// Wait for TCP RST propagation through kube-proxy.
-	time.Sleep(7 * time.Second)
+	// Wait for the pod to terminate and the proxy's pooled connections to
+	// receive TCP RST / connection refused from the now-empty ClusterIP.
+	info("  Waiting for Redis pod to terminate...")
+	time.Sleep(8 * time.Second)
 
-	// Send a priming burst to force stale Redis connection errors.
-	// The first requests after a pod kill may still use pooled TCP
-	// connections. These requests trigger the connectivity error that
-	// causes the middleware to nil-out the limiter and activate the
-	// failClosed policy.
-	sendBurst(base, nil, 3)
-	time.Sleep(2 * time.Second)
+	// Send a priming burst to force the proxy's Redis client to discover
+	// the broken connection. The go-redis pool retries internally, but
+	// with no backend behind the Service ClusterIP every attempt gets
+	// "connection refused". This triggers handleLimiterError →
+	// IsConnectivityErr → limiter set to nil → failClosed path.
+	sendBurst(base, nil, 5)
+	time.Sleep(3 * time.Second)
 
 	// Requests should now get 429 (failClosed).
 	_, _, codes := sendBurstDetailed(base, nil, 5)
@@ -266,7 +277,9 @@ func testSingleFailClosed(base string) testResult {
 		}
 	}
 
-	// Restore Redis (it'll auto-restart via Deployment).
+	// Restore Redis: scale back to 1 and wait for it to become Ready.
+	info("  Restoring Redis single deployment to 1 replica...")
+	kubectl("scale", "deployment", "redis-single", "-n", namespace, "--replicas=1")
 	waitForPods("app=redis-single", 60*time.Second)
 
 	if has429 {
@@ -667,7 +680,7 @@ func testProtocolHTTPS(base string) testResult {
 		detail += fmt.Sprintf(", Alt-Svc=%s", altSvc)
 	}
 
-	return pass("proto-https", detail)
+	return pass("proto-https", "%s", detail)
 }
 
 func testProtocolGRPC(base string) testResult {
@@ -1011,4 +1024,134 @@ func pass(name, format string, args ...any) testResult {
 
 func fail(name, format string, args ...any) testResult {
 	return testResult{name: name, passed: false, detail: fmt.Sprintf(format, args...)}
+}
+
+// ---------------------------------------------------------------------------
+// Config hot-reload tests
+// ---------------------------------------------------------------------------
+
+// testConfigReload verifies that rate-limit parameters change after the
+// ConfigMap is patched and the file-watcher triggers a reload.
+func testConfigReload(base string) testResult {
+	const name = "config-reload"
+
+	// 1. Verify initial limits work (average=100, burst=50 — should allow 50).
+	ok200, _ := sendBurst(base, nil, 55)
+	if ok200 < 40 {
+		return fail(name, "pre-reload burst too low: %d/55 (expected >=40 with burst=50)", ok200)
+	}
+
+	// 2. Patch the ConfigMap to lower the limits drastically (average=5, burst=3).
+	patchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  average: 5\n  burst: 3\n  period: \"1s\"\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  key_strategy:\n    type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
+
+	_, err := kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace,
+		"--type=merge", "-p", patchJSON)
+	if err != nil {
+		return fail(name, "failed to patch ConfigMap: %v", err)
+	}
+
+	// 3. Wait for file-watcher debounce + reload (3s should be enough).
+	time.Sleep(3 * time.Second)
+
+	// 4. Send a burst — with burst=3, we should see at most 3 allowed.
+	ok200After, ok429After := sendBurst(base, nil, 10)
+	if ok429After == 0 {
+		return fail(name, "post-reload: expected 429s but got 0 (ok200=%d)", ok200After)
+	}
+	if ok200After > 5 {
+		return fail(name, "post-reload: too many allowed=%d (expected <=5 with burst=3)", ok200After)
+	}
+
+	return pass(name, "pre-reload: %d/55 allowed; post-reload: %d/10 allowed, %d/10 limited", ok200, ok200After, ok429After)
+}
+
+// testCertReload verifies that TLS certificates can be rotated without restart.
+func testCertReload(base string) testResult {
+	const name = "cert-reload"
+
+	// 1. Connect and capture the current certificate serial.
+	serial1, err := getTLSSerial(base)
+	if err != nil {
+		return fail(name, "initial TLS connect failed: %v", err)
+	}
+
+	// 2. Generate a new self-signed cert and update the TLS Secret.
+	// This uses a kubectl command to create a new secret (the cert itself
+	// is generated via openssl in-cluster or by the test harness).
+	// For now we create a new cert via openssl and replace the secret.
+	_, genErr := run("bash", "-c", fmt.Sprintf(
+		`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes `+
+			`-keyout /tmp/e2e-newkey.pem -out /tmp/e2e-newcert.pem `+
+			`-days 1 -subj '/CN=edgequota-e2e' -addext 'subjectAltName=IP:%s' 2>/dev/null`,
+		strings.Split(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), ":")[0],
+	))
+	if genErr != nil {
+		return fail(name, "openssl cert generation failed: %v", genErr)
+	}
+
+	_, secretErr := kubectl("create", "secret", "tls", "edgequota-tls-protocol-h3",
+		"-n", namespace,
+		"--cert=/tmp/e2e-newcert.pem", "--key=/tmp/e2e-newkey.pem",
+		"--dry-run=client", "-o", "yaml")
+	if secretErr != nil {
+		// Apply the generated YAML to replace the existing secret.
+		_, applyErr := run("bash", "-c",
+			`kubectl create secret tls edgequota-tls-protocol-h3 -n `+namespace+
+				` --cert=/tmp/e2e-newcert.pem --key=/tmp/e2e-newkey.pem `+
+				`--dry-run=client -o yaml | kubectl apply -f -`)
+		if applyErr != nil {
+			return fail(name, "failed to update TLS secret: %v", applyErr)
+		}
+	} else {
+		_, applyErr := run("bash", "-c",
+			`kubectl create secret tls edgequota-tls-protocol-h3 -n `+namespace+
+				` --cert=/tmp/e2e-newcert.pem --key=/tmp/e2e-newkey.pem `+
+				`--dry-run=client -o yaml | kubectl apply -f -`)
+		if applyErr != nil {
+			return fail(name, "failed to apply TLS secret: %v", applyErr)
+		}
+	}
+
+	// 3. Wait for the cert file to be remounted + reload (kubelet can take
+	//    up to ~60s for secret volume sync; add buffer).
+	time.Sleep(10 * time.Second)
+
+	// 4. Reconnect and check for a different serial.
+	serial2, err := getTLSSerial(base)
+	if err != nil {
+		return fail(name, "post-reload TLS connect failed: %v", err)
+	}
+
+	if serial1.Cmp(serial2) == 0 {
+		return fail(name, "certificate serial unchanged after secret update (serial=%s)", serial1.String())
+	}
+
+	return pass(name, "serial changed: %s → %s", serial1.String(), serial2.String())
+}
+
+// getTLSSerial connects to the given HTTPS URL and returns the server
+// certificate's serial number.
+func getTLSSerial(base string) (*big.Int, error) {
+	host := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+	// Separate host:port
+	tlsHost := host
+	if !strings.Contains(tlsHost, ":") {
+		tlsHost = tlsHost + ":443"
+	}
+
+	conn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 5 * time.Second},
+		"tcp", tlsHost,
+		&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // E2E test with self-signed certs.
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("no peer certificates received")
+	}
+	return certs[0].SerialNumber, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -115,9 +116,23 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		cacheTTL = 60 * time.Second
 	}
 
+	// Tuned HTTP transport with high per-host connection pool for
+	// low-latency, high-concurrency external rate limit calls.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100, // External RL is typically a single host.
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	ec := &ExternalClient{
 		httpURL:        cfg.HTTP.URL,
-		httpClient:     &http.Client{Timeout: timeout},
+		httpClient:     &http.Client{Timeout: timeout, Transport: transport},
 		timeout:        timeout,
 		cacheTTL:       cacheTTL,
 		headerFilter:   config.NewHeaderFilter(cfg.HeaderFilter),
@@ -142,6 +157,7 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		conn, dialErr := grpc.NewClient(cfg.GRPC.Address,
 			grpc.WithTransportCredentials(creds),
 			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024)), // 64 KiB — bound response size from external service.
 		)
 		if dialErr != nil {
 			return nil, fmt.Errorf("external ratelimit grpc dial: %w", dialErr)
@@ -416,17 +432,13 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 	}
 
 	limits := &ExternalLimits{
-		Average:      pbResp.GetAverage(),
-		Burst:        pbResp.GetBurst(),
-		Period:       pbResp.GetPeriod(),
-		CacheNoStore: pbResp.GetCacheNoStore(),
-		TenantKey:    pbResp.GetTenantKey(),
-		// TODO(proto): uncomment after running `buf generate` to regenerate stubs
-		// from the updated ratelimit.proto which adds the FailurePolicy enum
-		// (field 7) and failure_code (field 8). Map the proto enum to
-		// config.FailurePolicy using failurePolicyFromProto().
-		// FailurePolicy: failurePolicyFromProto(pbResp.GetFailurePolicy()),
-		// FailureCode:   int(pbResp.GetFailureCode()),
+		Average:       pbResp.GetAverage(),
+		Burst:         pbResp.GetBurst(),
+		Period:        pbResp.GetPeriod(),
+		CacheNoStore:  pbResp.GetCacheNoStore(),
+		TenantKey:     pbResp.GetTenantKey(),
+		FailurePolicy: failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
+		FailureCode:   int(pbResp.GetFailureCode()),
 	}
 
 	if pbResp.CacheMaxAgeSeconds != nil {

@@ -47,6 +47,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `write_timeout` | duration | `"30s"` | `EDGEQUOTA_SERVER_WRITE_TIMEOUT` | Maximum time to write the response |
 | `idle_timeout` | duration | `"120s"` | `EDGEQUOTA_SERVER_IDLE_TIMEOUT` | Maximum time to wait for the next request on keep-alive connections |
 | `drain_timeout` | duration | `"30s"` | `EDGEQUOTA_SERVER_DRAIN_TIMEOUT` | Grace period during shutdown for in-flight requests to complete |
+| `max_websocket_conns_per_key` | int64 | `0` | `EDGEQUOTA_SERVER_MAX_WEBSOCKET_CONNS_PER_KEY` | Max concurrent WebSocket connections per rate-limit key. 0 = unlimited |
 
 ### `server.tls` — TLS Termination
 
@@ -124,6 +125,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `period` | duration | `"1s"` | `EDGEQUOTA_RATE_LIMIT_PERIOD` | Rate limit time window |
 | `failure_policy` | string | `"passThrough"` | `EDGEQUOTA_RATE_LIMIT_FAILURE_POLICY` | Behavior when Redis is down: `passThrough`, `failClosed`, `inMemoryFallback` |
 | `failure_code` | int | `429` | `EDGEQUOTA_RATE_LIMIT_FAILURE_CODE` | HTTP status code for `failClosed` rejections. Must be 4xx or 5xx. |
+| `min_ttl` | duration | `""` (auto) | `EDGEQUOTA_RATE_LIMIT_MIN_TTL` | Floor for Redis key TTL. Reduces EXPIRE churn for high-cardinality keys. |
 
 ### `rate_limit.key_strategy` — Key Extraction
 
@@ -132,6 +134,8 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `type` | string | `"clientIP"` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TYPE` | Key strategy: `clientIP`, `header`, `composite` |
 | `header_name` | string | `""` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_HEADER_NAME` | Header to extract key from (required for `header` and `composite`) |
 | `path_prefix` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_PATH_PREFIX` | Include first path segment in composite key |
+| `trusted_proxies` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TRUSTED_PROXIES` | CIDRs whose X-Forwarded-For / X-Real-IP are trusted. Empty = only RemoteAddr. |
+| `trusted_ip_depth` | int | `0` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TRUSTED_IP_DEPTH` | Which XFF entry to use: 0=leftmost, N=Nth from right |
 
 ### `rate_limit.external` — External Rate Limit Service
 
@@ -292,3 +296,22 @@ redis:
 ```
 
 Everything else uses defaults. Override individual fields with environment variables as needed.
+
+---
+
+## Hot Reload
+
+EdgeQuota watches the config file for changes using `fsnotify`. When the file is modified (e.g. via `kubectl patch configmap`), the following happens automatically:
+
+1. The file is re-read and validated.
+2. If validation fails, the old config is kept and an error is logged.
+3. If validation passes, the following are hot-swapped **without restart**:
+   - Rate-limit parameters (`average`, `burst`, `period`, `min_ttl`, `failure_policy`, `failure_code`)
+   - Key strategy (type, header name, trusted proxies)
+   - Auth client (reconnects if URL/TLS config changed)
+   - External rate-limit client (reconnects if URL/TLS config changed)
+   - TLS certificates (via `GetCertificate` — new connections pick up the new cert immediately)
+
+Rapid file writes are debounced (300ms) to handle editors that use atomic rename-on-save.
+
+**Note:** Redis connection parameters and server listen addresses are NOT hot-reloaded; they require a restart.

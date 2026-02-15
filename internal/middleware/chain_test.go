@@ -209,7 +209,10 @@ func TestChainServeHTTP(t *testing.T) {
 
 		allowed := 0
 		limited := 0
-		for i := 0; i < 5; i++ {
+		// The first request creates a ristretto entry asynchronously. Give
+		// ristretto time to admit the entry before sending more requests,
+		// otherwise all requests may create independent buckets.
+		for i := 0; i < 10; i++ {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.RemoteAddr = "1.2.3.4:5555"
 			rr := httptest.NewRecorder()
@@ -218,6 +221,10 @@ func TestChainServeHTTP(t *testing.T) {
 				allowed++
 			} else {
 				limited++
+			}
+			// After first request, small pause so ristretto processes the Set.
+			if i == 0 {
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 
