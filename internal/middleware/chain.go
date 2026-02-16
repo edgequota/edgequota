@@ -4,12 +4,14 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -186,10 +188,14 @@ type Chain struct {
 	failurePolicy  config.FailurePolicy
 	failureCode    int
 	average        int64
-	requestTimeout time.Duration
 
-	urlPolicy proxy.BackendURLPolicy
-	emitter   *events.Emitter
+	// requestTimeout and urlPolicy are read from ServeHTTP (hot path)
+	// without holding mu, and written by Reload. Using atomic.Value
+	// avoids a data race without adding lock contention.
+	requestTimeout atomic.Value // time.Duration
+	urlPolicy      atomic.Value // proxy.BackendURLPolicy
+
+	emitter *events.Emitter
 
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -279,29 +285,29 @@ func NewChain(
 		prefix = "rl:" + cfg.RateLimit.KeyPrefix + ":"
 	}
 
-	requestTimeout, _ := time.ParseDuration(cfg.Server.RequestTimeout)
+	reqTimeout, _ := time.ParseDuration(cfg.Server.RequestTimeout)
 
 	chain := &Chain{
-		next:           next,
-		logger:         logger,
-		metrics:        metrics,
-		fallback:       ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
-		ratePerSecond:  p.ratePerSecond,
-		burst:          p.burst,
-		ttl:            p.ttl,
-		prefix:         prefix,
-		failurePolicy:  p.failurePolicy,
-		failureCode:    p.failureCode,
-		average:        cfg.RateLimit.Average,
-		requestTimeout: requestTimeout,
-		urlPolicy: proxy.BackendURLPolicy{
-			AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
-			DenyPrivateNetworks: cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
-			AllowedHosts:        cfg.Backend.URLPolicy.AllowedHosts,
-		},
-		ctx:    ctx,
-		cancel: cancel,
+		next:          next,
+		logger:        logger,
+		metrics:       metrics,
+		fallback:      ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
+		ratePerSecond: p.ratePerSecond,
+		burst:         p.burst,
+		ttl:           p.ttl,
+		prefix:        prefix,
+		failurePolicy: p.failurePolicy,
+		failureCode:   p.failureCode,
+		average:       cfg.RateLimit.Average,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
+	chain.requestTimeout.Store(reqTimeout)
+	chain.urlPolicy.Store(proxy.BackendURLPolicy{
+		AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
+		DenyPrivateNetworks: cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
+		AllowedHosts:        cfg.Backend.URLPolicy.AllowedHosts,
+	})
 	chain.keyStrategy.Store(&ks)
 	chain.cfg.Store(cfg)
 	chain.emitter = events.NewEmitter(cfg.Events, logger, metrics)
@@ -404,7 +410,7 @@ func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitPa
 	}
 
 	if p.ratePerSecond > 0 {
-		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix)
+		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix, logger)
 	} else if client != nil {
 		_ = client.Close()
 	}
@@ -521,7 +527,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Apply per-request context timeout. The external service can override
 	// the global default on a per-tenant/per-key basis.
-	timeout := c.requestTimeout
+	timeout := c.requestTimeout.Load().(time.Duration)
 	if extLimits != nil && extLimits.RequestTimeout != "" {
 		if d, parseErr := time.ParseDuration(extLimits.RequestTimeout); parseErr == nil && d > 0 {
 			timeout = d
@@ -563,7 +569,22 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // When allowed, any request_headers from the auth response are injected into
 // the request so that downstream stages (rate limiting, backend) can read them.
 func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Client) bool {
-	authReq := ac.BuildCheckRequest(r)
+	// When body propagation is enabled, buffer the body up to the configured
+	// limit so it can be included in the auth request AND still forwarded to
+	// the backend. The original r.Body is replaced with a re-readable reader.
+	var bodyBytes []byte
+	if ac.PropagateBody() && r.Body != nil && r.Body != http.NoBody {
+		limited := io.LimitReader(r.Body, ac.MaxBodySize())
+		var err error
+		bodyBytes, err = io.ReadAll(limited)
+		if err != nil {
+			c.logger.Warn("failed to read request body for auth propagation", "error", err)
+		}
+		// Replace the body so downstream handlers (proxy) can still read it.
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
+	}
+
+	authReq := ac.BuildCheckRequest(r, bodyBytes)
 	resp, err := ac.Check(r.Context(), authReq)
 	if err != nil {
 		c.logger.Error("auth service error", "error", err)
@@ -613,6 +634,33 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 	return true
 }
 
+// maxTenantKeyLen is the maximum allowed length for a TenantKey from the
+// external rate limit service. Keys exceeding this are rejected and the
+// extracted key is used as fallback.
+const maxTenantKeyLen = 256
+
+// validTenantKey checks that a TenantKey from the external service is safe
+// to use as a Redis key component and in log/metric labels. Allowed characters:
+// alphanumeric, hyphens, underscores, dots, colons. Control characters and
+// excessively long keys are rejected.
+func validTenantKey(s string) bool {
+	if len(s) == 0 || len(s) > maxTenantKeyLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // fetchExternalLimits queries the external rate limit service if configured.
 // Returns the dynamic limits and (optionally overridden) key. When the external
 // service returns a tenant_key, it replaces the extracted key so that each tenant
@@ -647,8 +695,16 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 	// Use tenant key from external service for Redis bucket isolation.
 	// The "t:" prefix ensures tenant-provided keys cannot collide with
 	// the default "rl:edgequota:" prefixed keys.
+	// TenantKey is validated: max 256 chars, alphanumeric + -_.:
+	// Invalid keys are logged and the extracted key is used as fallback.
 	if extLimits.TenantKey != "" {
-		resolvedKey = "t:" + extLimits.TenantKey
+		if validTenantKey(extLimits.TenantKey) {
+			resolvedKey = "t:" + extLimits.TenantKey
+		} else {
+			c.logger.Warn("invalid tenant_key from external service, using extracted key as fallback",
+				"tenant_key_len", len(extLimits.TenantKey),
+				"max_len", maxTenantKeyLen)
+		}
 	}
 
 	if extLimits.Average > 0 {
@@ -768,6 +824,7 @@ func (c *Chain) emitUsageEvent(r *http.Request, key, tenantID string, result *ra
 		Limit:      result.Limit,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		StatusCode: statusCode,
+		RequestID:  r.Header.Get(requestIDHeader),
 	})
 }
 
@@ -928,7 +985,7 @@ func (c *Chain) recoveryLoop() {
 			return
 		}
 
-		limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix)
+		limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger)
 
 		c.mu.Lock()
 		old := c.swapLimiterLocked(limiter)
@@ -1016,7 +1073,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	// Rebuild limiter with new params but same Redis client if available.
 	if c.limiter != nil {
 		oldLim := c.limiter
-		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix)
+		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix, c.logger)
 	}
 
 	// Rebuild fallback limiter with new parameters.
@@ -1031,16 +1088,16 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.reloadAuth(prevCfg, newCfg)
 	c.reloadExternalRL(newCfg)
 
-	// Update URL policy.
-	c.urlPolicy = proxy.BackendURLPolicy{
+	// Update URL policy (atomic — read from ServeHTTP without holding mu).
+	c.urlPolicy.Store(proxy.BackendURLPolicy{
 		AllowedSchemes:      newCfg.Backend.URLPolicy.AllowedSchemes,
 		DenyPrivateNetworks: newCfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
 		AllowedHosts:        newCfg.Backend.URLPolicy.AllowedHosts,
-	}
+	})
 
-	// Update per-request timeout.
+	// Update per-request timeout (atomic — read from ServeHTTP without holding mu).
 	if d, parseErr := time.ParseDuration(newCfg.Server.RequestTimeout); parseErr == nil {
-		c.requestTimeout = d
+		c.requestTimeout.Store(d)
 	}
 
 	// Recreate emitter if events config changed.
@@ -1087,6 +1144,16 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 	if !newCfg.RateLimit.External.Enabled {
 		return
 	}
+
+	// Close the previous dedicated cache Redis client (if any) before
+	// creating a new one. This prevents connection leaks across reloads.
+	// The dedicated client is only set when cache_redis is explicitly
+	// configured, so closing it does not affect the main limiter's client.
+	if c.cacheRedis != nil {
+		_ = c.cacheRedis.Close()
+		c.cacheRedis = nil
+	}
+
 	cacheClient := c.resolveCacheRedis(newCfg, c.logger)
 	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient)
 	if extErr != nil {
@@ -1101,7 +1168,7 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 
 // validateBackendURL checks a dynamic backend URL against the configured policy.
 func (c *Chain) validateBackendURL(u *url.URL) error {
-	return proxy.ValidateBackendURL(u, c.urlPolicy)
+	return proxy.ValidateBackendURL(u, c.urlPolicy.Load().(proxy.BackendURLPolicy))
 }
 
 func (c *Chain) Close() error {

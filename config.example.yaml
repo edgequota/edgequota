@@ -34,6 +34,23 @@ backend:
   idle_conn_timeout: "90s"
   # tls_insecure_skip_verify: false
 
+  # ── Backend URL Policy ─────────────────────────────────────────────
+  # Controls which dynamic backend URLs (from the external rate-limit service)
+  # are allowed. IMPORTANT: When using backend_url overrides from the external
+  # RL service, set allowed_hosts to restrict where traffic can be routed.
+  # If the external RL service is compromised, any allowlist it returns is
+  # equally untrustworthy — the ONLY defensible enforcement point is this
+  # static configuration. The allowlist is optional but strongly recommended.
+  #
+  # url_policy:
+  #   allowed_schemes:         # Restrict URL scheme. Default: ["http", "https"].
+  #     - "http"
+  #     - "https"
+  #   deny_private_networks: true  # Block RFC 1918, loopback, link-local, cloud metadata IPs. Default: true.
+  #   allowed_hosts:           # Optional host allowlist. When non-empty, only these hosts are permitted.
+  #     - "backend-a.internal"
+  #     - "backend-b.internal"
+
   # Low-level HTTP transport tuning. All values have sensible defaults.
   transport:
     dial_timeout: "30s"             # TCP dial timeout for backend connections
@@ -56,6 +73,8 @@ backend:
 #   enabled: true
 #   timeout: "5s"
 #   failure_policy: "failclosed"     # failclosed (default) | failopen
+#   propagate_request_body: false    # Include request body in auth check (default: false)
+#   max_auth_body_size: 65536        # Max body bytes sent to auth service (default: 64 KiB)
 #   http:
 #     url: "http://auth-service:8080/check"
 #     forward_original_headers: false # Also send headers as X-Original-*
@@ -76,6 +95,7 @@ backend:
 #     tls:
 #       enabled: true
 #       ca_file: "/etc/edgequota/tls/auth-ca.pem"
+#       server_name: ""  # Override TLS server name verification. Empty = use hostname from address.
 
 # ─── Rate Limiting ────────────────────────────────────────────────────
 rate_limit:
@@ -123,9 +143,10 @@ rate_limit:
   #   max_concurrent_requests: 50
   #   grpc:
   #     address: "limits-service:50052"
-  #     tls:
-  #       enabled: true
-  #       ca_file: "/etc/edgequota/tls/limits-ca.pem"
+#     tls:
+#       enabled: true
+#       ca_file: "/etc/edgequota/tls/limits-ca.pem"
+#       server_name: ""  # Override TLS server name verification. Empty = use hostname from address.
 
 # ─── Redis ────────────────────────────────────────────────────────────
 redis:

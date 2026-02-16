@@ -412,3 +412,56 @@ func TestInjectionDenyHeaders(t *testing.T) {
 		assert.False(t, exists, "header %q should NOT be in deny set", h)
 	}
 }
+
+func TestValidTenantKey(t *testing.T) {
+	t.Run("valid keys", func(t *testing.T) {
+		valid := []string{
+			"tenant-123",
+			"org:proj.env",
+			"abc",
+			"a",
+			"UPPER_CASE",
+			"mix.of-ALL:chars_123",
+		}
+		for _, k := range valid {
+			assert.True(t, validTenantKey(k), "expected %q to be valid", k)
+		}
+	})
+
+	t.Run("empty key is invalid", func(t *testing.T) {
+		assert.False(t, validTenantKey(""))
+	})
+
+	t.Run("key exceeding max length is invalid", func(t *testing.T) {
+		long := ""
+		for i := 0; i < maxTenantKeyLen+1; i++ {
+			long += "a"
+		}
+		assert.False(t, validTenantKey(long))
+	})
+
+	t.Run("key at exact max length is valid", func(t *testing.T) {
+		exact := ""
+		for i := 0; i < maxTenantKeyLen; i++ {
+			exact += "a"
+		}
+		assert.True(t, validTenantKey(exact))
+	})
+
+	t.Run("invalid characters are rejected", func(t *testing.T) {
+		invalid := []string{
+			"has space",
+			"has/slash",
+			"has\ttab",
+			"has\nnewline",
+			"has\x00null",
+			"emoji👍",
+			"semicolon;",
+			"equals=sign",
+			"pipe|char",
+		}
+		for _, k := range invalid {
+			assert.False(t, validTenantKey(k), "expected %q to be invalid", k)
+		}
+	})
+}

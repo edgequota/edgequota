@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -104,6 +105,7 @@ type Result struct {
 // Limiter performs token-bucket rate limiting against Redis.
 type Limiter struct {
 	client    redis.Client
+	logger    *slog.Logger
 	src       string  // Lua source text (for EVAL fallback)
 	hash      string  // SHA1 hex digest (for EVALSHA)
 	rate      float64 // tokens per microsecond
@@ -114,9 +116,10 @@ type Limiter struct {
 }
 
 // NewLimiter creates a Redis-backed rate limiter.
-func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int, prefix string) *Limiter {
+func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int, prefix string, logger *slog.Logger) *Limiter {
 	return &Limiter{
 		client:    client,
+		logger:    logger,
 		src:       rateLimitLua,
 		hash:      tokenBucketScript.Hash(),
 		rate:      ratePerSecond / 1e6, // convert to per-microsecond
@@ -131,6 +134,8 @@ func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int
 func (l *Limiter) evalScript(ctx context.Context, keys []string, args ...any) (interface{ Slice() ([]any, error) }, error) {
 	cmd := l.client.EvalSha(ctx, l.hash, keys, args...)
 	if cmd.Err() != nil && redis.IsNoScriptErr(cmd.Err()) {
+		l.logger.Debug("EVALSHA returned NOSCRIPT, falling back to EVAL",
+			"key", keys[0], "error", cmd.Err())
 		cmd = l.client.Eval(ctx, l.src, keys, args...)
 	}
 	if cmd.Err() != nil {

@@ -114,6 +114,9 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	if cfg.Server.MaxWebSocketTransferBytes > 0 {
 		proxyOpts = append(proxyOpts, proxy.WithMaxWSTransferBytes(cfg.Server.MaxWebSocketTransferBytes))
 	}
+	if cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled() {
+		proxyOpts = append(proxyOpts, proxy.WithDenyPrivateNetworks())
+	}
 
 	rp, err := proxy.New(
 		cfg.Backend.URL,

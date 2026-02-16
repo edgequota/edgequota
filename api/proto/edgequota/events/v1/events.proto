@@ -39,6 +39,9 @@ message UsageEvent {
   string timestamp = 8;
   // HTTP status code returned.
   int32 status_code = 9;
+  // X-Request-Id for event deduplication and correlation. Enables idempotent
+  // event processing in downstream systems (e.g. billing, analytics).
+  string request_id = 10;
 }
 
 // PublishEventsRequest contains a batch of usage events.

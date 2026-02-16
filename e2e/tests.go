@@ -259,18 +259,15 @@ func testSingleFailClosed(base string) testResult {
 		return fail("single-fc", "could not scale Redis to 0: %v", err)
 	}
 
-	// Wait for the pod to terminate and the proxy's pooled connections to
-	// receive TCP RST / connection refused from the now-empty ClusterIP.
-	info("  Waiting for Redis pod to terminate...")
-	time.Sleep(8 * time.Second)
-
-	// Send a priming burst to force the proxy's Redis client to discover
-	// the broken connection. The go-redis pool retries internally, but
-	// with no backend behind the Service ClusterIP every attempt gets
-	// "connection refused". This triggers handleLimiterError →
-	// IsConnectivityErr → limiter set to nil → failClosed path.
-	sendBurst(base, nil, 5)
-	time.Sleep(3 * time.Second)
+	// Wait for the proxy to detect Redis is down. Poll until we see failClosed
+	// behavior (429s) instead of using a fixed sleep.
+	info("  Waiting for EdgeQuota to detect Redis failure...")
+	if err := pollUntil(30*time.Second, "EdgeQuota detects Redis down (failClosed 429s)", func() bool {
+		_, ok429 := sendBurst(base, nil, 5)
+		return ok429 > 0
+	}); err != nil {
+		return fail("single-fc", "EdgeQuota did not detect Redis failure: %v", err)
+	}
 
 	// Requests should now get 429 (failClosed).
 	_, _, codes := sendBurstDetailed(base, nil, 5)
@@ -297,8 +294,8 @@ func testSingleFailClosed(base string) testResult {
 
 func testSingleFallback(base string) testResult {
 	// Verify normal operation.
-	ok200, _ := sendBurst(base, nil, 3)
-	if ok200 < 1 {
+	ok200Pre, _ := sendBurst(base, nil, 3)
+	if ok200Pre < 1 {
 		return fail("single-fb", "expected ≥1 allowed before kill, got 0")
 	}
 
@@ -309,10 +306,16 @@ func testSingleFallback(base string) testResult {
 		return fail("single-fb", "could not kill Redis pod: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
-
-	// Should fall back to in-memory limiting.
-	ok200, ok429 := sendBurst(base, nil, 10)
+	// Poll until in-memory fallback kicks in (we see both 200s and 429s).
+	info("  Waiting for EdgeQuota to fall back to in-memory limiter...")
+	var ok200, ok429 int
+	if err := pollUntil(30*time.Second, "in-memory fallback active", func() bool {
+		ok200, ok429 = sendBurst(base, nil, 10)
+		return ok200 > 0 && ok429 > 0
+	}); err != nil {
+		// If poll fails, continue with last values for the assertion below.
+		info("  Poll timed out, checking last burst results")
+	}
 
 	// Restore Redis.
 	waitForPods("app=redis-single", 60*time.Second)
@@ -450,10 +453,15 @@ func testKillSinglePassThrough(base string) testResult {
 		return fail("kill-pt", "could not kill Redis: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
-
-	// passThrough should allow all.
-	ok200, ok429 := sendBurst(base, nil, 5)
+	// Poll until passthrough kicks in (all requests succeed).
+	info("  Waiting for EdgeQuota to enter passthrough mode...")
+	var ok200, ok429 int
+	if err := pollUntil(30*time.Second, "passthrough mode (all 200s)", func() bool {
+		ok200, ok429 = sendBurst(base, nil, 5)
+		return ok200 == 5 && ok429 == 0
+	}); err != nil {
+		info("  Poll timed out, checking last burst results")
+	}
 
 	// Restore.
 	waitForPods("app=redis-single", 60*time.Second)
@@ -472,9 +480,15 @@ func testKillSingleFallback(base string) testResult {
 		return fail("kill-fb", "could not kill Redis: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
-
-	ok200, ok429 := sendBurst(base, nil, 10)
+	// Poll until fallback limiter kicks in (mix of 200s and 429s).
+	info("  Waiting for EdgeQuota to fall back to in-memory limiter...")
+	var ok200, ok429 int
+	if err := pollUntil(30*time.Second, "fallback limiter active", func() bool {
+		ok200, ok429 = sendBurst(base, nil, 10)
+		return ok200 > 0 && ok429 > 0
+	}); err != nil {
+		info("  Poll timed out, checking last burst results")
+	}
 
 	// Restore.
 	waitForPods("app=redis-single", 60*time.Second)
@@ -503,12 +517,13 @@ func testRecoveryAfterRestart(base string) testResult {
 		return fail("recovery", "could not kill Redis: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
-
-	// Step 3: Verify passthrough mode (burst-test uses passThrough, no 429s since Redis is down).
-	ok200pt, ok429pt := sendBurst(base, nil, 5)
-	if ok200pt < 4 {
-		return fail("recovery", "step 3: expected passthrough after kill, got 200s=%d 429s=%d", ok200pt, ok429pt)
+	// Step 3: Poll until passthrough mode kicks in.
+	info("  Waiting for EdgeQuota to enter passthrough mode...")
+	if err := pollUntil(30*time.Second, "passthrough after Redis kill", func() bool {
+		ok200pt, _ := sendBurst(base, nil, 5)
+		return ok200pt >= 4
+	}); err != nil {
+		return fail("recovery", "step 3: did not enter passthrough: %v", err)
 	}
 
 	// Step 4: Wait for Redis to come back (Deployment auto-recreates the pod).
@@ -517,24 +532,17 @@ func testRecoveryAfterRestart(base string) testResult {
 		return fail("recovery", "Redis pod did not restart: %v", err)
 	}
 
-	// Step 5: Wait for recovery loop to reconnect.
+	// Step 5: Poll for recovery — the recovery loop reconnects with backoff.
 	info("  Waiting for EdgeQuota to recover Redis connection...")
-	time.Sleep(10 * time.Second)
+	if err := pollUntil(60*time.Second, "Redis-backed limiting recovered (429s)", func() bool {
+		_, ok429r := sendBurst(base, nil, 15)
+		return ok429r > 0
+	}); err != nil {
+		return fail("recovery", "step 5: EdgeQuota did not recover: %v", err)
+	}
 
-	// Step 6: Verify Redis-backed limiting is active again.
 	ok200r, ok429r := sendBurst(base, nil, 15)
-	if ok429r > 0 {
-		return pass("recovery", "recovered: %d allowed, %d limited after Redis restart", ok200r, ok429r)
-	}
-
-	// Retry once more — recovery loop may still be in backoff.
-	time.Sleep(10 * time.Second)
-	ok200r2, ok429r2 := sendBurst(base, nil, 15)
-	if ok429r2 > 0 {
-		return pass("recovery", "recovered (2nd attempt): %d allowed, %d limited", ok200r2, ok429r2)
-	}
-
-	return fail("recovery", "step 6: expected 429s after recovery, got 200s=%d/%d 429s=%d/%d", ok200r, ok200r2, ok429r, ok429r2)
+	return pass("recovery", "recovered: %d allowed, %d limited after Redis restart", ok200r, ok429r)
 }
 
 func testConcurrentBurst(base string) testResult {

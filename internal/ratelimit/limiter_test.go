@@ -1,7 +1,9 @@
 package ratelimit
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -11,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var testLogger = slog.Default()
 
 func newTestRedisClient(t *testing.T) (redis.Client, *miniredis.Miniredis) {
 	t.Helper()
@@ -27,7 +31,7 @@ func newTestRedisClient(t *testing.T) (redis.Client, *miniredis.Miniredis) {
 func TestNewLimiter(t *testing.T) {
 	t.Run("creates limiter with correct parameters", func(t *testing.T) {
 		client, _ := newTestRedisClient(t)
-		l := NewLimiter(client, 10.0, 5, 10, "rl:test:")
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
 
 		assert.NotNil(t, l)
 		assert.Equal(t, 10.0/1e6, l.rate)
@@ -42,7 +46,7 @@ func TestNewLimiter(t *testing.T) {
 func TestLimiterAllow(t *testing.T) {
 	t.Run("allows requests within burst", func(t *testing.T) {
 		client, _ := newTestRedisClient(t)
-		l := NewLimiter(client, 10.0, 5, 10, "rl:test:")
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
 
 		for i := 0; i < 5; i++ {
 			result, err := l.Allow(context.Background(), "key1")
@@ -53,7 +57,7 @@ func TestLimiterAllow(t *testing.T) {
 
 	t.Run("denies requests after burst exhaustion", func(t *testing.T) {
 		client, _ := newTestRedisClient(t)
-		l := NewLimiter(client, 2.0, 3, 10, "rl:test:")
+		l := NewLimiter(client, 2.0, 3, 10, "rl:test:", testLogger)
 
 		// Exhaust burst.
 		for i := 0; i < 3; i++ {
@@ -71,7 +75,7 @@ func TestLimiterAllow(t *testing.T) {
 
 	t.Run("works after Redis data is flushed", func(t *testing.T) {
 		client, mr := newTestRedisClient(t)
-		l := NewLimiter(client, 10.0, 5, 10, "rl:test:")
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
 
 		// First call succeeds.
 		result, err := l.Allow(context.Background(), "key3")
@@ -89,7 +93,7 @@ func TestLimiterAllow(t *testing.T) {
 
 	t.Run("different keys have independent buckets", func(t *testing.T) {
 		client, _ := newTestRedisClient(t)
-		l := NewLimiter(client, 2.0, 2, 10, "rl:test:")
+		l := NewLimiter(client, 2.0, 2, 10, "rl:test:", testLogger)
 
 		// Exhaust key-a.
 		for i := 0; i < 2; i++ {
@@ -111,7 +115,7 @@ func TestLimiterAllow(t *testing.T) {
 func TestLimiterClient(t *testing.T) {
 	t.Run("returns the underlying redis client", func(t *testing.T) {
 		client, _ := newTestRedisClient(t)
-		l := NewLimiter(client, 10.0, 5, 10, "rl:test:")
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
 		assert.Equal(t, client, l.Client())
 	})
 }
@@ -192,4 +196,60 @@ type mockSliceCmd struct {
 
 func (m *mockSliceCmd) Slice() ([]any, error) {
 	return m.result, m.err
+}
+
+func TestEvalSHAFallbackLogsDebug(t *testing.T) {
+	t.Run("logs debug message when EVALSHA falls back to EVAL", func(t *testing.T) {
+		client, mr := newTestRedisClient(t)
+
+		// Create limiter and flush the script cache so EVALSHA will fail.
+		var logBuf bytes.Buffer
+		debugLogger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", debugLogger)
+
+		// Flush the script cache to force NOSCRIPT on next EVALSHA.
+		mr.FlushAll()
+
+		result, err := l.Allow(context.Background(), "evalsha-test")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed)
+
+		// Verify the debug log was emitted.
+		logOutput := logBuf.String()
+		assert.Contains(t, logOutput, "EVALSHA returned NOSCRIPT")
+		assert.Contains(t, logOutput, "falling back to EVAL")
+	})
+}
+
+func TestLimiterRedisFailure(t *testing.T) {
+	t.Run("returns error when Redis is down", func(t *testing.T) {
+		client, mr := newTestRedisClient(t)
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
+
+		// Stop Redis to simulate failure.
+		mr.Close()
+
+		_, err := l.Allow(context.Background(), "fail-test")
+		assert.Error(t, err)
+	})
+
+	t.Run("Allow works again after Redis recovers", func(t *testing.T) {
+		client, mr := newTestRedisClient(t)
+		l := NewLimiter(client, 10.0, 5, 10, "rl:test:", testLogger)
+
+		// Verify it works.
+		result, err := l.Allow(context.Background(), "recover-test")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed)
+
+		// Stop and restart Redis.
+		mr.Close()
+		_, err = l.Allow(context.Background(), "recover-test")
+		assert.Error(t, err)
+
+		mr.Start()
+		result, err = l.Allow(context.Background(), "recover-test")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed)
+	})
 }

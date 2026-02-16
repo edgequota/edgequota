@@ -188,3 +188,33 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// pollUntil calls check repeatedly with exponential backoff until it returns
+// true or the timeout expires. Initial interval is 1s, max interval is 10s.
+// Returns an error if the timeout is exceeded.
+func pollUntil(timeout time.Duration, desc string, check func() bool) error {
+	deadline := time.Now().Add(timeout)
+	interval := time.Second
+
+	for time.Now().Before(deadline) {
+		if check() {
+			return nil
+		}
+		sleep := interval
+		if remaining := time.Until(deadline); sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		interval = min(interval*2, 10*time.Second)
+	}
+	return fmt.Errorf("timeout after %s waiting for: %s", timeout, desc)
+}
+
+// waitForHTTPCondition polls an HTTP endpoint until the check function returns
+// true or the timeout expires.
+func waitForHTTPCondition(base string, timeout time.Duration, desc string, check func(ok200, ok429 int) bool) error {
+	return pollUntil(timeout, desc, func() bool {
+		ok200, ok429 := sendBurst(base, nil, 5)
+		return check(ok200, ok429)
+	})
+}

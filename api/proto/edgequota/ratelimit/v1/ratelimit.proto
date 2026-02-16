@@ -67,6 +67,13 @@ message GetLimitsResponse {
   // Tenant key for Redis bucket isolation (optional). When non-empty,
   // EdgeQuota uses this as the rate-limit key instead of the extracted key.
   // This allows the external service to assign per-tenant buckets.
+  //
+  // Constraints enforced by EdgeQuota:
+  //   - Maximum length: 256 characters.
+  //   - Allowed characters: alphanumeric (a-z, A-Z, 0-9), hyphens (-),
+  //     underscores (_), dots (.), and colons (:).
+  //   - Keys that violate these constraints are logged with a warning and
+  //     ignored — the originally extracted key is used as fallback.
   string tenant_key = 6;
 
   // Dynamic failure policy override (optional). When Redis is unavailable,

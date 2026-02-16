@@ -98,6 +98,7 @@ type CheckRequest struct {
 	Path       string            `json:"path"`
 	Headers    map[string]string `json:"headers"`
 	RemoteAddr string            `json:"remote_addr"`
+	Body       []byte            `json:"body,omitempty"` // optional; included when propagate_request_body is enabled
 }
 
 // CheckResponse represents the response from the external auth service.
@@ -113,6 +114,10 @@ type CheckResponse struct {
 	RequestHeaders map[string]string `json:"request_headers,omitempty"`
 }
 
+// defaultMaxAuthBodySize is the default maximum request body size (64 KiB)
+// forwarded to the auth service when propagate_request_body is enabled.
+const defaultMaxAuthBodySize = 64 * 1024
+
 // Client calls an external authentication service to verify requests.
 type Client struct {
 	httpURL                string
@@ -122,6 +127,8 @@ type Client struct {
 	timeout                time.Duration
 	headerFilter           *config.HeaderFilter
 	forwardOriginalHeaders bool // when true, forward X-Original-* HTTP headers
+	propagateBody          bool // when true, include request body in auth check
+	maxBodySize            int64
 	cb                     *circuitBreaker
 }
 
@@ -145,19 +152,27 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	maxBodySize := cfg.MaxAuthBodySize
+	if maxBodySize <= 0 {
+		maxBodySize = defaultMaxAuthBodySize
+	}
+
 	c := &Client{
 		httpURL:                cfg.HTTP.URL,
 		httpClient:             &http.Client{Timeout: timeout, Transport: transport},
 		timeout:                timeout,
 		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
+		propagateBody:          cfg.PropagateRequestBody,
+		maxBodySize:            maxBodySize,
 		cb:                     newCircuitBreaker(),
 	}
 
 	if cfg.GRPC.Address != "" {
 		var creds credentials.TransportCredentials
 		if cfg.GRPC.TLS.Enabled {
-			tlsCreds, tlsErr := credentials.NewClientTLSFromFile(cfg.GRPC.TLS.CAFile, "")
+			serverName := cfg.GRPC.TLS.ResolveServerName(cfg.GRPC.Address)
+			tlsCreds, tlsErr := credentials.NewClientTLSFromFile(cfg.GRPC.TLS.CAFile, serverName)
 			if tlsErr != nil {
 				return nil, fmt.Errorf("auth grpc tls: %w", tlsErr)
 			}
@@ -270,6 +285,7 @@ func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckRespon
 		Path:       req.Path,
 		Headers:    req.Headers,
 		RemoteAddr: req.RemoteAddr,
+		Body:       req.Body,
 	}
 
 	pbResp, err := c.grpcClient.Check(ctx, pbReq)
@@ -294,15 +310,24 @@ func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckRespon
 
 // Close releases resources held by the auth client.
 func (c *Client) Close() error {
+	c.httpClient.CloseIdleConnections()
 	if c.grpcConn != nil {
 		return c.grpcConn.Close()
 	}
 	return nil
 }
 
+// PropagateBody returns whether request body propagation is enabled.
+func (c *Client) PropagateBody() bool { return c.propagateBody }
+
+// MaxBodySize returns the maximum body size for auth body propagation.
+func (c *Client) MaxBodySize() int64 { return c.maxBodySize }
+
 // BuildCheckRequest creates a CheckRequest from an http.Request, applying
 // the client's header filter to strip sensitive headers before forwarding.
-func (c *Client) BuildCheckRequest(r *http.Request) *CheckRequest {
+// When body is non-nil, it is included in the request for auth services that
+// need to inspect the request payload (e.g. for request signing or content-based auth).
+func (c *Client) BuildCheckRequest(r *http.Request, body []byte) *CheckRequest {
 	headers := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
 		if len(v) > 0 && c.headerFilter.Allowed(k) {
@@ -315,5 +340,6 @@ func (c *Client) BuildCheckRequest(r *http.Request) *CheckRequest {
 		Path:       r.URL.Path,
 		Headers:    headers,
 		RemoteAddr: r.RemoteAddr,
+		Body:       body,
 	}
 }

@@ -112,6 +112,57 @@ The `Host` header is forwarded as-is to the backend. If the backend makes routin
 
 ---
 
+## Backend URL Override Security
+
+When the external rate-limit service is enabled, it can return a `backend_url` field to route individual requests to different backends (per-tenant routing). This is a powerful feature but increases the SSRF attack surface.
+
+### Static Config is the Only Trustworthy Enforcement Point
+
+If the external rate-limit service is compromised, **any allowlist it returns is equally untrustworthy**. The only defensible enforcement point is the static `backend.url_policy` in the EdgeQuota configuration file.
+
+**Recommendations:**
+
+1. **Always set `allowed_hosts`** when `backend_url` overrides are in use. This restricts traffic to a known set of backend hosts regardless of what the external service returns.
+2. **Keep `deny_private_networks: true`** (the default). This prevents the external service from redirecting traffic to internal services (169.254.169.254, 10.x.x.x, etc.).
+3. **Use `allowed_schemes`** to restrict to `["http", "https"]` (the default).
+
+```yaml
+backend:
+  url_policy:
+    deny_private_networks: true
+    allowed_hosts:
+      - "backend-a.internal"
+      - "backend-b.internal"
+```
+
+### DNS Rebinding Protection
+
+EdgeQuota validates backend URLs at request time, but an attacker could use DNS rebinding to switch a hostname from a public IP to a private IP between validation and connection. To prevent this, EdgeQuota re-validates resolved IPs at TCP dial time when `deny_private_networks` is enabled. This closes the time-of-check/time-of-use (TOCTOU) gap.
+
+---
+
+## External Service Response Validation
+
+When the external rate-limit service returns dynamic values (tenant keys, backend URLs, failure policies), EdgeQuota validates them before use. This protects against compromised or misconfigured external services.
+
+### TenantKey Validation
+
+The `tenant_key` field in `GetLimitsResponse` is used as a Redis key component and Prometheus metric label. To prevent Redis memory abuse, log pollution, and metric cardinality explosions, EdgeQuota enforces the following constraints:
+
+| Constraint | Value |
+|-----------|-------|
+| Maximum length | 256 characters |
+| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_`, `.`, `:` |
+| On violation | Warning logged, extracted key used as fallback |
+
+Invalid tenant keys are **never silently accepted**. The request is still processed (not rejected), but the operator is alerted via structured log warnings.
+
+### Backend URL Validation
+
+See "Backend URL Override Security" above.
+
+---
+
 ## Redis Security
 
 ### Authentication

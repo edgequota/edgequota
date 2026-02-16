@@ -13,7 +13,7 @@ syntax = "proto3";
 
 package edgequota.auth.v1;
 
-option go_package = "github.com/edgequota/edgequota/api/gen/auth/v1;authv1";
+option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/auth/v1;authv1";
 
 // AuthService validates incoming requests against an external auth backend.
 service AuthService {
@@ -31,6 +31,9 @@ message CheckRequest {
   map<string, string> headers = 3;
   // Client remote address (ip:port).
   string remote_addr = 4;
+  // Optional request body, included when propagate_request_body is enabled.
+  // Capped to max_auth_body_size (default 64 KiB).
+  bytes body = 5;
 }
 
 // CheckResponse indicates whether the request is allowed or denied.

@@ -266,7 +266,8 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 	if cfg.GRPC.Address != "" {
 		var creds credentials.TransportCredentials
 		if cfg.GRPC.TLS.Enabled {
-			tlsCreds, tlsErr := credentials.NewClientTLSFromFile(cfg.GRPC.TLS.CAFile, "")
+			serverName := cfg.GRPC.TLS.ResolveServerName(cfg.GRPC.Address)
+			tlsCreds, tlsErr := credentials.NewClientTLSFromFile(cfg.GRPC.TLS.CAFile, serverName)
 			if tlsErr != nil {
 				return nil, fmt.Errorf("external ratelimit grpc tls: %w", tlsErr)
 			}
@@ -450,7 +451,17 @@ func (ec *ExternalClient) evictStaleBreakers() {
 		cb := value.(*tenantCircuitBreaker)
 		if cb.isStale(now, maxIdle) {
 			ec.breakers.Delete(key)
-			ec.breakerCount.Add(-1)
+			// CAS loop with floor of 0 to prevent breakerCount from going
+			// negative due to races between eviction and LoadOrStore.
+			for {
+				old := ec.breakerCount.Load()
+				if old <= 0 {
+					break
+				}
+				if ec.breakerCount.CompareAndSwap(old, old-1) {
+					break
+				}
+			}
 		}
 		return true
 	})
@@ -693,6 +704,8 @@ func (ec *ExternalClient) Close() error {
 			close(ec.done)
 		}
 	}
+
+	ec.httpClient.CloseIdleConnections()
 
 	if ec.grpcConn != nil {
 		return ec.grpcConn.Close()

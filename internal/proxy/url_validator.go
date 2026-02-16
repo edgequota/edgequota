@@ -97,7 +97,7 @@ func ValidateBackendURL(u *url.URL, policy BackendURLPolicy) error {
 func checkNotPrivate(host string) error {
 	// Direct IP check (no DNS needed).
 	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
+		if IsPrivateIP(ip) {
 			return fmt.Errorf("IP %s is in a private/reserved range", ip)
 		}
 		return nil
@@ -112,7 +112,7 @@ func checkNotPrivate(host string) error {
 	}
 
 	for _, ip := range ips {
-		if isPrivateIP(ip) {
+		if IsPrivateIP(ip) {
 			return fmt.Errorf("host %q resolves to private IP %s", host, ip)
 		}
 	}
@@ -120,8 +120,10 @@ func checkNotPrivate(host string) error {
 	return nil
 }
 
-// isPrivateIP reports whether the IP falls within any private/reserved range.
-func isPrivateIP(ip net.IP) bool {
+// IsPrivateIP reports whether the IP falls within any private/reserved range.
+// Exported so the safe dialer can reuse the same check at connect time to
+// prevent DNS rebinding attacks (TOCTOU between validation and dial).
+func IsPrivateIP(ip net.IP) bool {
 	for _, n := range privateNetworks {
 		if n.Contains(ip) {
 			return true

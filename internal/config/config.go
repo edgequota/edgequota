@@ -10,6 +10,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -365,6 +366,14 @@ type AuthConfig struct {
 	HTTP          AuthHTTPConfig     `yaml:"http"           envPrefix:"HTTP_"`
 	GRPC          AuthGRPCConfig     `yaml:"grpc"           envPrefix:"GRPC_"`
 	HeaderFilter  HeaderFilterConfig `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
+
+	// PropagateRequestBody controls whether the request body is included in
+	// the auth check request. Off by default to avoid buffering overhead.
+	// When enabled, the body is read up to MaxAuthBodySize bytes and included
+	// in the auth request. The original body is replaced so the proxy can
+	// still forward it to the backend.
+	PropagateRequestBody bool  `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
+	MaxAuthBodySize      int64 `yaml:"max_auth_body_size"     env:"MAX_AUTH_BODY_SIZE"` // bytes; 0 = use default (64 KiB)
 }
 
 // AuthHTTPConfig holds HTTP-based auth backend settings.
@@ -381,8 +390,23 @@ type AuthGRPCConfig struct {
 
 // GRPCTLSConfig holds TLS settings for gRPC client connections.
 type GRPCTLSConfig struct {
-	Enabled bool   `yaml:"enabled" env:"ENABLED"`
-	CAFile  string `yaml:"ca_file" env:"CA_FILE"`
+	Enabled    bool   `yaml:"enabled"     env:"ENABLED"`
+	CAFile     string `yaml:"ca_file"     env:"CA_FILE"`
+	ServerName string `yaml:"server_name" env:"SERVER_NAME"` // Override for TLS server name verification. When empty, the hostname from the gRPC address is used.
+}
+
+// ResolveServerName returns the TLS server name to verify. If ServerName is
+// explicitly set, it is returned. Otherwise the hostname is extracted from the
+// gRPC address (host:port). Returns empty string on parse failure.
+func (c GRPCTLSConfig) ResolveServerName(grpcAddress string) string {
+	if c.ServerName != "" {
+		return c.ServerName
+	}
+	host, _, err := net.SplitHostPort(grpcAddress)
+	if err != nil {
+		return grpcAddress // bare hostname without port
+	}
+	return host
 }
 
 // RateLimitConfig holds rate limiting settings.

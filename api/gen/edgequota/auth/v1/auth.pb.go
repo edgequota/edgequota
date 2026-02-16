@@ -42,7 +42,9 @@ type CheckRequest struct {
 	// Flattened request headers (first value per key).
 	Headers map[string]string `protobuf:"bytes,3,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Client remote address (ip:port).
-	RemoteAddr    string `protobuf:"bytes,4,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
+	RemoteAddr string `protobuf:"bytes,4,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
+	// Optional request body, included when propagate_request_body is enabled.
+	Body          []byte `protobuf:"bytes,5,opt,name=body,proto3" json:"body,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -103,6 +105,13 @@ func (x *CheckRequest) GetRemoteAddr() string {
 		return x.RemoteAddr
 	}
 	return ""
+}
+
+func (x *CheckRequest) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
 }
 
 // CheckResponse indicates whether the request is allowed or denied.

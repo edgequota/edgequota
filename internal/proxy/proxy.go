@@ -83,6 +83,67 @@ func WithMaxWSTransferBytes(n int64) Option {
 	return func(p *Proxy) { p.maxWSTransferBytes = n }
 }
 
+// WithDenyPrivateNetworks enables DNS rebinding protection on all backend
+// dials. When enabled, the proxy re-validates resolved IPs at connect time
+// to prevent TOCTOU attacks where a hostname resolves to a public IP during
+// URL validation but switches to a private IP before the TCP connection.
+func WithDenyPrivateNetworks() Option {
+	return func(p *Proxy) { p.denyPrivateNetworks = true }
+}
+
+// ---------------------------------------------------------------------------
+// Safe dialer — DNS rebinding protection
+// ---------------------------------------------------------------------------
+
+// SafeDialer wraps a net.Dialer and re-validates resolved IPs against private
+// network ranges at connect time. This closes the TOCTOU gap between
+// ValidateBackendURL (which resolves DNS early) and the actual TCP dial (which
+// may hit a different IP due to DNS rebinding).
+//
+// When enabled is false, the dialer behaves identically to the inner dialer.
+type SafeDialer struct {
+	Inner   *net.Dialer
+	Enabled bool // When false, no IP validation is performed.
+}
+
+// DialContext resolves the address, checks all returned IPs against private
+// ranges, then dials the first allowed IP. Returns an error if all resolved
+// IPs are private or if resolution fails.
+func (d *SafeDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if !d.Enabled {
+		return d.Inner.DialContext(ctx, network, addr)
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return d.Inner.DialContext(ctx, network, addr)
+	}
+
+	// Direct IP — validate and dial.
+	if ip := net.ParseIP(host); ip != nil {
+		if IsPrivateIP(ip) {
+			return nil, fmt.Errorf("dial blocked: %s is a private/reserved IP", ip)
+		}
+		return d.Inner.DialContext(ctx, network, addr)
+	}
+
+	// Hostname — resolve, validate every IP, then dial the first safe one.
+	ips, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if lookupErr != nil {
+		return nil, fmt.Errorf("dial blocked: cannot resolve %q: %w", host, lookupErr)
+	}
+
+	for _, ipAddr := range ips {
+		if IsPrivateIP(ipAddr.IP) {
+			continue
+		}
+		pinnedAddr := net.JoinHostPort(ipAddr.IP.String(), port)
+		return d.Inner.DialContext(ctx, network, pinnedAddr)
+	}
+
+	return nil, fmt.Errorf("dial blocked: all IPs for %q resolve to private/reserved ranges", host)
+}
+
 // ---------------------------------------------------------------------------
 // Request body streaming with byte counting
 // ---------------------------------------------------------------------------
@@ -137,15 +198,16 @@ func (st *streamingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 // Proxy is a multi-protocol reverse proxy that transparently forwards
 // HTTP, gRPC, SSE, and WebSocket traffic to a backend service.
 type Proxy struct {
-	backendURL         *url.URL
-	httpProxy          *httputil.ReverseProxy
-	http2Transport     *http2.Transport
-	logger             *slog.Logger
-	backendTLSInsecure bool
-	wsDialTimeout      time.Duration
-	wsLimiter          *WSLimiter // nil when no per-key WS limit is configured.
-	maxRequestBodySize int64      // 0 = unlimited
-	maxWSTransferBytes int64      // 0 = unlimited per-direction
+	backendURL          *url.URL
+	httpProxy           *httputil.ReverseProxy
+	http2Transport      *http2.Transport
+	logger              *slog.Logger
+	backendTLSInsecure  bool
+	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
+	wsDialTimeout       time.Duration
+	wsLimiter           *WSLimiter // nil when no per-key WS limit is configured.
+	maxRequestBodySize  int64      // 0 = unlimited
+	maxWSTransferBytes  int64      // 0 = unlimited per-direction
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -188,7 +250,7 @@ func New(
 		schemeHint = target.Scheme
 	}
 
-	httpTransport, h2Transport, h3Transport := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure)
+	httpTransport, h2Transport, h3Transport := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure, p.denyPrivateNetworks)
 	wsDialTimeout, _ := config.ParseDuration(transportCfg.WebSocketDialTimeout, 10*time.Second)
 
 	// Wrap transports with streaming byte-counting when a body size limit is
@@ -220,6 +282,7 @@ func buildTransports(
 	maxIdleConns int,
 	idleConnTimeout time.Duration,
 	tlsInsecure bool,
+	denyPrivateNetworks bool,
 ) (*http.Transport, *http2.Transport, http.RoundTripper) {
 	dialTimeout, _ := config.ParseDuration(cfg.DialTimeout, 30*time.Second)
 	dialKeepAlive, _ := config.ParseDuration(cfg.DialKeepAlive, 30*time.Second)
@@ -228,9 +291,17 @@ func buildTransports(
 	h2ReadIdleTimeout, _ := config.ParseDuration(cfg.H2ReadIdleTimeout, 30*time.Second)
 	h2PingTimeout, _ := config.ParseDuration(cfg.H2PingTimeout, 15*time.Second)
 
-	dialer := &net.Dialer{
+	innerDialer := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
+	}
+
+	// SafeDialer re-validates resolved IPs at connect time to prevent DNS
+	// rebinding attacks. The URL validator catches obvious cases early, but
+	// this dialer is the enforcement point that closes the TOCTOU gap.
+	dialer := &SafeDialer{
+		Inner:   innerDialer,
+		Enabled: denyPrivateNetworks,
 	}
 
 	// Shared TLS config for HTTPS backends — used by both H1 and H2 transports.
@@ -260,6 +331,9 @@ func buildTransports(
 	// *tls.Config (via t.newTLSConfig), so we use the backend scheme to
 	// decide: cleartext backends get a raw TCP connection; HTTPS backends
 	// get a full TLS handshake.
+	//
+	// The SafeDialer is used here so that DNS rebinding protection applies
+	// to HTTP/2 backend connections as well.
 	h2 := &http2.Transport{
 		AllowHTTP:       true,
 		TLSClientConfig: backendTLS,
@@ -453,14 +527,17 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 	backendAddr := effective.Host // Always host:port after normalization.
 	ctx := r.Context()
 
-	dialer := &net.Dialer{Timeout: p.wsDialTimeout}
+	wsDialer := &SafeDialer{
+		Inner:   &net.Dialer{Timeout: p.wsDialTimeout},
+		Enabled: p.denyPrivateNetworks,
+	}
 
 	if effective.Scheme == "https" {
 		tlsCfg := &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: p.backendTLSInsecure, //nolint:gosec // Configurable per-user choice.
 		}
-		rawConn, err := dialer.DialContext(ctx, "tcp", backendAddr)
+		rawConn, err := wsDialer.DialContext(ctx, "tcp", backendAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -471,7 +548,7 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 		}
 		return tlsConn, nil
 	}
-	return dialer.DialContext(ctx, "tcp", backendAddr)
+	return wsDialer.DialContext(ctx, "tcp", backendAddr)
 }
 
 // relayWebSocket copies data bidirectionally between client and backend.

@@ -244,7 +244,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		r.RemoteAddr = "192.168.1.1:5000"
 
 		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
-		cr := c.BuildCheckRequest(r)
+		cr := c.BuildCheckRequest(r, nil)
 
 		assert.Equal(t, "POST", cr.Method)
 		assert.Equal(t, "/api/v1/resource", cr.Path)
@@ -265,7 +265,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{
 			AllowList: []string{"Authorization", "X-Tenant-Id"},
 		})}
-		cr := c.BuildCheckRequest(r)
+		cr := c.BuildCheckRequest(r, nil)
 
 		assert.Equal(t, "Bearer token", cr.Headers["Authorization"])
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
@@ -278,7 +278,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		r.RemoteAddr = "127.0.0.1:1234"
 
 		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
-		cr := c.BuildCheckRequest(r)
+		cr := c.BuildCheckRequest(r, nil)
 
 		assert.Equal(t, "GET", cr.Method)
 		assert.Equal(t, "/", cr.Path)

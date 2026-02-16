@@ -38,6 +38,13 @@ jobs:
           go install mvdan.cc/gofumpt@latest
           gofumpt -l . | tee /dev/stderr | (! read)
 
+      - name: Check protobuf backward compatibility
+        if: github.event_name == 'pull_request'
+        uses: bufbuild/buf-setup-action@v1
+      - name: Run buf breaking
+        if: github.event_name == 'pull_request'
+        run: buf breaking --against '${{ github.event.pull_request.base.sha }}'
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -121,10 +128,25 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+  buf-publish:
+    name: Publish Protos to BSR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [lint, test, build, security]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - name: Push module to Buf Schema Registry
+        run: buf push --label "${{ github.ref_name }}"
+        env:
+          BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
+
   publish:
     name: Publish Docker Image
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [lint, test, build, security]
     permissions:
       contents: read

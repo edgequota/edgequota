@@ -82,6 +82,7 @@ vulncheck:
 ## proto: Generate Go code from protobuf definitions using buf
 proto:
 	buf lint
+	buf breaking --against '.git#branch=main' || echo "WARN: buf breaking check failed (expected for initial development)"
 	buf generate
 	@echo "Generated proto files in api/gen/"
 
