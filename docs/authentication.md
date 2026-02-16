@@ -68,8 +68,10 @@ Configure with:
 auth:
   enabled: true
   timeout: "5s"
+  failure_policy: "failclosed"      # failclosed (default) | failopen
   http:
     url: "http://auth-service:8080/check"
+    forward_original_headers: false  # also send headers as X-Original-*
 ```
 
 ### Request
@@ -131,6 +133,7 @@ Configure with:
 auth:
   enabled: true
   timeout: "5s"
+  failure_policy: "failclosed"
   grpc:
     address: "auth-service:50051"
     tls:
@@ -183,24 +186,79 @@ EdgeQuota forwards all client headers to the auth service, including those that 
 2. **Validate all tokens cryptographically.** Do not rely on header presence alone.
 3. **Set appropriate `X-Forwarded-*` headers** if the auth service needs to distinguish between direct clients and proxied clients.
 
-### Timeout and Availability
+### Timeout, Failure Policy, and Circuit Breaker
 
 | Config | Default | Description |
 |--------|---------|-------------|
-| `auth.timeout` | `5s` | Maximum time to wait for the auth service response |
+| `auth.timeout` | `"5s"` | Maximum time to wait for the auth service response |
+| `auth.failure_policy` | `"failclosed"` | Behavior when the auth service is unreachable, times out, or the circuit breaker is open |
 
-If the auth service does not respond within the timeout, EdgeQuota treats it as an error:
+#### Failure Policy
 
-- The `edgequota_auth_errors_total` metric is incremented.
-- The request is denied (the auth call failure is treated as a non-200 response).
+| Policy | Auth unavailable | Behavior |
+|--------|-----------------|----------|
+| `failclosed` (default) | Yes | Deny with `503 Service Unavailable`. The safe default for security-critical deployments. |
+| `failopen` | Yes | Allow the request; skip auth entirely. Use only when availability is more important than strict auth enforcement. |
 
-This is **fail-closed by default**: if the auth service is down, all requests are rejected. This is the safe default for a security-critical component.
+When the auth service does not respond within the timeout, EdgeQuota:
 
-### Fail-Open Considerations
+1. Increments `edgequota_auth_errors_total`.
+2. Applies the configured `failure_policy`.
 
-EdgeQuota does not support an explicit fail-open mode for auth. If you need fail-open behavior (allow requests when auth is unavailable), implement it in the auth service itself by returning 200 on internal errors, or use a circuit breaker in front of the auth service.
+#### Circuit Breaker
 
-The rationale: fail-open for authentication is a security risk. If the auth service is down, allowing all traffic means unauthenticated requests reach the backend. This should be an explicit, deliberate choice made by the auth service — not a default behavior.
+EdgeQuota includes a built-in circuit breaker for the auth service to prevent cascading timeouts when the auth backend is down:
+
+| Parameter | Value |
+|-----------|-------|
+| Failure threshold | 5 consecutive errors |
+| Open duration | 30 s |
+| Half-open probe | 1 request allowed through |
+
+**Lifecycle:**
+
+1. **Closed** (normal) — all requests are forwarded to the auth service.
+2. **Open** — after 5 consecutive failures, the breaker opens. Requests immediately receive the `failure_policy` result without waiting for the timeout. `edgequota_auth_errors_total` is still incremented.
+3. **Half-open** — after 30 s, one probe request is forwarded. If it succeeds, the breaker closes. If it fails, the breaker re-opens for another 30 s.
+
+The circuit breaker is transparent to clients — the `failure_policy` determines what the client sees while the breaker is open.
+
+### Header Filtering
+
+By default, all request headers — including sensitive ones like `Authorization`, `Cookie`, and `X-Api-Key` — are forwarded to the auth service (the auth service needs them to make auth decisions).
+
+You can customize which headers are forwarded:
+
+```yaml
+auth:
+  header_filter:
+    deny_list:               # never forward these headers
+      - "Cookie"
+      - "Set-Cookie"
+```
+
+Or use an exclusive allow list (when set, `deny_list` is ignored):
+
+```yaml
+auth:
+  header_filter:
+    allow_list:              # only forward these headers
+      - "Authorization"
+      - "X-Tenant-Id"
+```
+
+**Default sensitive headers** (forwarded by default, can be denied): `Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `X-Api-Key`, `X-Csrf-Token`, `X-Xsrf-Token`.
+
+### Forward Original Headers
+
+When `auth.http.forward_original_headers` is `true`, EdgeQuota also sends all headers with an `X-Original-` prefix alongside the normal `headers` map. This is useful for auth services that need to inspect the raw header values while EdgeQuota normalizes the primary ones.
+
+```yaml
+auth:
+  http:
+    url: "http://auth-service:8080/check"
+    forward_original_headers: true
+```
 
 ---
 

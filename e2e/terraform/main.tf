@@ -754,3 +754,68 @@ module "eq_config_reload" {
   depends_on = [module.redis_single, module.whoami]
 }
 
+# --------------------------------------------------------------------------
+# Mock external rate limit service (for tenant-aware backend URL tests)
+# --------------------------------------------------------------------------
+module "mockextrl" {
+  source        = "./modules/mockextrl"
+  namespace     = local.ns
+  image         = var.mockextrl_image
+  backend_a_url = local.backend_url
+  backend_b_url = local.testbackend_url
+}
+
+# --- dynamic-backend: Tenant-aware backend URL via external RL service ---
+module "eq_dynamic_backend" {
+  source    = "./modules/edgequota"
+  namespace = local.ns
+  scenario  = "dynamic-backend"
+  image     = var.edgequota_image
+  node_port = 30116
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8080"
+      read_timeout: "30s"
+      write_timeout: "30s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+    admin:
+      address: ":9090"
+    backend:
+      url: "${local.backend_url}"
+      timeout: "10s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
+    rate_limit:
+      average: 1000
+      burst: 500
+      period: "1s"
+      failure_policy: "passThrough"
+      key_prefix: "dynamic-backend"
+      key_strategy:
+        type: "header"
+        header_name: "X-Tenant-Id"
+      external:
+        enabled: true
+        timeout: "5s"
+        http:
+          url: "${module.mockextrl.endpoint}"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.whoami, module.testbackend, module.mockextrl]
+}
+

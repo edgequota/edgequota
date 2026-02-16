@@ -24,6 +24,10 @@ admin:
   idle_timeout: "30s"
 
 backend:
+  # Default backend URL. Required unless rate_limit.external is enabled, in
+  # which case the external service can provide per-tenant backend URLs via the
+  # "backend_url" field in the GetLimits response. When both are set, the
+  # external service's backend_url takes precedence for that request.
   url: "http://my-backend:8080"
   timeout: "30s"
   max_idle_conns: 100
@@ -40,19 +44,47 @@ backend:
     h2_ping_timeout: "15s"          # HTTP/2 ping timeout (gRPC)
     websocket_dial_timeout: "10s"   # WebSocket backend dial timeout
 
-# Optional external authentication.
+# ─── External Authentication ──────────────────────────────────────────
+# Forwards every incoming request to an external auth service BEFORE rate
+# limiting. The auth service decides allow/deny and can inject response
+# headers and status codes.
+#
+# Exactly one of auth.http or auth.grpc must be configured when enabled.
+
+# Example A — HTTP auth (most common):
 # auth:
 #   enabled: true
 #   timeout: "5s"
+#   failure_policy: "failclosed"     # failclosed (default) | failopen
 #   http:
 #     url: "http://auth-service:8080/check"
+#     forward_original_headers: false # Also send headers as X-Original-*
+#   header_filter:
+#     deny_list:                      # Headers never forwarded to auth service
+#       - "Cookie"                    # (Authorization, Cookie, etc. are forwarded
+#       - "Set-Cookie"               #  by default unless explicitly denied)
+#     # allow_list: []               # Exclusive: only forward these headers
+#                                    #  (deny_list is ignored when allow_list is set)
 
+# Example B — gRPC auth (uses edgequota.auth.v1.AuthService/Check):
+# auth:
+#   enabled: true
+#   timeout: "5s"
+#   failure_policy: "failclosed"
+#   grpc:
+#     address: "auth-service:50051"
+#     tls:
+#       enabled: true
+#       ca_file: "/etc/edgequota/tls/auth-ca.pem"
+
+# ─── Rate Limiting ────────────────────────────────────────────────────
 rate_limit:
-  average: 100          # Requests per period.
-  burst: 50             # Maximum burst.
+  average: 100          # Requests per period (0 = disabled).
+  burst: 50             # Maximum burst capacity.
   period: "1s"
   failure_policy: "passThrough"  # passThrough | failClosed | inMemoryFallback
-  # min_ttl: ""          # Optional floor for Redis key TTL (e.g. "10s"). Reduces EXPIRE churn.
+  # failure_code: 429   # HTTP status for failClosed rejections (must be 4xx/5xx).
+  # min_ttl: ""         # Optional floor for Redis key TTL (e.g. "10s"). Reduces EXPIRE churn.
   key_strategy:
     type: "clientIP"    # clientIP | header | composite
     # header_name: "X-Tenant-Id"
@@ -61,6 +93,41 @@ rate_limit:
     #   - "10.0.0.0/8"  # When empty (default), only RemoteAddr is used.
     # trusted_ip_depth: 0  # Which XFF entry to use: 0=leftmost, N=Nth from right.
 
+  # ─── External Rate Limit Service (optional) ───────────────────────
+  # Queries an external service for per-request rate limits. Enables
+  # multi-tenant scenarios where different tenants have different quotas
+  # stored in a backend database. Static config values (average/burst/period)
+  # are used as fallback when the external service is unreachable.
+  #
+  # Exactly one of external.http or external.grpc must be configured.
+
+  # Example A — HTTP external limits service:
+  # external:
+  #   enabled: true
+  #   timeout: "5s"
+  #   cache_ttl: "60s"                # Default cache TTL when response has no cache hints
+  #   max_concurrent_requests: 50     # Semaphore cap on concurrent external calls
+  #   http:
+  #     url: "http://limits-service:8080/limits"
+  #   header_filter:
+  #     allow_list:                   # Only forward these headers to the limits service
+  #       - "X-Tenant-Id"
+  #       - "X-Plan"
+
+  # Example B — gRPC external limits service
+  #             (uses edgequota.ratelimit.v1.RateLimitService/GetLimits):
+  # external:
+  #   enabled: true
+  #   timeout: "5s"
+  #   cache_ttl: "60s"
+  #   max_concurrent_requests: 50
+  #   grpc:
+  #     address: "limits-service:50052"
+  #     tls:
+  #       enabled: true
+  #       ca_file: "/etc/edgequota/tls/limits-ca.pem"
+
+# ─── Redis ────────────────────────────────────────────────────────────
 redis:
   endpoints:
     - "redis:6379"
@@ -69,6 +136,15 @@ redis:
   dial_timeout: "5s"
   read_timeout: "3s"
   write_timeout: "3s"
+
+# Optional dedicated Redis for external rate-limit response caches.
+# If omitted, the main redis connection above is reused.
+# cache_redis:
+#   endpoints:
+#     - "cache-primary:6379"
+#     - "cache-replica-1:6379"
+#   mode: "replication"
+#   pool_size: 20
 
 logging:
   level: "info"

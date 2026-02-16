@@ -1,0 +1,52 @@
+// EdgeQuota Events Service API
+//
+// External event receivers must implement this gRPC service.
+// EdgeQuota calls PublishEvents() to emit usage events (rate-limit decisions)
+// when the events feature is enabled.
+//
+// Proto definitions are published on the Buf Schema Registry:
+//   buf.build/edgequota/edgequota
+
+syntax = "proto3";
+
+package edgequota.events.v1;
+
+option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/events/v1;eventsv1";
+
+// EventService receives batches of usage events from EdgeQuota.
+service EventService {
+  // PublishEvents sends a batch of usage events.
+  rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse);
+}
+
+// UsageEvent represents a single rate-limit decision.
+message UsageEvent {
+  // Rate limit bucket key.
+  string key = 1;
+  // Tenant key (if assigned by external rate limit service).
+  string tenant_key = 2;
+  // HTTP method.
+  string method = 3;
+  // Request path.
+  string path = 4;
+  // Whether the request was allowed.
+  bool allowed = 5;
+  // Remaining tokens after this decision.
+  int64 remaining = 6;
+  // Configured limit (burst).
+  int64 limit = 7;
+  // RFC 3339 timestamp.
+  string timestamp = 8;
+  // HTTP status code returned.
+  int32 status_code = 9;
+}
+
+// PublishEventsRequest contains a batch of usage events.
+message PublishEventsRequest {
+  repeated UsageEvent events = 1;
+}
+
+// PublishEventsResponse returns the number of accepted events.
+message PublishEventsResponse {
+  int64 accepted = 1;
+}

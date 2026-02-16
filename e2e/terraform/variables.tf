@@ -15,3 +15,9 @@ variable "testbackend_image" {
   type        = string
   default     = "testbackend:e2e"
 }
+
+variable "mockextrl_image" {
+  description = "Docker image for the mock external rate limit service (pre-loaded into minikube)"
+  type        = string
+  default     = "mockextrl:e2e"
+}

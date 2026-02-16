@@ -155,18 +155,44 @@ type Config struct {
 	RateLimit  RateLimitConfig `yaml:"rate_limit"  envPrefix:"RATE_LIMIT_"`
 	Redis      RedisConfig     `yaml:"redis"       envPrefix:"REDIS_"`
 	CacheRedis *RedisConfig    `yaml:"cache_redis" envPrefix:"CACHE_REDIS_"`
+	Events     EventsConfig    `yaml:"events"      envPrefix:"EVENTS_"`
 	Logging    LoggingConfig   `yaml:"logging"     envPrefix:"LOGGING_"`
 	Tracing    TracingConfig   `yaml:"tracing"     envPrefix:"TRACING_"`
 }
 
+// EventsConfig holds optional usage event emission settings.
+// When enabled, EdgeQuota emits rate-limit decisions as usage events
+// to an external HTTP/gRPC service (webhook pattern).
+type EventsConfig struct {
+	Enabled       bool               `yaml:"enabled"        env:"ENABLED"`
+	HTTP          EventsHTTPConfig   `yaml:"http"           envPrefix:"HTTP_"`
+	GRPC          EventsGRPCConfig   `yaml:"grpc"           envPrefix:"GRPC_"`
+	BatchSize     int                `yaml:"batch_size"     env:"BATCH_SIZE"`
+	FlushInterval string             `yaml:"flush_interval" env:"FLUSH_INTERVAL"`
+	BufferSize    int                `yaml:"buffer_size"    env:"BUFFER_SIZE"`
+	HeaderFilter  HeaderFilterConfig `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
+}
+
+// EventsHTTPConfig holds HTTP event receiver settings.
+type EventsHTTPConfig struct {
+	URL string `yaml:"url" env:"URL"`
+}
+
+// EventsGRPCConfig holds gRPC event receiver settings.
+type EventsGRPCConfig struct {
+	Address string        `yaml:"address" env:"ADDRESS"`
+	TLS     GRPCTLSConfig `yaml:"tls"     envPrefix:"TLS_"`
+}
+
 // ServerConfig holds the main proxy server settings.
 type ServerConfig struct {
-	Address      string          `yaml:"address"       env:"ADDRESS"`
-	ReadTimeout  string          `yaml:"read_timeout"  env:"READ_TIMEOUT"`
-	WriteTimeout string          `yaml:"write_timeout" env:"WRITE_TIMEOUT"`
-	IdleTimeout  string          `yaml:"idle_timeout"  env:"IDLE_TIMEOUT"`
-	DrainTimeout string          `yaml:"drain_timeout" env:"DRAIN_TIMEOUT"`
-	TLS          ServerTLSConfig `yaml:"tls"           envPrefix:"TLS_"`
+	Address        string          `yaml:"address"         env:"ADDRESS"`
+	ReadTimeout    string          `yaml:"read_timeout"    env:"READ_TIMEOUT"`
+	WriteTimeout   string          `yaml:"write_timeout"   env:"WRITE_TIMEOUT"`
+	IdleTimeout    string          `yaml:"idle_timeout"    env:"IDLE_TIMEOUT"`
+	DrainTimeout   string          `yaml:"drain_timeout"   env:"DRAIN_TIMEOUT"`
+	RequestTimeout string          `yaml:"request_timeout" env:"REQUEST_TIMEOUT"`
+	TLS            ServerTLSConfig `yaml:"tls"             envPrefix:"TLS_"`
 
 	// MaxWebSocketConnsPerKey limits the number of concurrent WebSocket
 	// connections per rate-limit key (client/tenant). 0 means unlimited.
@@ -196,13 +222,36 @@ type AdminConfig struct {
 
 // BackendConfig defines the upstream backend to proxy requests to.
 type BackendConfig struct {
-	URL                string          `yaml:"url"                      env:"URL"`
-	Timeout            string          `yaml:"timeout"                  env:"TIMEOUT"`
-	MaxIdleConns       int             `yaml:"max_idle_conns"           env:"MAX_IDLE_CONNS"`
-	IdleConnTimeout    string          `yaml:"idle_conn_timeout"        env:"IDLE_CONN_TIMEOUT"`
-	TLSInsecureVerify  bool            `yaml:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
-	MaxRequestBodySize int64           `yaml:"max_request_body_size"    env:"MAX_REQUEST_BODY_SIZE"` // bytes; 0=unlimited
-	Transport          TransportConfig `yaml:"transport"                envPrefix:"TRANSPORT_"`
+	URL                string           `yaml:"url"                      env:"URL"`
+	Timeout            string           `yaml:"timeout"                  env:"TIMEOUT"`
+	MaxIdleConns       int              `yaml:"max_idle_conns"           env:"MAX_IDLE_CONNS"`
+	IdleConnTimeout    string           `yaml:"idle_conn_timeout"        env:"IDLE_CONN_TIMEOUT"`
+	TLSInsecureVerify  bool             `yaml:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
+	MaxRequestBodySize int64            `yaml:"max_request_body_size"    env:"MAX_REQUEST_BODY_SIZE"` // bytes; 0=unlimited
+	Transport          TransportConfig  `yaml:"transport"                envPrefix:"TRANSPORT_"`
+	URLPolicy          BackendURLPolicy `yaml:"url_policy"               envPrefix:"URL_POLICY_"`
+}
+
+// BackendURLPolicy controls which dynamic backend URLs (from the external
+// rate-limit service) are allowed. Prevents SSRF via backend_url injection.
+type BackendURLPolicy struct {
+	// AllowedSchemes restricts the URL scheme. Default: ["http", "https"].
+	AllowedSchemes []string `yaml:"allowed_schemes" env:"ALLOWED_SCHEMES" envSeparator:","`
+	// DenyPrivateNetworks blocks RFC 1918, loopback, link-local, and cloud
+	// metadata IPs when true. Default: true.
+	DenyPrivateNetworks *bool `yaml:"deny_private_networks" env:"DENY_PRIVATE_NETWORKS"`
+	// AllowedHosts is an optional allowlist. When non-empty, only these
+	// hosts (exact match, case-insensitive) are permitted.
+	AllowedHosts []string `yaml:"allowed_hosts" env:"ALLOWED_HOSTS" envSeparator:","`
+}
+
+// DenyPrivateNetworksEnabled returns whether private networks should be blocked.
+// Defaults to true when not explicitly configured.
+func (p BackendURLPolicy) DenyPrivateNetworksEnabled() bool {
+	if p.DenyPrivateNetworks == nil {
+		return true
+	}
+	return *p.DenyPrivateNetworks
 }
 
 // TransportConfig holds low-level HTTP transport tuning for the proxy.
@@ -351,6 +400,11 @@ type RateLimitConfig struct {
 	// the TTL is computed automatically from the rate and period. Use this
 	// knob to reduce EXPIRE churn for high-cardinality keys at high rates.
 	MinTTL string `yaml:"min_ttl" env:"MIN_TTL"`
+
+	// MaxTenantLabels caps the number of distinct tenant label values in
+	// per-tenant Prometheus metrics to prevent cardinality explosions.
+	// 0 uses the default of 1000.
+	MaxTenantLabels int `yaml:"max_tenant_labels" env:"MAX_TENANT_LABELS"`
 }
 
 // KeyStrategyConfig defines how the per-client rate-limit key is extracted.
@@ -387,6 +441,16 @@ type ExternalRLConfig struct {
 	// control plane from thundering herd on a Redis cache flush. 0 uses
 	// the default (50).
 	MaxConcurrentRequests int `yaml:"max_concurrent_requests" env:"MAX_CONCURRENT_REQUESTS"`
+
+	// MaxCircuitBreakers caps the number of per-tenant circuit breaker
+	// entries. Prevents unbounded memory growth under high-cardinality
+	// attacks. 0 uses the default (10000).
+	MaxCircuitBreakers int `yaml:"max_circuit_breakers" env:"MAX_CIRCUIT_BREAKERS"`
+
+	// MaxLatency sets the maximum acceptable latency for calls to the
+	// external rate limit service. When exceeded, the call is abandoned
+	// and stale cache is used if available. 0 or empty disables.
+	MaxLatency string `yaml:"max_latency" env:"MAX_LATENCY"`
 }
 
 // ExternalHTTPConfig holds HTTP external rate limit service settings.
@@ -472,11 +536,12 @@ type TracingConfig struct {
 func Defaults() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Address:      ":8080",
-			ReadTimeout:  "30s",
-			WriteTimeout: "30s",
-			IdleTimeout:  "120s",
-			DrainTimeout: "30s",
+			Address:        ":8080",
+			ReadTimeout:    "30s",
+			WriteTimeout:   "30s",
+			IdleTimeout:    "120s",
+			DrainTimeout:   "30s",
+			RequestTimeout: "60s",
 		},
 		Admin: AdminConfig{
 			Address:      ":9090",
@@ -647,7 +712,13 @@ func Validate(cfg *Config) error {
 
 func validateBackend(cfg *Config) error {
 	if cfg.Backend.URL == "" {
-		return fmt.Errorf("backend.url is required")
+		// backend.url is optional when the external rate limit service is
+		// enabled — the external service can provide per-tenant backend URLs.
+		// Without either, there is no backend to proxy to.
+		if !cfg.RateLimit.External.Enabled {
+			return fmt.Errorf("backend.url is required when rate_limit.external is not enabled")
+		}
+		return nil
 	}
 
 	// Normalize the backend URL so that host always includes an explicit port.
@@ -694,6 +765,7 @@ func validateDurations(cfg *Config) error {
 		{"server.write_timeout", cfg.Server.WriteTimeout},
 		{"server.idle_timeout", cfg.Server.IdleTimeout},
 		{"server.drain_timeout", cfg.Server.DrainTimeout},
+		{"server.request_timeout", cfg.Server.RequestTimeout},
 		{"backend.timeout", cfg.Backend.Timeout},
 		{"backend.idle_conn_timeout", cfg.Backend.IdleConnTimeout},
 		{"admin.read_timeout", cfg.Admin.ReadTimeout},

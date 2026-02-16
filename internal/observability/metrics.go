@@ -3,6 +3,7 @@
 package observability
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -45,17 +46,30 @@ type Metrics struct {
 
 	// Redis health gauge (0 = unhealthy, 1 = healthy).
 	PromRedisHealthy prometheus.Gauge
+
+	// Tenant label cardinality tracking.
+	tenantLabels       sync.Map // map[string]struct{}
+	tenantLabelCount   atomic.Int64
+	maxTenantLabels    int64
+	promTenantOverflow prometheus.Counter
+	promEventsDropped  prometheus.Counter
 }
 
-// NewMetrics creates and registers Prometheus metrics.
-func NewMetrics(reg prometheus.Registerer) *Metrics {
+// NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
+// the number of distinct tenant label values in per-tenant counters to prevent
+// cardinality explosions. 0 uses the default of 1000.
+func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer
+	}
+	if maxTenantLabels <= 0 {
+		maxTenantLabels = 1000
 	}
 
 	factory := promauto.With(reg)
 
 	m := &Metrics{
+		maxTenantLabels: maxTenantLabels,
 		promAllowed: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "requests_allowed_total",
@@ -119,6 +133,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "redis_healthy",
 			Help:      "Whether Redis is reachable (1 = healthy, 0 = unhealthy).",
 		}),
+		promTenantOverflow: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "tenant_label_overflow_total",
+			Help:      "Number of requests bucketed under __overflow__ due to tenant label cap.",
+		}),
+		promEventsDropped: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "events_dropped_total",
+			Help:      "Number of usage events dropped due to buffer overflow.",
+		}),
 	}
 
 	// Start as healthy (set to 1). The middleware chain will set to 0 on
@@ -175,14 +199,50 @@ func (m *Metrics) IncAuthDenied() {
 	m.promAuthDenied.Inc()
 }
 
-// IncTenantAllowed increments the per-tenant allowed counter.
-func (m *Metrics) IncTenantAllowed(tenant string) {
-	m.promTenantAllowed.WithLabelValues(tenant).Inc()
+// tenantOverflowLabel is the sentinel label used when the tenant cardinality
+// cap is reached. All excess tenants are aggregated under this label.
+const tenantOverflowLabel = "__overflow__"
+
+// resolveTenantLabel returns the tenant label to use for metrics, applying the
+// cardinality cap. Known tenants pass through; new tenants beyond the cap are
+// bucketed under __overflow__.
+func (m *Metrics) resolveTenantLabel(tenant string) string {
+	// Fast path: already known tenant.
+	if _, ok := m.tenantLabels.Load(tenant); ok {
+		return tenant
+	}
+
+	// Check if we have room for a new tenant.
+	if m.tenantLabelCount.Load() >= m.maxTenantLabels {
+		m.promTenantOverflow.Inc()
+		return tenantOverflowLabel
+	}
+
+	// Try to register the tenant.
+	if _, loaded := m.tenantLabels.LoadOrStore(tenant, struct{}{}); !loaded {
+		if m.tenantLabelCount.Add(1) > m.maxTenantLabels {
+			// Race: another goroutine also registered one at the same time.
+			// That's fine — we're slightly over, but it's bounded and transient.
+		}
+	}
+	return tenant
 }
 
-// IncTenantLimited increments the per-tenant rate-limited counter.
+// IncTenantAllowed increments the per-tenant allowed counter, respecting
+// the tenant label cardinality cap.
+func (m *Metrics) IncTenantAllowed(tenant string) {
+	m.promTenantAllowed.WithLabelValues(m.resolveTenantLabel(tenant)).Inc()
+}
+
+// IncTenantLimited increments the per-tenant rate-limited counter, respecting
+// the tenant label cardinality cap.
 func (m *Metrics) IncTenantLimited(tenant string) {
-	m.promTenantLimited.WithLabelValues(tenant).Inc()
+	m.promTenantLimited.WithLabelValues(m.resolveTenantLabel(tenant)).Inc()
+}
+
+// IncEventsDropped increments the events dropped counter.
+func (m *Metrics) IncEventsDropped() {
+	m.promEventsDropped.Inc()
 }
 
 // ObserveRemaining records the remaining tokens as a histogram observation.

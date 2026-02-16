@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"os"
@@ -188,7 +189,7 @@ func hashFile(path string) string {
 	if _, err := io.Copy(h, f); err != nil {
 		return ""
 	}
-	return string(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // reload loads, validates, and publishes the new config. On failure the

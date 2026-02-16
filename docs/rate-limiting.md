@@ -280,9 +280,73 @@ The recovery loop runs for `passThrough` and `inMemoryFallback` policies. For `f
 
 When `rate_limit.external.enabled` is `true`, EdgeQuota queries an external service for dynamic per-request rate limits. This enables multi-tenant scenarios where different tenants have different quotas defined in a backend database.
 
+The static `rate_limit.average`, `burst`, and `period` from the config file serve as **fallback values** whenever the external service is unreachable.
+
+### Configuration
+
+Exactly one of `external.http` or `external.grpc` must be configured when the feature is enabled.
+
+**HTTP example:**
+
+```yaml
+rate_limit:
+  average: 100               # fallback
+  burst: 50
+  period: "1s"
+  external:
+    enabled: true
+    timeout: "5s"
+    cache_ttl: "60s"                 # default TTL when response has no cache hints
+    max_concurrent_requests: 50      # semaphore cap on concurrent external calls
+    http:
+      url: "http://limits-service:8080/limits"
+    header_filter:
+      allow_list:                    # only forward these headers
+        - "X-Tenant-Id"
+        - "X-Plan"
+```
+
+**gRPC example:**
+
+```yaml
+rate_limit:
+  external:
+    enabled: true
+    timeout: "5s"
+    cache_ttl: "60s"
+    max_concurrent_requests: 50
+    grpc:
+      address: "limits-service:50052"
+      tls:
+        enabled: true
+        ca_file: "/etc/edgequota/tls/limits-ca.pem"
+```
+
+| Config Field | Type | Default | Description |
+|---|---|---|---|
+| `external.enabled` | bool | `false` | Enable external rate limit resolution |
+| `external.timeout` | duration | `"5s"` | Max wait for external service response |
+| `external.cache_ttl` | duration | `"60s"` | Default cache TTL when response has no cache hints |
+| `external.max_concurrent_requests` | int | `50` | Semaphore cap on concurrent external calls |
+| `external.http.url` | string | — | HTTP endpoint URL |
+| `external.grpc.address` | string | — | gRPC endpoint address |
+| `external.grpc.tls.enabled` | bool | `false` | Enable TLS for gRPC |
+| `external.grpc.tls.ca_file` | string | — | CA certificate for gRPC TLS verification |
+
+### Protocols
+
+| Protocol | Endpoint |
+|----------|----------|
+| HTTP | `POST` to `rate_limit.external.http.url` with JSON body |
+| gRPC | `edgequota.ratelimit.v1.RateLimitService/GetLimits` with JSON codec |
+
+Both protocols use the same request/response schema. The gRPC service uses a JSON codec — the external service can be implemented without protobuf code generation.
+
+See `api/proto/ratelimit/v1/ratelimit.proto` for the formal gRPC service definition.
+
 ### Request
 
-The external service receives:
+The external service receives the extracted key along with the original request metadata:
 
 ```json
 {
@@ -293,31 +357,42 @@ The external service receives:
 }
 ```
 
+Which headers are forwarded is controlled by `external.header_filter`:
+
+- **`allow_list`** (exclusive) — only these headers are sent; all others are dropped.
+- **`deny_list`** — these headers are never sent. Ignored when `allow_list` is set.
+
+Default sensitive headers (`Authorization`, `Cookie`, `X-Api-Key`, etc.) are included in the default deny list.
+
 ### Response
 
-The service returns rate limit parameters and optional cache control directives:
+The service returns rate limit parameters and optional per-tenant overrides:
 
 ```json
 {
   "average": 1000,
   "burst": 200,
   "period": "1s",
+  "tenant_key": "acme-corp",
+  "failure_policy": "passthrough",
+  "failure_code": 503,
+  "backend_url": "http://tenant-backend:8080",
   "cache_max_age_seconds": 300,
   "cache_no_store": false
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `average` | int64 | Maximum requests per period (0 = unlimited). |
-| `burst` | int64 | Maximum burst size. |
-| `period` | string | Duration string (e.g. `"1s"`, `"1m"`). |
-| `cache_max_age_seconds` | int64 (optional) | Cache this response for N seconds. Omit or set to 0 to use the default TTL. |
-| `cache_no_store` | bool (optional) | If `true`, do not cache this response. |
-
-These values override the static `rate_limit.average`, `burst`, and `period` from the config file. If the external service is unreachable, the static values are used.
-
-The cache control fields are consistent across HTTP JSON and gRPC (see proto definition in `api/proto/ratelimit/v1/ratelimit.proto`).
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `average` | int64 | yes | Requests per period (0 = unlimited). Overrides static config. |
+| `burst` | int64 | yes | Maximum burst capacity. Overrides static config. |
+| `period` | string | yes | Duration string (e.g. `"1s"`, `"1m"`). Overrides static config. |
+| `tenant_key` | string | no | Custom Redis bucket key. Replaces the extracted key and is prefixed with `t:` (e.g. `rl:edgequota:t:acme-corp`). Useful when the external service maps multiple input keys to a shared quota. |
+| `failure_policy` | string | no | Per-tenant Redis-down behavior: `passthrough`, `failclosed`, `inmemoryfallback`. Overrides the global `rate_limit.failure_policy`. |
+| `failure_code` | int | no | HTTP status for `failclosed` rejections. Overrides the global `rate_limit.failure_code`. |
+| `backend_url` | string | no | Per-request backend URL override. EdgeQuota will proxy this request to the specified backend instead of the global `backend.url`. Enables routing different tenants to dedicated clusters. |
+| `cache_max_age_seconds` | int64 | no | Cache this response for N seconds. Omit or set to 0 to use `external.cache_ttl`. |
+| `cache_no_store` | bool | no | If `true`, do not cache this response. |
 
 ### Caching
 
@@ -327,7 +402,32 @@ Responses are cached in **Redis**, making the cache shared across all EdgeQuota 
 - **No background cleanup** — Redis manages key expiration automatically via TTL.
 - **Horizontal scalability** — adding instances does not multiply external service calls.
 
-Cache keys are stored under the `rl:extcache:` prefix with the rate-limit key appended (e.g. `rl:extcache:tenant-1`).
+Cache keys follow the pattern `rl:extcache:<rate_limit_key>` (e.g. `rl:extcache:tenant-1`). A parallel **stale cache** is maintained at `rl:extcache:stale:<key>` with a 5-minute TTL, used as a fallback when the circuit breaker is open.
+
+#### Concurrency Control
+
+Two mechanisms prevent overloading the external service:
+
+| Mechanism | Scope | Behavior |
+|-----------|-------|----------|
+| **Singleflight** | Per key | Concurrent cache misses for the same key share a single external call. All waiters receive the same result. |
+| **Semaphore** | Global | Caps total concurrent external calls at `max_concurrent_requests` (default: 50). Excess requests block until a slot is available or the timeout expires. |
+
+#### Dedicated Cache Redis (Optional)
+
+By default, cached responses are stored in the same Redis used for rate-limit counters. If you need to separate these workloads — for example, a **replication** topology for the read-heavy cache and a **cluster** topology for the write-heavy counters — configure `cache_redis`:
+
+```yaml
+redis:
+  endpoints: ["rl-0:6379", "rl-1:6379", "rl-2:6379"]
+  mode: "cluster"
+cache_redis:
+  endpoints: ["cache-primary:6379", "cache-replica:6379"]
+  mode: "replication"
+  pool_size: 20
+```
+
+When `cache_redis` is omitted, the main `redis` connection is reused automatically.
 
 #### TTL Resolution (HTTP)
 
@@ -356,11 +456,28 @@ This gives the external service full control over per-response cache lifetimes r
 
 If the Redis client is not available when the external rate limit feature is initialized (e.g. Redis is down at startup with a passthrough failure policy), caching is disabled and every request triggers an external service call.
 
-### Protocols
+### Failure Handling and Circuit Breaker
 
-| Protocol | Endpoint |
-|----------|----------|
-| HTTP | `POST` to `rate_limit.external.http.url` with JSON body |
-| gRPC | `edgequota.ratelimit.v1.RateLimitService/GetLimits` with JSON codec |
+When the external service is unreachable, times out, or the circuit breaker is open, EdgeQuota falls back through this chain:
 
-See `api/proto/ratelimit/v1/ratelimit.proto` for the gRPC service definition.
+1. **Stale cache** — if a previous response for this key exists in `rl:extcache:stale:<key>`, use it.
+2. **Static config** — use `rate_limit.average`, `burst`, and `period` from the config file.
+
+There is no separate "failure policy" for the external service — it only affects which limits are applied. Rate limiting itself continues using whichever limits are resolved.
+
+#### Per-Key Circuit Breaker
+
+The circuit breaker is **per-tenant** (one breaker per extracted key), preventing a single tenant's slow external lookups from affecting others:
+
+| Parameter | Value |
+|-----------|-------|
+| Failure threshold | 5 consecutive errors for the same key |
+| Open duration | 30 s |
+| Half-open probe | 1 request allowed through |
+| Idle eviction | Breakers unused for 60 s are evicted |
+
+**Lifecycle:**
+
+1. **Closed** (normal) — requests are forwarded to the external service.
+2. **Open** — after 5 consecutive failures for a key, the breaker opens. Requests immediately try stale cache, then fall back to static config.
+3. **Half-open** — after 30 s, one probe request is forwarded. Success closes the breaker; failure re-opens it.

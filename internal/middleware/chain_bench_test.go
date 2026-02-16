@@ -19,7 +19,7 @@ func benchLogger() *slog.Logger {
 }
 
 func benchMetrics() *observability.Metrics {
-	return observability.NewMetrics(prometheus.NewRegistry())
+	return observability.NewMetrics(prometheus.NewRegistry(), 0)
 }
 
 func benchConfig(redisAddr string) *config.Config {

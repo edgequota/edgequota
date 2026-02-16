@@ -228,8 +228,10 @@ func TestGetLimitsNoServiceConfigured(t *testing.T) {
 	t.Run("returns error when no service configured", func(t *testing.T) {
 		ec := &ExternalClient{
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 		_, err := ec.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
 		assert.Error(t, err)

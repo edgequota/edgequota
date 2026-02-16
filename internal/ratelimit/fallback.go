@@ -92,8 +92,12 @@ func (l *InMemoryLimiter) Allow(key string) bool {
 		b = actual.(*bucket)
 		if !loaded {
 			// We won the race — insert into ristretto and clean up pending.
+			// Note: cache.Wait() is intentionally NOT called here. The pending
+			// sync.Map serializes concurrent first-inserts for the same key,
+			// so ristretto's async admission window is harmless. Removing Wait()
+			// eliminates a blocking flush on the hot path under high-cardinality
+			// traffic.
 			l.cache.SetWithTTL(key, b, bucketCost, l.ttl)
-			l.cache.Wait()
 			l.pending.Delete(key)
 			return true
 		}

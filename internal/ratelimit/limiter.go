@@ -42,9 +42,10 @@ if rate <= 0 then
   return {1, 0, burst, burst, 0}
 end
 
-local vals = redis.call('hmget', key, 'last', 'tokens')
-local last   = tonumber(vals[1]) or 0
-local tokens = tonumber(vals[2]) or burst
+local vals = redis.call('hmget', key, 'last', 'tokens', 'last_expire')
+local last        = tonumber(vals[1]) or 0
+local tokens      = tonumber(vals[2]) or burst
+local last_expire = tonumber(vals[3]) or 0
 
 if now < last then
   last = now
@@ -58,28 +59,30 @@ if tokens < burst then
   reset_after = math.ceil((burst - tokens) / rate)
 end
 
--- Only refresh EXPIRE when remaining TTL is below 50% of target. This
--- halves Redis write amplification for steady-state keys that are accessed
--- frequently.
-local needs_expire = true
-local cur_ttl = redis.call('ttl', key)
-if cur_ttl > 0 and cur_ttl > ttl / 2 then
-  needs_expire = false
-end
+-- Only refresh EXPIRE when the last EXPIRE was issued more than ttl/2
+-- seconds ago (converted to microseconds since now is in microseconds).
+-- This avoids the extra TTL command on every request while still keeping
+-- keys alive under steady traffic.
+local ttl_half_us = ttl * 500000
+local needs_expire = (now - last_expire) > ttl_half_us
 
 if tokens >= 1 then
   tokens = tokens - 1
-  redis.call('hset', key, 'last', now, 'tokens', tokens)
   if needs_expire then
+    redis.call('hset', key, 'last', now, 'tokens', tokens, 'last_expire', now)
     redis.call('expire', key, ttl)
+  else
+    redis.call('hset', key, 'last', now, 'tokens', tokens)
   end
   local remaining = math.floor(tokens)
   return {1, 0, remaining, burst, reset_after}
 end
 
-redis.call('hset', key, 'last', now, 'tokens', tokens)
 if needs_expire then
+  redis.call('hset', key, 'last', now, 'tokens', tokens, 'last_expire', now)
   redis.call('expire', key, ttl)
+else
+  redis.call('hset', key, 'last', now, 'tokens', tokens)
 end
 local retry = math.ceil((1 - tokens) / rate)
 return {0, retry, 0, burst, reset_after}

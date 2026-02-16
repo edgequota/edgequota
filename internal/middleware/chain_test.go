@@ -22,7 +22,7 @@ func testLogger() *slog.Logger {
 }
 
 func testMetrics() *observability.Metrics {
-	return observability.NewMetrics(prometheus.NewRegistry())
+	return observability.NewMetrics(prometheus.NewRegistry(), 0)
 }
 
 func testConfig(redisAddr string) *config.Config {
@@ -318,4 +318,97 @@ func TestChainRecovery(t *testing.T) {
 		// Eventually should use Redis limiting.
 		// (recovery may or may not have happened depending on backoff timing)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// X-Request-Id Validation Tests
+// ---------------------------------------------------------------------------
+
+func TestValidRequestID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"valid UUID", "550e8400-e29b-41d4-a716-446655440000", true},
+		{"valid alphanumeric", "abc123", true},
+		{"valid with dots", "req.123.abc", true},
+		{"valid with colons", "req:123:abc", true},
+		{"valid with underscores", "req_123_abc", true},
+		{"empty string", "", false},
+		{"too long", string(make([]byte, 200)), false},
+		{"CRLF injection", "valid\r\nX-Evil: injected", false},
+		{"newline", "valid\nX-Evil: injected", false},
+		{"space", "valid id", false},
+		{"null byte", "valid\x00id", false},
+		{"tab", "valid\tid", false},
+		{"semicolon", "valid;id", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validRequestID(tt.id)
+			assert.Equal(t, tt.want, got, "validRequestID(%q)", tt.id)
+		})
+	}
+}
+
+func TestRequestIDIsReplacedWhenInvalid(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := testConfig(mr.Addr())
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+	require.NoError(t, err)
+	defer chain.Close()
+
+	t.Run("invalid request ID is replaced", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		req.Header.Set("X-Request-Id", "evil\r\nX-Injected: true")
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		gotID := rr.Header().Get("X-Request-Id")
+		assert.NotEmpty(t, gotID)
+		assert.NotContains(t, gotID, "\r")
+		assert.NotContains(t, gotID, "\n")
+		assert.True(t, validRequestID(gotID))
+	})
+
+	t.Run("valid request ID is preserved", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		req.Header.Set("X-Request-Id", "my-custom-request-id-123")
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, "my-custom-request-id-123", rr.Header().Get("X-Request-Id"))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Auth Header Injection Deny-list Tests
+// ---------------------------------------------------------------------------
+
+func TestInjectionDenyHeaders(t *testing.T) {
+	denied := []string{
+		"Host", "Content-Length", "Transfer-Encoding", "Connection",
+		"Te", "Upgrade", "Proxy-Authorization", "Proxy-Connection",
+		"Keep-Alive", "Trailer",
+	}
+
+	for _, h := range denied {
+		_, exists := injectionDenyHeaders[http.CanonicalHeaderKey(h)]
+		assert.True(t, exists, "header %q should be in deny set", h)
+	}
+
+	// Safe headers should NOT be in the deny set.
+	safe := []string{"X-Tenant-Id", "Authorization", "Accept", "X-Custom"}
+	for _, h := range safe {
+		_, exists := injectionDenyHeaders[http.CanonicalHeaderKey(h)]
+		assert.False(t, exists, "header %q should NOT be in deny set", h)
+	}
 }

@@ -13,6 +13,7 @@ const (
 	namespace            = "edgequota-e2e"
 	imageName            = "edgequota:e2e"
 	testbackendImageName = "testbackend:e2e"
+	mockextrlImageName   = "mockextrl:e2e"
 )
 
 // run executes a command, printing it to stdout, and returns combined output.

@@ -48,8 +48,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			redisClient:    redisClient,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    3,
 			cbResetTimeout: 5 * time.Second,
+			done:           make(chan struct{}),
 		}
 
 		// First call succeeds, seeding stale cache.
@@ -78,8 +80,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			timeout:        1e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    2,
 			cbResetTimeout: 30 * time.Second,
+			done:           make(chan struct{}),
 		}
 
 		// Trip the circuit breaker.
@@ -116,8 +120,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			cacheTTL:       0,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    3,
 			cbResetTimeout: 10 * time.Millisecond, // Short timeout for testing.
+			done:           make(chan struct{}),
 		}
 
 		// Trip the circuit breaker.
@@ -171,8 +177,10 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    100, // High threshold so circuit stays closed.
 			cbResetTimeout: 30 * time.Second,
+			done:           make(chan struct{}),
 		}
 
 		// Seed the cache.
@@ -209,8 +217,10 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    5,
 			cbResetTimeout: 30 * time.Second,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "ttl-test"})
@@ -259,8 +269,10 @@ func TestCacheIsolationConformance(t *testing.T) {
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    5,
 			cbResetTimeout: 30 * time.Second,
+			done:           make(chan struct{}),
 		}
 
 		// Request for tenant A.

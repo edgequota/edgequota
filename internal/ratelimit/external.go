@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ratelimitv1 "github.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1"
@@ -53,6 +54,15 @@ type ExternalLimits struct {
 	// policy is "failclosed". 0 means "use the static config" (no override).
 	FailureCode int `json:"failure_code,omitempty"`
 
+	// BackendURL overrides the static backend.url for this request. When
+	// non-empty, the proxy forwards this request to the given URL instead of
+	// the default backend. This enables per-tenant backend routing.
+	BackendURL string `json:"backend_url,omitempty"`
+
+	// RequestTimeout overrides the global server.request_timeout for this
+	// request. Duration string (e.g. "10s", "30s"). Empty means no override.
+	RequestTimeout string `json:"request_timeout,omitempty"`
+
 	// CacheMaxAgeSec controls how long this response is cached (in seconds).
 	// nil = not set (use default TTL or HTTP headers); > 0 = cache for N seconds.
 	CacheMaxAgeSec *int64 `json:"cache_max_age_seconds,omitempty"`
@@ -86,6 +96,7 @@ type ExternalClient struct {
 	headerFilter *config.HeaderFilter
 
 	redisClient redis.Client // may be nil (no caching)
+	maxLatency  time.Duration
 
 	// singleflight collapses concurrent cache misses for the same key into
 	// one external call, preventing thundering herd on the control plane.
@@ -100,8 +111,13 @@ type ExternalClient struct {
 	// Per-tenant circuit breakers. Each tenant key gets its own breaker so
 	// that one misbehaving tenant config doesn't trip the circuit for all.
 	breakers       sync.Map // map[string]*tenantCircuitBreaker
+	breakerCount   atomic.Int64
+	maxBreakers    int64
 	cbThreshold    int
 	cbResetTimeout time.Duration
+
+	// done is closed by Close() to stop the background eviction goroutine.
+	done chan struct{}
 }
 
 // Circuit breaker and concurrency defaults.
@@ -116,6 +132,11 @@ const (
 	// prevents a thundering herd of distinct-key cache misses (e.g. after a
 	// Redis flush) from overwhelming the control plane.
 	defaultMaxConcurrentFetches = 50
+
+	// defaultMaxCircuitBreakers caps the number of per-tenant circuit breaker
+	// entries in the sync.Map. Prevents unbounded memory growth under attack
+	// with millions of distinct keys.
+	defaultMaxCircuitBreakers = 10000
 )
 
 // tenantCircuitBreaker holds per-tenant circuit breaker state. One bad tenant
@@ -129,6 +150,14 @@ type tenantCircuitBreaker struct {
 	lastAccess   time.Time
 	threshold    int
 	resetTimeout time.Duration
+}
+
+// closedBreakerStub is a permanently-closed (healthy) circuit breaker returned
+// when the per-tenant breaker map is at capacity. It's safe for concurrent use
+// because isOpen always returns false and record* are no-ops.
+var closedBreakerStub = &tenantCircuitBreaker{
+	threshold:    1<<31 - 1, // effectively infinite
+	resetTimeout: time.Hour,
 }
 
 func newTenantCB(threshold int, resetTimeout time.Duration) *tenantCircuitBreaker {
@@ -208,6 +237,16 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		maxConcurrent = defaultMaxConcurrentFetches
 	}
 
+	maxBreakers := int64(cfg.MaxCircuitBreakers)
+	if maxBreakers <= 0 {
+		maxBreakers = defaultMaxCircuitBreakers
+	}
+
+	var maxLatency time.Duration
+	if cfg.MaxLatency != "" {
+		maxLatency, _ = time.ParseDuration(cfg.MaxLatency)
+	}
+
 	ec := &ExternalClient{
 		httpURL:        cfg.HTTP.URL,
 		httpClient:     &http.Client{Timeout: timeout, Transport: transport},
@@ -215,9 +254,12 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		cacheTTL:       cacheTTL,
 		headerFilter:   config.NewHeaderFilter(cfg.HeaderFilter),
 		redisClient:    redisClient,
+		maxLatency:     maxLatency,
 		fetchSem:       semaphore.NewWeighted(maxConcurrent),
+		maxBreakers:    maxBreakers,
 		cbThreshold:    defaultCBThreshold,
 		cbResetTimeout: defaultCBResetTimeout,
+		done:           make(chan struct{}),
 	}
 
 	// Establish gRPC connection if configured.
@@ -246,12 +288,17 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 	}
 
 	// Background eviction of stale per-tenant circuit breakers to prevent
-	// unbounded growth of the sync.Map.
+	// unbounded growth of the sync.Map. Stopped by Close() via done channel.
 	go func() {
 		ticker := time.NewTicker(ec.cbResetTimeout)
 		defer ticker.Stop()
-		for range ticker.C {
-			ec.evictStaleBreakers()
+		for {
+			select {
+			case <-ec.done:
+				return
+			case <-ticker.C:
+				ec.evictStaleBreakers()
+			}
 		}
 	}()
 
@@ -264,6 +311,11 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 //
 // HTTP: Cache-Control/Expires headers > body cache fields > default TTL.
 // gRPC: body cache fields > default TTL.
+//
+// Concurrency control:
+//  1. Semaphore is checked BEFORE singleflight to cap total concurrency across
+//     all keys. If the semaphore is full, stale cache is used when available.
+//  2. Singleflight collapses concurrent misses for the SAME key into one call.
 //
 // When the circuit breaker is open (external service unhealthy), stale cached
 // data is served if available, avoiding latency spikes on the hot path.
@@ -281,6 +333,18 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		return nil, fmt.Errorf("external rate limit service circuit breaker open for key %q", req.Key)
 	}
 
+	// Acquire concurrency permit BEFORE singleflight. If the semaphore is
+	// full, fall back to stale cache instead of queuing — this prevents
+	// cascading latency when thousands of distinct keys miss simultaneously
+	// (e.g. after a Redis flush).
+	if !ec.fetchSem.TryAcquire(1) {
+		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
+			return stale, nil
+		}
+		return nil, fmt.Errorf("external rate limit service semaphore full for key %q", req.Key)
+	}
+	defer ec.fetchSem.Release(1)
+
 	// Use singleflight to collapse concurrent cache misses for the same key
 	// into one external call, preventing thundering herd on the control plane.
 	type sfResult struct {
@@ -294,14 +358,6 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		if cached := ec.getFromCache(ctx, req.Key); cached != nil {
 			return &sfResult{limits: cached}, nil
 		}
-
-		// Acquire a concurrency permit before calling the external service.
-		// This caps the total number of in-flight requests across all keys,
-		// protecting the control plane from thundering herd on cache flush.
-		if semErr := ec.fetchSem.Acquire(ctx, 1); semErr != nil {
-			return nil, fmt.Errorf("external rate limit semaphore: %w", semErr)
-		}
-		defer ec.fetchSem.Release(1)
 
 		limits, ttl, fetchErr := ec.fetchFromService(ctx, req)
 		if fetchErr != nil {
@@ -325,7 +381,15 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 }
 
 // fetchFromService calls the external rate limit service (gRPC or HTTP).
+// When maxLatency is configured, the call is abandoned if it exceeds the
+// latency budget and an error is returned (allowing stale cache fallback).
 func (ec *ExternalClient) fetchFromService(ctx context.Context, req *ExternalRequest) (*ExternalLimits, time.Duration, error) {
+	if ec.maxLatency > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, ec.maxLatency)
+		defer cancel()
+	}
+
 	if ec.grpcClient != nil {
 		limits, err := ec.getLimitsGRPC(ctx, req)
 		if err != nil {
@@ -344,12 +408,23 @@ func (ec *ExternalClient) fetchFromService(ctx context.Context, req *ExternalReq
 // ---------------------------------------------------------------------------
 
 // getOrCreateCB returns the per-tenant circuit breaker, creating one if needed.
+// When the breaker map exceeds maxBreakers, new keys get a permanently-closed
+// (healthy) stub to prevent unbounded memory growth under high-cardinality attacks.
 func (ec *ExternalClient) getOrCreateCB(key string) *tenantCircuitBreaker {
 	if v, ok := ec.breakers.Load(key); ok {
 		return v.(*tenantCircuitBreaker)
 	}
+
+	// Cap check: if at capacity, return a passthrough stub (circuit always closed).
+	if ec.breakerCount.Load() >= ec.maxBreakers {
+		return closedBreakerStub
+	}
+
 	cb := newTenantCB(ec.cbThreshold, ec.cbResetTimeout)
-	actual, _ := ec.breakers.LoadOrStore(key, cb)
+	actual, loaded := ec.breakers.LoadOrStore(key, cb)
+	if !loaded {
+		ec.breakerCount.Add(1)
+	}
 	return actual.(*tenantCircuitBreaker)
 }
 
@@ -375,6 +450,7 @@ func (ec *ExternalClient) evictStaleBreakers() {
 		cb := value.(*tenantCircuitBreaker)
 		if cb.isStale(now, maxIdle) {
 			ec.breakers.Delete(key)
+			ec.breakerCount.Add(-1)
 		}
 		return true
 	})
@@ -553,13 +629,15 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 	}
 
 	limits := &ExternalLimits{
-		Average:       pbResp.GetAverage(),
-		Burst:         pbResp.GetBurst(),
-		Period:        pbResp.GetPeriod(),
-		CacheNoStore:  pbResp.GetCacheNoStore(),
-		TenantKey:     pbResp.GetTenantKey(),
-		FailurePolicy: failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
-		FailureCode:   int(pbResp.GetFailureCode()),
+		Average:        pbResp.GetAverage(),
+		Burst:          pbResp.GetBurst(),
+		Period:         pbResp.GetPeriod(),
+		CacheNoStore:   pbResp.GetCacheNoStore(),
+		TenantKey:      pbResp.GetTenantKey(),
+		FailurePolicy:  failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
+		FailureCode:    int(pbResp.GetFailureCode()),
+		BackendURL:     pbResp.GetBackendUrl(),
+		RequestTimeout: pbResp.GetRequestTimeout(),
 	}
 
 	if pbResp.CacheMaxAgeSeconds != nil {
@@ -603,8 +681,19 @@ func (ec *ExternalClient) FilterHeaders(headers map[string]string) {
 	}
 }
 
-// Close shuts down the external client and releases resources.
+// Close shuts down the external client and releases resources, including
+// the background circuit breaker eviction goroutine.
 func (ec *ExternalClient) Close() error {
+	// Stop the background eviction goroutine.
+	if ec.done != nil {
+		select {
+		case <-ec.done:
+			// Already closed.
+		default:
+			close(ec.done)
+		}
+	}
+
 	if ec.grpcConn != nil {
 		return ec.grpcConn.Close()
 	}

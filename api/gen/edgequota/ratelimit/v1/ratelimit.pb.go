@@ -190,6 +190,11 @@ type GetLimitsResponse struct {
 	// Override HTTP status code for FAIL_CLOSED policy (e.g. 503). 0 = use
 	// static config.
 	FailureCode int32 `protobuf:"varint,8,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	// Backend URL override (optional). When non-empty, EdgeQuota proxies this
+	// request to the given URL instead of the static backend.url from config.
+	BackendUrl string `protobuf:"bytes,9,opt,name=backend_url,json=backendUrl,proto3" json:"backend_url,omitempty"`
+	// Per-request timeout override (optional). Duration string (e.g. "10s").
+	RequestTimeout *string `protobuf:"bytes,10,opt,name=request_timeout,json=requestTimeout,proto3,oneof" json:"request_timeout,omitempty"`
 	// Cache duration in seconds. When present and > 0, overrides the default
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
 	CacheMaxAgeSeconds *int64 `protobuf:"varint,4,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
@@ -269,6 +274,20 @@ func (x *GetLimitsResponse) GetFailureCode() int32 {
 		return x.FailureCode
 	}
 	return 0
+}
+
+func (x *GetLimitsResponse) GetBackendUrl() string {
+	if x != nil {
+		return x.BackendUrl
+	}
+	return ""
+}
+
+func (x *GetLimitsResponse) GetRequestTimeout() string {
+	if x != nil && x.RequestTimeout != nil {
+		return *x.RequestTimeout
+	}
+	return ""
 }
 
 func (x *GetLimitsResponse) GetCacheMaxAgeSeconds() int64 {

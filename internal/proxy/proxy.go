@@ -28,6 +28,26 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// backendURLKey is the context key for per-request backend URL overrides.
+type backendURLKey struct{}
+
+// BackendURLContextKey is used by the middleware chain to inject a per-request
+// backend URL. The proxy's Director and WebSocket handler read this value,
+// falling back to the static default when absent.
+var BackendURLContextKey = backendURLKey{}
+
+// WithBackendURL returns a copy of r with the backend URL set in its context.
+// The proxy uses this URL instead of the static default for this request.
+func WithBackendURL(r *http.Request, u *url.URL) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), BackendURLContextKey, u))
+}
+
+// backendURLFromContext returns the per-request backend URL override, or nil.
+func backendURLFromContext(ctx context.Context) *url.URL {
+	u, _ := ctx.Value(BackendURLContextKey).(*url.URL)
+	return u
+}
+
 // Option configures optional proxy behavior.
 type Option func(*Proxy)
 
@@ -129,6 +149,9 @@ type Proxy struct {
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
+// When backendURL is empty, the proxy has no default backend — every request
+// must carry a per-request backend URL via context (set by the middleware chain
+// from the external rate limit service response).
 func New(
 	backendURL string,
 	timeout time.Duration,
@@ -138,9 +161,13 @@ func New(
 	logger *slog.Logger,
 	opts ...Option,
 ) (*Proxy, error) {
-	target, err := url.Parse(backendURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid backend URL %q: %w", backendURL, err)
+	var target *url.URL
+	if backendURL != "" {
+		var err error
+		target, err = url.Parse(backendURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backend URL %q: %w", backendURL, err)
+		}
 	}
 
 	// Apply options early so backendTLSInsecure is known before building
@@ -153,7 +180,15 @@ func New(
 		o(p)
 	}
 
-	httpTransport, h2Transport, h3Transport := buildTransports(target.Scheme, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure)
+	// When no default backend is configured, use "http" as the scheme hint
+	// for transport construction. Per-request backend URLs set via context
+	// will determine the actual scheme at request time.
+	schemeHint := "http"
+	if target != nil {
+		schemeHint = target.Scheme
+	}
+
+	httpTransport, h2Transport, h3Transport := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure)
 	wsDialTimeout, _ := config.ParseDuration(transportCfg.WebSocketDialTimeout, 10*time.Second)
 
 	// Wrap transports with streaming byte-counting when a body size limit is
@@ -273,10 +308,22 @@ func buildTransports(
 func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *slog.Logger) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			if target.Path != "" && target.Path != "/" {
-				req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+			// Use per-request backend URL from context if available,
+			// falling back to the static default.
+			effective := target
+			if ctxURL := backendURLFromContext(req.Context()); ctxURL != nil {
+				effective = ctxURL
+			}
+			if effective == nil {
+				// No default backend and no per-request override — the
+				// error handler will produce a 502.
+				logger.Error("no backend URL configured for request", "path", req.URL.Path)
+				return
+			}
+			req.URL.Scheme = effective.Scheme
+			req.URL.Host = effective.Host
+			if effective.Path != "" && effective.Path != "/" {
+				req.URL.Path = singleJoiningSlash(effective.Path, req.URL.Path)
 			}
 			if req.Header.Get("X-Forwarded-Host") == "" {
 				req.Header.Set("X-Forwarded-Host", req.Host)
@@ -342,6 +389,17 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		defer p.wsLimiter.Release(wsKey)
 	}
 
+	// Resolve the effective backend URL for this request.
+	effective := p.backendURL
+	if ctxURL := backendURLFromContext(r.Context()); ctxURL != nil {
+		effective = ctxURL
+	}
+	if effective == nil {
+		p.logger.Error("websocket: no backend URL configured")
+		http.Error(w, "no backend configured", http.StatusBadGateway)
+		return
+	}
+
 	backendConn, dialErr := p.dialWebSocketBackend(r)
 	if dialErr != nil {
 		p.logger.Error("websocket: dial backend failed", "error", dialErr)
@@ -354,9 +412,9 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// raw connection. handleWebSocket bypasses httputil.ReverseProxy (and
 	// its Director), so we must apply the same URL/Host rewriting here.
 	origHost := r.Host
-	r.Host = p.backendURL.Host
-	r.URL.Host = p.backendURL.Host
-	r.URL.Scheme = p.backendURL.Scheme
+	r.Host = effective.Host
+	r.URL.Host = effective.Host
+	r.URL.Scheme = effective.Scheme
 	r.Header.Set("X-Forwarded-Host", origHost)
 
 	if writeErr := r.Write(backendConn); writeErr != nil {
@@ -380,16 +438,24 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // dialWebSocketBackend dials the backend for a WebSocket connection.
-// The backend URL is expected to already contain an explicit port
-// (normalized at config load time). The request's context is used so
-// that client cancellation propagates to the dial.
+// The backend URL is resolved from the request context (per-tenant override)
+// or the static default. The request's context is used so that client
+// cancellation propagates to the dial.
 func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
-	backendAddr := p.backendURL.Host // Always host:port after config normalization.
+	effective := p.backendURL
+	if ctxURL := backendURLFromContext(r.Context()); ctxURL != nil {
+		effective = ctxURL
+	}
+	if effective == nil {
+		return nil, fmt.Errorf("no backend URL configured")
+	}
+
+	backendAddr := effective.Host // Always host:port after normalization.
 	ctx := r.Context()
 
 	dialer := &net.Dialer{Timeout: p.wsDialTimeout}
 
-	if p.backendURL.Scheme == "https" {
+	if effective.Scheme == "https" {
 		tlsCfg := &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: p.backendTLSInsecure, //nolint:gosec // Configurable per-user choice.

@@ -23,6 +23,7 @@ func terraformApply() {
 		"-var", "namespace="+namespace,
 		"-var", "edgequota_image="+imageName,
 		"-var", "testbackend_image="+testbackendImageName,
+		"-var", "mockextrl_image="+mockextrlImageName,
 	); err != nil {
 		fatal("Terraform apply failed: %v", err)
 	}
@@ -44,6 +45,7 @@ func terraformDestroy() {
 		"-var", "namespace="+namespace,
 		"-var", "edgequota_image="+imageName,
 		"-var", "testbackend_image="+testbackendImageName,
+		"-var", "mockextrl_image="+mockextrlImageName,
 	); err != nil {
 		warn("Terraform destroy encountered errors: %v", err)
 	}
@@ -76,6 +78,8 @@ func waitForInfrastructure() {
 		{"EdgeQuota (protocol)", "edgequota-scenario=protocol"},
 		{"EdgeQuota (protocol-rl)", "edgequota-scenario=protocol-rl"},
 		{"EdgeQuota (protocol-h3)", "edgequota-scenario=protocol-h3"},
+		{"Mock external RL service", "app=mockextrl"},
+		{"EdgeQuota (dynamic-backend)", "edgequota-scenario=dynamic-backend"},
 	}
 
 	for _, c := range checks {

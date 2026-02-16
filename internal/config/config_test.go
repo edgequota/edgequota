@@ -270,11 +270,18 @@ func TestValidate(t *testing.T) {
 		assert.NoError(t, Validate(cfg))
 	})
 
-	t.Run("missing backend URL", func(t *testing.T) {
+	t.Run("missing backend URL without external RL", func(t *testing.T) {
 		cfg := Defaults()
 		err := Validate(cfg)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend.url is required")
+		assert.Contains(t, err.Error(), "backend.url is required when rate_limit.external is not enabled")
+	})
+
+	t.Run("missing backend URL with external RL enabled", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "http://external-rl:8080/limits"
+		assert.NoError(t, Validate(cfg))
 	})
 
 	t.Run("invalid server timeout", func(t *testing.T) {

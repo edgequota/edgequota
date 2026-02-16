@@ -19,7 +19,7 @@ func newTestChain(t *testing.T, cfg *config.Config) *Chain {
 	t.Helper()
 
 	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg)
+	metrics := observability.NewMetrics(reg, 0)
 	logger := slog.Default()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -79,7 +79,7 @@ func TestChainReload_UpdatesKeyStrategy(t *testing.T) {
 	// Verify the new strategy is used by sending a request with the header.
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("X-Tenant-Id", "acme")
-	key, extractErr := chain.keyStrategy.Extract(req)
+	key, extractErr := (*chain.keyStrategy.Load()).Extract(req)
 	require.NoError(t, extractErr)
 	assert.Equal(t, "acme", key)
 }

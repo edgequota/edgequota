@@ -49,7 +49,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	reg.MustRegister(collectors.NewGoCollector())
 
-	metrics := observability.NewMetrics(reg)
+	metrics := observability.NewMetrics(reg, int64(cfg.RateLimit.MaxTenantLabels))
 	health := observability.NewHealthChecker()
 
 	// Warn about insecure configurations at startup.

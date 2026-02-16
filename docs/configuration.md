@@ -96,12 +96,14 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_AUTH_ENABLED` | Enable external authentication |
 | `timeout` | duration | `"5s"` | `EDGEQUOTA_AUTH_TIMEOUT` | Timeout for auth service calls |
+| `failure_policy` | string | `"failclosed"` | `EDGEQUOTA_AUTH_FAILURE_POLICY` | Behavior when auth is unreachable: `failclosed`, `failopen` |
 
 ### `auth.http` — HTTP Auth Backend
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
 | `url` | string | `""` | `EDGEQUOTA_AUTH_HTTP_URL` | URL of the HTTP auth endpoint (receives POST with JSON) |
+| `forward_original_headers` | bool | `false` | `EDGEQUOTA_AUTH_HTTP_FORWARD_ORIGINAL_HEADERS` | Also send headers with `X-Original-` prefix |
 
 ### `auth.grpc` — gRPC Auth Backend
 
@@ -115,6 +117,13 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_AUTH_GRPC_TLS_ENABLED` | Enable TLS for gRPC auth |
 | `ca_file` | string | `""` | `EDGEQUOTA_AUTH_GRPC_TLS_CA_FILE` | CA certificate file for verification |
+
+### `auth.header_filter` — Auth Header Filtering
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `allow_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (deny_list ignored when set) |
+| `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers |
 
 ### `rate_limit` — Rate Limiting
 
@@ -143,7 +152,8 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_ENABLED` | Enable external rate limit resolution |
 | `timeout` | duration | `"5s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_TIMEOUT` | Timeout for external rate limit calls |
-| `cache_ttl` | duration | `"60s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CACHE_TTL` | Cache TTL for external rate limit responses |
+| `cache_ttl` | duration | `"60s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CACHE_TTL` | Default cache TTL when response has no cache hints |
+| `max_concurrent_requests` | int | `50` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_MAX_CONCURRENT_REQUESTS` | Semaphore cap on concurrent external calls |
 
 ### `rate_limit.external.http` — External HTTP Backend
 
@@ -163,6 +173,13 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_GRPC_TLS_ENABLED` | Enable TLS for external gRPC |
 | `ca_file` | string | `""` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_GRPC_TLS_CA_FILE` | CA file for external gRPC TLS |
+
+### `rate_limit.external.header_filter` — External Rate Limit Header Filtering
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `allow_list` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (deny_list ignored when set) |
+| `deny_list` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_HEADER_FILTER_DENY_LIST` | Never forward these headers |
 
 ### `redis` — Redis Connection
 

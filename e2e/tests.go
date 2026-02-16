@@ -44,20 +44,21 @@ type testCase struct {
 // With QEMU + socket_vmnet, the minikube VM has a routable IP, so we
 // access services directly at <minikubeIP>:<nodePort>.
 var scenarioNodePorts = map[string]int{
-	"single-pt":      30101,
-	"single-fc":      30102,
-	"single-fb":      30103,
-	"repl-basic":     30104,
-	"sentinel-basic": 30105,
-	"cluster-basic":  30106,
-	"key-header":     30107,
-	"key-composite":  30108,
-	"burst-test":     30109,
-	"no-limit":       30110,
-	"protocol":       30111,
-	"protocol-rl":    30112,
-	"protocol-h3":    30214, // TLS NodePort (TCP + UDP/QUIC)
-	"config-reload":  30115,
+	"single-pt":       30101,
+	"single-fc":       30102,
+	"single-fb":       30103,
+	"repl-basic":      30104,
+	"sentinel-basic":  30105,
+	"cluster-basic":   30106,
+	"key-header":      30107,
+	"key-composite":   30108,
+	"burst-test":      30109,
+	"no-limit":        30110,
+	"protocol":        30111,
+	"protocol-rl":     30112,
+	"protocol-h3":     30214, // TLS NodePort (TCP + UDP/QUIC)
+	"config-reload":   30115,
+	"dynamic-backend": 30116,
 }
 
 // runAllTests resolves the minikube IP, builds base URLs for every scenario,
@@ -219,6 +220,11 @@ func allTestCases(urls map[string]string) []testCase {
 		// Config hot-reload
 		{"Config reload — rate limit changes via ConfigMap", "config-reload", func() testResult { return testConfigReload(urls["config-reload"]) }},
 		{"Config reload — TLS cert rotation", "protocol-h3", func() testResult { return testCertReload(urls["protocol-h3"]) }},
+
+		// Dynamic backend URL (tenant-aware routing)
+		{"Dynamic backend — tenant-a routes to whoami", "dynamic-backend", func() testResult { return testDynamicBackendTenantA(urls["dynamic-backend"]) }},
+		{"Dynamic backend — tenant-b routes to testbackend", "dynamic-backend", func() testResult { return testDynamicBackendTenantB(urls["dynamic-backend"]) }},
+		{"Dynamic backend — unknown tenant uses default backend", "dynamic-backend", func() testResult { return testDynamicBackendDefault(urls["dynamic-backend"]) }},
 	}
 }
 
@@ -1024,6 +1030,100 @@ func pass(name, format string, args ...any) testResult {
 
 func fail(name, format string, args ...any) testResult {
 	return testResult{name: name, passed: false, detail: fmt.Sprintf(format, args...)}
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic backend URL tests (tenant-aware routing)
+// ---------------------------------------------------------------------------
+
+func testDynamicBackendTenantA(base string) testResult {
+	// tenant-a should be routed to whoami (backend_a_url in the mock service).
+	// whoami does NOT set X-Backend header and returns plaintext.
+	headers := map[string]string{"X-Tenant-Id": "tenant-a"}
+
+	resp, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-tenant-a", "request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail("dyn-tenant-a", "expected 200, got %d", resp.StatusCode)
+	}
+
+	// whoami does not set X-Backend header.
+	if resp.Header.Get("X-Backend") == "testbackend" {
+		return fail("dyn-tenant-a", "routed to testbackend instead of whoami")
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// whoami returns plaintext containing "Hostname:" or "GET / HTTP/".
+	if strings.Contains(bodyStr, "Hostname:") || strings.Contains(bodyStr, "GET") {
+		return pass("dyn-tenant-a", "tenant-a routed to whoami backend")
+	}
+
+	return fail("dyn-tenant-a", "unexpected response body (not whoami): %s", truncate(bodyStr, 200))
+}
+
+func testDynamicBackendTenantB(base string) testResult {
+	// tenant-b should be routed to testbackend (backend_b_url in the mock service).
+	// testbackend sets X-Backend: testbackend and returns JSON.
+	headers := map[string]string{"X-Tenant-Id": "tenant-b"}
+
+	resp, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-tenant-b", "request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail("dyn-tenant-b", "expected 200, got %d", resp.StatusCode)
+	}
+
+	if resp.Header.Get("X-Backend") != "testbackend" {
+		return fail("dyn-tenant-b", "expected X-Backend: testbackend, got %q", resp.Header.Get("X-Backend"))
+	}
+
+	return pass("dyn-tenant-b", "tenant-b routed to testbackend")
+}
+
+func testDynamicBackendDefault(base string) testResult {
+	// An unknown tenant should use the default backend (whoami).
+	// The mock external RL service returns no backend_url for unknown keys.
+	headers := map[string]string{"X-Tenant-Id": "tenant-unknown"}
+
+	resp, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-default", "request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail("dyn-default", "expected 200, got %d", resp.StatusCode)
+	}
+
+	// Default backend is whoami — no X-Backend: testbackend header.
+	if resp.Header.Get("X-Backend") == "testbackend" {
+		return fail("dyn-default", "unknown tenant was routed to testbackend instead of default (whoami)")
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if strings.Contains(bodyStr, "Hostname:") || strings.Contains(bodyStr, "GET") {
+		return pass("dyn-default", "unknown tenant routed to default backend (whoami)")
+	}
+
+	return fail("dyn-default", "unexpected response body: %s", truncate(bodyStr, 200))
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // ---------------------------------------------------------------------------

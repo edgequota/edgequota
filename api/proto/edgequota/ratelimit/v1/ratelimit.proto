@@ -83,6 +83,17 @@ message GetLimitsResponse {
   // static config.
   int32 failure_code = 8;
 
+  // Backend URL override (optional). When non-empty, EdgeQuota proxies this
+  // request to the given URL instead of the static backend.url from config.
+  // This enables per-tenant backend routing — the external service can direct
+  // each tenant's traffic to a different upstream.
+  string backend_url = 9;
+
+  // Per-request timeout override (optional). Duration string (e.g. "10s").
+  // When non-empty, overrides the global server.request_timeout for this
+  // request. This enables per-tenant timeout differentiation.
+  optional string request_timeout = 10;
+
   // Cache control (optional). When omitted, the configured default TTL is used.
 
   // Cache duration in seconds. When present and > 0, overrides the default

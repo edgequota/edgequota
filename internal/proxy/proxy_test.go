@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -26,10 +27,100 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, "backend:8080", p.backendURL.Host)
 	})
 
+	t.Run("creates proxy with empty backend URL", func(t *testing.T) {
+		p, err := New("", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+		assert.NotNil(t, p)
+		assert.Nil(t, p.backendURL)
+	})
+
 	t.Run("returns error for invalid URL", func(t *testing.T) {
 		_, err := New("://bad", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid backend URL")
+	})
+}
+
+func TestContextBackendURL(t *testing.T) {
+	t.Run("per-request backend URL overrides static default", func(t *testing.T) {
+		// Static default backend — should NOT receive traffic.
+		defaultBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", "default")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer defaultBackend.Close()
+
+		// Per-request override backend — should receive traffic.
+		overrideBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", "override")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer overrideBackend.Close()
+
+		p, err := New(defaultBackend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		overrideURL, _ := url.Parse(overrideBackend.URL)
+		req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+		req = WithBackendURL(req, overrideURL)
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "override", rr.Header().Get("X-Backend"))
+	})
+
+	t.Run("falls back to static default when no context URL", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", "default")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "default", rr.Header().Get("X-Backend"))
+	})
+
+	t.Run("returns 502 when no backend configured and no context URL", func(t *testing.T) {
+		p, err := New("", 1*time.Second, 10, 10*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadGateway, rr.Code)
+	})
+
+	t.Run("context URL with empty default routes correctly", func(t *testing.T) {
+		overrideBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", "dynamic")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer overrideBackend.Close()
+
+		p, err := New("", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		overrideURL, _ := url.Parse(overrideBackend.URL)
+		req := httptest.NewRequest(http.MethodGet, "/tenant-resource", nil)
+		req = WithBackendURL(req, overrideURL)
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "dynamic", rr.Header().Get("X-Backend"))
 	})
 }
 

@@ -34,16 +34,28 @@ func buildAndLoadImage() {
 		fatal("Docker build (testbackend) failed: %v", err)
 	}
 
-	// Load both into minikube.
+	// Build mock external rate limit service image.
+	info("Building mockextrl Docker image...")
+
+	mockextrlDir := filepath.Join(getE2EDir(), "mockextrl")
+	if err := runStream("docker", "build",
+		"-t", mockextrlImageName,
+		"-f", filepath.Join(mockextrlDir, "Dockerfile"),
+		mockextrlDir,
+	); err != nil {
+		fatal("Docker build (mockextrl) failed: %v", err)
+	}
+
+	// Load all into minikube.
 	info("Loading images into minikube...")
 
-	for _, img := range []string{imageName, testbackendImageName} {
+	for _, img := range []string{imageName, testbackendImageName, mockextrlImageName} {
 		if err := runStream("minikube", "image", "load", img); err != nil {
 			fatal("Failed to load %s image into minikube: %v", img, err)
 		}
 	}
 
-	info("Images loaded: %s, %s", imageName, testbackendImageName)
+	info("Images loaded: %s, %s, %s", imageName, testbackendImageName, mockextrlImageName)
 }
 
 // getProjectDir returns the absolute path to the project root.

@@ -3,9 +3,12 @@ package ratelimit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/edgequota/edgequota/internal/config"
@@ -80,8 +83,10 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			timeout:        5e9,
 			cacheTTL:       0,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		limits, err := c.GetLimits(context.Background(), &ExternalRequest{
@@ -106,8 +111,10 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
@@ -121,8 +128,10 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
@@ -133,8 +142,10 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 	t.Run("returns error when no service configured", func(t *testing.T) {
 		c := &ExternalClient{
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
@@ -165,8 +176,10 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		limits1, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cached-key"})
@@ -201,8 +214,10 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		limits1, _ := c.GetLimits(context.Background(), &ExternalRequest{Key: "key-a"})
@@ -227,8 +242,10 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			timeout:        5e9,
 			cacheTTL:       60e9,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
@@ -238,7 +255,11 @@ func TestExternalClientRedisCaching(t *testing.T) {
 }
 
 func TestResolveHTTPCacheTTL(t *testing.T) {
-	ec := &ExternalClient{cacheTTL: 60e9}
+	ec := &ExternalClient{
+		cacheTTL:    60e9,
+		maxBreakers: defaultMaxCircuitBreakers,
+		done:        make(chan struct{}),
+	}
 
 	t.Run("Cache-Control max-age takes highest priority", func(t *testing.T) {
 		h := http.Header{}
@@ -299,7 +320,11 @@ func TestResolveHTTPCacheTTL(t *testing.T) {
 }
 
 func TestResolveBodyCacheTTL(t *testing.T) {
-	ec := &ExternalClient{cacheTTL: 60e9}
+	ec := &ExternalClient{
+		cacheTTL:    60e9,
+		maxBreakers: defaultMaxCircuitBreakers,
+		done:        make(chan struct{}),
+	}
 
 	t.Run("cache_no_store returns zero TTL", func(t *testing.T) {
 		limits := &ExternalLimits{CacheNoStore: true, CacheMaxAgeSec: int64Ptr(300)}
@@ -345,8 +370,10 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			cacheTTL:       10e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "body-ttl"})
@@ -379,8 +406,10 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "no-store"})
@@ -410,8 +439,10 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
 			cbResetTimeout: defaultCBResetTimeout,
+			done:           make(chan struct{}),
 		}
 
 		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "header-wins"})
@@ -425,7 +456,82 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 
 func TestExternalClientClose(t *testing.T) {
 	t.Run("close with no grpc conn returns nil", func(t *testing.T) {
-		c := &ExternalClient{}
+		c := &ExternalClient{
+			maxBreakers: defaultMaxCircuitBreakers,
+			done:        make(chan struct{}),
+		}
 		assert.NoError(t, c.Close())
 	})
+}
+
+func TestCircuitBreakerCap(t *testing.T) {
+	c := &ExternalClient{
+		httpURL:        "http://127.0.0.1:1",
+		httpClient:     http.DefaultClient,
+		timeout:        1e9,
+		headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
+		fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
+		maxBreakers:    3, // Very low cap for testing.
+		cbThreshold:    5,
+		cbResetTimeout: 30 * time.Second,
+		done:           make(chan struct{}),
+	}
+	defer c.Close()
+
+	// Create 3 breakers (at cap).
+	for i := range 3 {
+		key := fmt.Sprintf("tenant-%d", i)
+		cb := c.getOrCreateCB(key)
+		assert.NotEqual(t, closedBreakerStub, cb, "breaker %d should be a real breaker", i)
+	}
+	assert.Equal(t, int64(3), c.breakerCount.Load())
+
+	// 4th key should get the passthrough stub.
+	cb := c.getOrCreateCB("overflow-tenant")
+	assert.Equal(t, closedBreakerStub, cb, "excess key should get closedBreakerStub")
+
+	// Existing keys should still return their real breakers.
+	cb = c.getOrCreateCB("tenant-0")
+	assert.NotEqual(t, closedBreakerStub, cb, "existing key should still get real breaker")
+}
+
+func TestExternalClientGoroutineLeak(t *testing.T) {
+	// Create and close multiple clients, verifying no goroutine leak.
+	before := runtime.NumGoroutine()
+
+	for range 5 {
+		c := &ExternalClient{
+			httpURL:        "http://127.0.0.1:1",
+			httpClient:     http.DefaultClient,
+			timeout:        1e9,
+			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
+			fetchSem:       semaphore.NewWeighted(1),
+			maxBreakers:    10,
+			cbThreshold:    5,
+			cbResetTimeout: 100 * time.Millisecond,
+			done:           make(chan struct{}),
+		}
+		// Start the eviction goroutine like the constructor does.
+		go func() {
+			ticker := time.NewTicker(c.cbResetTimeout)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-c.done:
+					return
+				case <-ticker.C:
+					c.evictStaleBreakers()
+				}
+			}
+		}()
+		_ = c.Close()
+	}
+
+	// Give goroutines time to exit.
+	time.Sleep(200 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	// Allow some slack for test infrastructure goroutines.
+	assert.LessOrEqual(t, after, before+2,
+		"goroutine count should not grow after closing clients (before=%d, after=%d)", before, after)
 }

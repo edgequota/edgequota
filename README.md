@@ -79,6 +79,7 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 
 - Query an external service for per-request rate limits based on the extracted key.
 - Supports multi-tenant use cases where different tenants have different quotas.
+- **Tenant-aware backend routing:** the external service can return a `backend_url` per tenant, directing each tenant's traffic to a different upstream — no static backend required.
 - Responses are cached locally with a configurable TTL to minimize external calls.
 
 ### Multi-Protocol Reverse Proxy
@@ -98,24 +99,45 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 
 ## Architecture
 
+### Request Flow
+
+Every incoming request passes through a three-stage middleware chain. Each stage can short-circuit the request and return a response directly to the client.
+
 ```
-                 ┌──────────────────────────────────────────────────────────────┐
-                 │                        EdgeQuota                             │
-                 │                                                              │
-  Incoming ─────►│  Auth ─────► Rate Limit ─────► Reverse Proxy ──────────────►│──► Backend
-  Requests       │   │              │                   │                       │    Service
-                 │   ▼              ▼                   ▼                       │
-                 │  External   Redis (Lua)         HTTP/1.1, HTTP/2            │
-                 │  Auth Svc   + In-Memory         HTTP/3, gRPC                │
-                 │             Fallback            SSE, WebSocket              │
-                 └──────────────────────────────────────────────────────────────┘
-                      │                                        │
-                      ▼                                        ▼
-                 Optional:                               Admin Server (:9090)
-                 Dynamic Limits Svc                      /startz  /healthz  /readyz  /metrics
+  Client
+    │
+    ▼
+┌─────────┐      ┌──────────────┐      ┌───────────────┐      ┌─────────┐
+│  Auth   │─────►│  Rate Limit  │─────►│ Reverse Proxy │─────►│ Backend │
+│(optional)│      │              │      │               │      │         │
+└────┬────┘      └──────┬───────┘      └───────────────┘      └─────────┘
+     │                  │
+     │ deny → 401/403   │ deny → 429
+     │ to client        │ to client
 ```
 
-The middleware chain executes in order: **Auth** (optional) → **Rate Limit** → **Proxy**. Each step can short-circuit the request. See [docs/architecture.md](docs/architecture.md) for the full design.
+1. **Auth** (optional) — Forwards the request to an external auth service (HTTP or gRPC). On deny, returns the auth service's status code and headers directly.
+2. **Rate Limit** — Evaluates the request against the token bucket for the extracted key. On deny, returns `429 Too Many Requests` with standard rate-limit headers.
+3. **Reverse Proxy** — Forwards the request to the backend over the appropriate protocol (HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, or WebSocket), detected automatically.
+
+### External Dependencies
+
+The middleware stages above rely on up to three backing services. Only Redis is required (and only when rate limiting is enabled); the other two are opt-in.
+
+- **Redis** -- Stores rate-limit counters via an atomic Lua token-bucket script. Supports single-instance, replication, Sentinel, and Cluster topologies. If Redis becomes unavailable, the configured failure policy takes over: pass-through, fail-closed, or in-memory fallback with automatic reconnection.
+- **External Auth Service** (optional) -- Validates requests before rate limiting. Supports HTTP and gRPC. See [Authentication](#authentication).
+- **External Limits Service** (optional) -- Resolves per-key quotas dynamically for multi-tenant use cases. Responses are cached with a configurable TTL. See [Dynamic Quota Resolution](#dynamic-quota-resolution).
+
+### Admin Server (`:9090`)
+
+A separate listener, isolated from proxy traffic, exposes operational endpoints:
+
+- `GET /startz` -- Startup probe. Returns 200 once initialization completes, 503 before.
+- `GET /healthz` -- Liveness probe. Always returns 200 while the process is running.
+- `GET /readyz` -- Readiness probe. Returns 503 during startup and graceful drain. Pass `?deep=true` to actively ping Redis.
+- `GET /metrics` -- Prometheus metrics endpoint.
+
+See [docs/architecture.md](docs/architecture.md) for the full design, failure modes, and scaling model.
 
 ---
 
@@ -246,7 +268,7 @@ EdgeQuota is configured via a YAML file (default: `/etc/edgequota/config.yaml`) 
 | YAML Path | Environment Variable | Default |
 |---|---|---|
 | `server.address` | `EDGEQUOTA_SERVER_ADDRESS` | `:8080` |
-| `backend.url` | `EDGEQUOTA_BACKEND_URL` | *(required)* |
+| `backend.url` | `EDGEQUOTA_BACKEND_URL` | *(required unless `rate_limit.external` is enabled)* |
 | `rate_limit.average` | `EDGEQUOTA_RATE_LIMIT_AVERAGE` | `0` (disabled) |
 | `rate_limit.burst` | `EDGEQUOTA_RATE_LIMIT_BURST` | `1` |
 | `rate_limit.failure_policy` | `EDGEQUOTA_RATE_LIMIT_FAILURE_POLICY` | `passThrough` |
@@ -290,17 +312,73 @@ A background recovery loop automatically reconnects to Redis with exponential ba
 | `sentinel` | Redis Sentinel with automatic failover |
 | `cluster` | Redis Cluster with slot-based sharding |
 
-See [docs/rate-limiting.md](docs/rate-limiting.md) for algorithm details, distributed correctness analysis, and key naming strategy.
+### External Rate Limit Service
+
+When `rate_limit.external.enabled` is `true`, EdgeQuota queries an external service for **per-request** rate limits instead of using the static `average`/`burst`/`period` values. This enables multi-tenant scenarios where each tenant has different quotas managed in a backend database.
+
+**HTTP example:**
+
+```yaml
+rate_limit:
+  average: 100        # fallback when external service is unreachable
+  burst: 50
+  period: "1s"
+  external:
+    enabled: true
+    timeout: "5s"
+    cache_ttl: "60s"
+    max_concurrent_requests: 50
+    http:
+      url: "http://limits-service:8080/limits"
+```
+
+**gRPC example:**
+
+```yaml
+rate_limit:
+  external:
+    enabled: true
+    timeout: "5s"
+    cache_ttl: "60s"
+    grpc:
+      address: "limits-service:50052"
+      tls:
+        enabled: true
+        ca_file: "/etc/edgequota/tls/limits-ca.pem"
+```
+
+The external service receives the extracted key, request headers, method, and path, and returns dynamic limits:
+
+| Response Field | Description |
+|---|---|
+| `average`, `burst`, `period` | Override static rate-limit parameters |
+| `tenant_key` | Custom Redis bucket key (replaces the extracted key) |
+| `backend_url` | Per-request backend override (e.g. route tenant to dedicated cluster) |
+| `failure_policy`, `failure_code` | Per-tenant Redis-down behavior |
+| `cache_max_age_seconds`, `cache_no_store` | Response-level cache control |
+
+Responses are cached in Redis (shared across all instances) with singleflight deduplication. A per-key **circuit breaker** opens after 5 consecutive failures and falls back to stale cache, then to the static config values.
+
+See [docs/rate-limiting.md](docs/rate-limiting.md) for algorithm details, the full external service protocol, caching semantics, and distributed correctness analysis.
 
 ---
 
 ## Authentication
 
-When enabled, EdgeQuota forwards every incoming request to an external auth service **before** rate limiting and proxying.
+When enabled, EdgeQuota forwards every incoming request to an external auth service **before** rate limiting and proxying. Both HTTP and gRPC backends are supported; configure exactly one.
 
 ### HTTP Auth
 
-The auth service receives a `POST` with JSON:
+```yaml
+auth:
+  enabled: true
+  timeout: "5s"
+  failure_policy: "failclosed"   # failclosed | failopen
+  http:
+    url: "http://auth-service:8080/check"
+```
+
+EdgeQuota sends a `POST` with JSON:
 
 ```json
 {
@@ -311,14 +389,46 @@ The auth service receives a `POST` with JSON:
 }
 ```
 
-- **200** → Request allowed; proceed to rate limiting.
-- **Any other status** → Request denied; response headers and body are forwarded to the client.
+- **200** → Request allowed; proceed to rate limiting. The response body can optionally return `request_headers` to inject headers into the upstream request.
+- **Any other status** → Request denied; the auth service's status code, headers, and body are forwarded to the client.
 
 ### gRPC Auth
 
-Uses `edgequota.auth.v1.AuthService/Check` with a JSON codec. See `api/proto/auth/v1/auth.proto`.
+```yaml
+auth:
+  enabled: true
+  timeout: "5s"
+  failure_policy: "failclosed"
+  grpc:
+    address: "auth-service:50051"
+    tls:
+      enabled: true
+      ca_file: "/etc/edgequota/tls/auth-ca.pem"
+```
 
-See [docs/authentication.md](docs/authentication.md) for the full flow, timeout handling, and fail-open/fail-closed implications.
+Uses `edgequota.auth.v1.AuthService/Check` with a JSON codec — the auth service can be implemented without protobuf code generation. See `api/proto/auth/v1/auth.proto` for the formal definition.
+
+### Failure Policy
+
+| Policy | Auth unreachable / timeout / circuit open |
+|--------|-------------------------------------------|
+| `failclosed` (default) | Deny with `503 Service Unavailable` |
+| `failopen` | Allow request; skip auth |
+
+A built-in **circuit breaker** opens after 5 consecutive auth failures and stays open for 30 s, preventing cascading timeouts. While open, the failure policy applies immediately without waiting for the timeout.
+
+### Header Filtering
+
+By default a set of sensitive headers (`Authorization`, `Cookie`, `X-Api-Key`, etc.) is forwarded to the auth service. You can override this behavior:
+
+```yaml
+auth:
+  header_filter:
+    deny_list: ["Cookie", "Set-Cookie"]   # never forward these
+    # allow_list: ["Authorization"]        # exclusive: only these (deny_list ignored)
+```
+
+See [docs/authentication.md](docs/authentication.md) for the full flow, security model, and example auth service implementation.
 
 ---
 

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -20,13 +21,18 @@ import (
 
 	"github.com/edgequota/edgequota/internal/auth"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/events"
 	"github.com/edgequota/edgequota/internal/observability"
+	"github.com/edgequota/edgequota/internal/proxy"
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/edgequota/edgequota/internal/redis"
 )
 
 // requestIDHeader is the canonical HTTP header for request correlation.
 const requestIDHeader = "X-Request-Id"
+
+// maxRequestIDLen is the maximum allowed length for a client-supplied X-Request-Id.
+const maxRequestIDLen = 128
 
 // generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
 // Uses crypto/rand for uniqueness. This is simpler and faster than UUID v7
@@ -37,6 +43,43 @@ func generateRequestID() string {
 		return "unknown"
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+// validRequestID checks that a client-supplied request ID is safe to propagate.
+// Rejects IDs that are too long or contain non-printable / injection characters.
+// Allowed characters: alphanumeric, hyphens, underscores, dots, colons.
+func validRequestID(s string) bool {
+	if len(s) == 0 || len(s) > maxRequestIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// injectionDenyHeaders is the set of hop-by-hop and security-sensitive headers
+// that the auth service is NOT allowed to inject into upstream requests. This
+// prevents request smuggling via a compromised or misconfigured auth service.
+var injectionDenyHeaders = map[string]struct{}{
+	"Host":                {},
+	"Content-Length":      {},
+	"Transfer-Encoding":   {},
+	"Connection":          {},
+	"Te":                  {},
+	"Upgrade":             {},
+	"Proxy-Authorization": {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Trailer":             {},
 }
 
 // jsonErrorResponse is the structured error body returned by EdgeQuota.
@@ -123,7 +166,7 @@ type Chain struct {
 	authClient atomic.Pointer[auth.Client]
 	externalRL atomic.Pointer[ratelimit.ExternalClient]
 
-	keyStrategy ratelimit.KeyStrategy
+	keyStrategy atomic.Pointer[ratelimit.KeyStrategy]
 
 	mu             sync.RWMutex
 	limiter        *ratelimit.Limiter
@@ -136,13 +179,17 @@ type Chain struct {
 
 	fallback *ratelimit.InMemoryLimiter
 
-	ratePerSecond float64
-	burst         int64
-	ttl           int
-	prefix        string
-	failurePolicy config.FailurePolicy
-	failureCode   int
-	average       int64
+	ratePerSecond  float64
+	burst          int64
+	ttl            int
+	prefix         string
+	failurePolicy  config.FailurePolicy
+	failureCode    int
+	average        int64
+	requestTimeout time.Duration
+
+	urlPolicy proxy.BackendURLPolicy
+	emitter   *events.Emitter
 
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -232,23 +279,32 @@ func NewChain(
 		prefix = "rl:" + cfg.RateLimit.KeyPrefix + ":"
 	}
 
+	requestTimeout, _ := time.ParseDuration(cfg.Server.RequestTimeout)
+
 	chain := &Chain{
-		next:          next,
-		logger:        logger,
-		metrics:       metrics,
-		keyStrategy:   ks,
-		fallback:      ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
-		ratePerSecond: p.ratePerSecond,
-		burst:         p.burst,
-		ttl:           p.ttl,
-		prefix:        prefix,
-		failurePolicy: p.failurePolicy,
-		failureCode:   p.failureCode,
-		average:       cfg.RateLimit.Average,
-		ctx:           ctx,
-		cancel:        cancel,
+		next:           next,
+		logger:         logger,
+		metrics:        metrics,
+		fallback:       ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
+		ratePerSecond:  p.ratePerSecond,
+		burst:          p.burst,
+		ttl:            p.ttl,
+		prefix:         prefix,
+		failurePolicy:  p.failurePolicy,
+		failureCode:    p.failureCode,
+		average:        cfg.RateLimit.Average,
+		requestTimeout: requestTimeout,
+		urlPolicy: proxy.BackendURLPolicy{
+			AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
+			DenyPrivateNetworks: cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
+			AllowedHosts:        cfg.Backend.URLPolicy.AllowedHosts,
+		},
+		ctx:    ctx,
+		cancel: cancel,
 	}
+	chain.keyStrategy.Store(&ks)
 	chain.cfg.Store(cfg)
+	chain.emitter = events.NewEmitter(cfg.Events, logger, metrics)
 
 	if err := chain.initRedis(cfg, logger, p); err != nil {
 		cancel()
@@ -420,8 +476,9 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw.written = false
 
 	// Propagate or generate X-Request-Id for request correlation.
+	// Validate client-supplied IDs to prevent CRLF injection and log pollution.
 	reqID := r.Header.Get(requestIDHeader)
-	if reqID == "" {
+	if !validRequestID(reqID) {
 		reqID = generateRequestID()
 		r.Header.Set(requestIDHeader, reqID)
 	}
@@ -447,7 +504,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, err := c.keyStrategy.Extract(r)
+	key, err := (*c.keyStrategy.Load()).Extract(r)
 	if err != nil {
 		c.metrics.IncKeyExtractErrors()
 		c.logger.Warn("key extraction failed", "error", err)
@@ -461,6 +518,36 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	extLimits, resolvedKey := c.fetchExternalLimits(r, key)
+
+	// Apply per-request context timeout. The external service can override
+	// the global default on a per-tenant/per-key basis.
+	timeout := c.requestTimeout
+	if extLimits != nil && extLimits.RequestTimeout != "" {
+		if d, parseErr := time.ParseDuration(extLimits.RequestTimeout); parseErr == nil && d > 0 {
+			timeout = d
+		}
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
+
+	// Inject per-tenant backend URL into the request context when the
+	// external service provides one. The proxy reads this value in its
+	// Director, falling back to the static backend.url from config.
+	if extLimits != nil && extLimits.BackendURL != "" {
+		if backendURL, parseErr := url.Parse(extLimits.BackendURL); parseErr != nil {
+			c.logger.Warn("invalid backend_url from external service, using default",
+				"backend_url", extLimits.BackendURL, "error", parseErr)
+		} else if validErr := c.validateBackendURL(backendURL); validErr != nil {
+			c.logger.Warn("backend_url from external service blocked by policy, using default",
+				"backend_url", extLimits.BackendURL, "error", validErr)
+		} else {
+			r = proxy.WithBackendURL(r, backendURL)
+		}
+	}
 
 	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
 		return
@@ -512,7 +599,14 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 	// Inject auth-derived headers into the request. These overwrite any
 	// client-sent headers with the same name, so the auth service is the
 	// source of truth (e.g. for tenant ID decoded from a token).
+	// Hop-by-hop and security-sensitive headers are blocked to prevent
+	// request smuggling via a compromised or misconfigured auth service.
 	for k, v := range resp.RequestHeaders {
+		if _, denied := injectionDenyHeaders[http.CanonicalHeaderKey(k)]; denied {
+			c.logger.Warn("auth service tried to inject denied header, skipping",
+				"header", k)
+			continue
+		}
 		r.Header.Set(k, v)
 	}
 
@@ -646,6 +740,7 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 		if isTenantKey {
 			c.metrics.IncTenantLimited(tenantID)
 		}
+		c.emitUsageEvent(r, resolvedKey, tenantID, result, http.StatusTooManyRequests)
 		c.serveRateLimited(w, result)
 		return
 	}
@@ -653,7 +748,27 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 	if isTenantKey {
 		c.metrics.IncTenantAllowed(tenantID)
 	}
+	c.emitUsageEvent(r, resolvedKey, tenantID, result, http.StatusOK)
 	c.next.ServeHTTP(w, r)
+}
+
+// emitUsageEvent enqueues a usage event to the events emitter (if configured).
+// This is fire-and-forget and never blocks the request hot path.
+func (c *Chain) emitUsageEvent(r *http.Request, key, tenantID string, result *ratelimit.Result, statusCode int) {
+	if c.emitter == nil {
+		return
+	}
+	c.emitter.Emit(events.UsageEvent{
+		Key:        key,
+		TenantKey:  tenantID,
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		Allowed:    result.Allowed,
+		Remaining:  result.Remaining,
+		Limit:      result.Limit,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		StatusCode: statusCode,
+	})
 }
 
 // setRateLimitHeaders writes standard rate-limit headers to every response.
@@ -885,6 +1000,8 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		return fmt.Errorf("reload key strategy: %w", err)
 	}
 
+	c.keyStrategy.Store(&newKS) // Atomic store — read by ServeHTTP without holding mu.
+
 	c.mu.Lock()
 	prevCfg := c.cfg.Load() // Capture previous config before overwriting.
 	c.ratePerSecond = p.ratePerSecond
@@ -894,7 +1011,6 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.failurePolicy = p.failurePolicy
 	c.failureCode = p.failureCode
 	c.average = newCfg.RateLimit.Average
-	c.keyStrategy = newKS
 	c.cfg.Store(newCfg) // Atomic store — recoveryLoop reads c.cfg without the mutex.
 
 	// Rebuild limiter with new params but same Redis client if available.
@@ -914,6 +1030,25 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 
 	c.reloadAuth(prevCfg, newCfg)
 	c.reloadExternalRL(newCfg)
+
+	// Update URL policy.
+	c.urlPolicy = proxy.BackendURLPolicy{
+		AllowedSchemes:      newCfg.Backend.URLPolicy.AllowedSchemes,
+		DenyPrivateNetworks: newCfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
+		AllowedHosts:        newCfg.Backend.URLPolicy.AllowedHosts,
+	}
+
+	// Update per-request timeout.
+	if d, parseErr := time.ParseDuration(newCfg.Server.RequestTimeout); parseErr == nil {
+		c.requestTimeout = d
+	}
+
+	// Recreate emitter if events config changed.
+	oldEmitter := c.emitter
+	c.emitter = events.NewEmitter(newCfg.Events, c.logger, c.metrics)
+	if oldEmitter != nil {
+		_ = oldEmitter.Close()
+	}
 
 	c.logger.Info("middleware chain reloaded",
 		"average", newCfg.RateLimit.Average, "burst", p.burst,
@@ -964,6 +1099,11 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 	}
 }
 
+// validateBackendURL checks a dynamic backend URL against the configured policy.
+func (c *Chain) validateBackendURL(u *url.URL) error {
+	return proxy.ValidateBackendURL(u, c.urlPolicy)
+}
+
 func (c *Chain) Close() error {
 	c.cancel()
 
@@ -993,6 +1133,11 @@ func (c *Chain) Close() error {
 	}
 	if c.fallback != nil {
 		c.fallback.Close()
+	}
+	if c.emitter != nil {
+		if err := c.emitter.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 
 	return firstErr
