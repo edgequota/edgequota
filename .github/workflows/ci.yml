@@ -138,8 +138,20 @@ jobs:
 
       - uses: bufbuild/buf-setup-action@v1
 
+      - name: Compute BSR labels
+        id: labels
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            echo "args=--label ${TAG} --label v${MAJOR}.${MINOR} --label v${MAJOR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=--label ${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Push module to Buf Schema Registry
-        run: buf push --label "${{ github.ref_name }}"
+        run: buf push ${{ steps.labels.outputs.args }}
         env:
           BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
 
