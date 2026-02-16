@@ -310,7 +310,9 @@ func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckRespon
 
 // Close releases resources held by the auth client.
 func (c *Client) Close() error {
-	c.httpClient.CloseIdleConnections()
+	if c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
 	if c.grpcConn != nil {
 		return c.grpcConn.Close()
 	}

@@ -705,7 +705,9 @@ func (ec *ExternalClient) Close() error {
 		}
 	}
 
-	ec.httpClient.CloseIdleConnections()
+	if ec.httpClient != nil {
+		ec.httpClient.CloseIdleConnections()
+	}
 
 	if ec.grpcConn != nil {
 		return ec.grpcConn.Close()
