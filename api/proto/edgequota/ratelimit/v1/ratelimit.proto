@@ -72,8 +72,10 @@ message GetLimitsResponse {
   //   - Maximum length: 256 characters.
   //   - Allowed characters: alphanumeric (a-z, A-Z, 0-9), hyphens (-),
   //     underscores (_), dots (.), and colons (:).
-  //   - Keys that violate these constraints are logged with a warning and
-  //     ignored — the originally extracted key is used as fallback.
+  //   - Keys that violate these constraints trigger a warning log, a
+  //     tenant_key_rejected_total metric increment, and a usage event with
+  //     reason="tenant_key_rejected". The originally extracted key is used
+  //     as fallback.
   string tenant_key = 6;
 
   // Dynamic failure policy override (optional). When Redis is unavailable,

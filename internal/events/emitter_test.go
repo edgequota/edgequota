@@ -41,13 +41,13 @@ func TestEmitter_BatchFlushing(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Errorf("unmarshal error: %v", err)
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		mu.Lock()
 		received = append(received, payload.Events...)
 		mu.Unlock()
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"accepted":` + string(body[:1]) + `}`))
 	}))
 	defer srv.Close()
@@ -127,7 +127,7 @@ func TestEmitter_GracefulShutdownDrain(t *testing.T) {
 			received += len(payload.Events)
 			mu.Unlock()
 		}
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 

@@ -53,6 +53,10 @@ type Metrics struct {
 	maxTenantLabels    int64
 	promTenantOverflow prometheus.Counter
 	promEventsDropped  prometheus.Counter
+
+	// External service response validation.
+	tenantKeyRejected    int64
+	promTenantKeyRejects prometheus.Counter
 }
 
 // NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
@@ -143,6 +147,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "events_dropped_total",
 			Help:      "Number of usage events dropped due to buffer overflow.",
 		}),
+		promTenantKeyRejects: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "tenant_key_rejected_total",
+			Help:      "Number of tenant keys rejected due to validation failure (length or charset).",
+		}),
 	}
 
 	// Start as healthy (set to 1). The middleware chain will set to 0 on
@@ -199,6 +208,14 @@ func (m *Metrics) IncAuthDenied() {
 	m.promAuthDenied.Inc()
 }
 
+// IncTenantKeyRejected increments the counter for tenant keys rejected by
+// validation. This fires when the external rate-limit service returns a
+// tenant_key that violates length or charset constraints.
+func (m *Metrics) IncTenantKeyRejected() {
+	atomic.AddInt64(&m.tenantKeyRejected, 1)
+	m.promTenantKeyRejects.Inc()
+}
+
 // tenantOverflowLabel is the sentinel label used when the tenant cardinality
 // cap is reached. All excess tenants are aggregated under this label.
 const tenantOverflowLabel = "__overflow__"
@@ -218,12 +235,10 @@ func (m *Metrics) resolveTenantLabel(tenant string) string {
 		return tenantOverflowLabel
 	}
 
-	// Try to register the tenant.
+	// Try to register the tenant. A benign race may cause the count to
+	// slightly exceed maxTenantLabels, but it is bounded and transient.
 	if _, loaded := m.tenantLabels.LoadOrStore(tenant, struct{}{}); !loaded {
-		if m.tenantLabelCount.Add(1) > m.maxTenantLabels {
-			// Race: another goroutine also registered one at the same time.
-			// That's fine — we're slightly over, but it's bounded and transient.
-		}
+		m.tenantLabelCount.Add(1)
 	}
 	return tenant
 }

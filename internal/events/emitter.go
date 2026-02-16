@@ -31,6 +31,7 @@ type UsageEvent struct {
 	Timestamp  string `json:"timestamp"` // RFC 3339
 	StatusCode int    `json:"status_code"`
 	RequestID  string `json:"request_id,omitempty"` // X-Request-Id for deduplication
+	Reason     string `json:"reason,omitempty"`     // Non-empty for anomaly events (e.g. "tenant_key_rejected")
 }
 
 // Emitter is an async, buffered event emitter that batches usage events and
@@ -219,7 +220,7 @@ func (e *Emitter) sendHTTP(batch []UsageEvent) {
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode >= 400 {

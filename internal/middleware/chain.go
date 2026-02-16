@@ -181,13 +181,13 @@ type Chain struct {
 
 	fallback *ratelimit.InMemoryLimiter
 
-	ratePerSecond  float64
-	burst          int64
-	ttl            int
-	prefix         string
-	failurePolicy  config.FailurePolicy
-	failureCode    int
-	average        int64
+	ratePerSecond float64
+	burst         int64
+	ttl           int
+	prefix        string
+	failurePolicy config.FailurePolicy
+	failureCode   int
+	average       int64
 
 	// requestTimeout and urlPolicy are read from ServeHTTP (hot path)
 	// without holding mu, and written by Reload. Using atomic.Value
@@ -525,8 +525,25 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	extLimits, resolvedKey := c.fetchExternalLimits(r, key)
 
-	// Apply per-request context timeout. The external service can override
-	// the global default on a per-tenant/per-key basis.
+	ctx, cancel := c.applyRequestTimeout(ctx, extLimits)
+	if cancel != nil {
+		defer cancel()
+	}
+	r = r.WithContext(ctx)
+
+	r = c.injectBackendURL(r, extLimits)
+
+	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
+		return
+	}
+
+	c.handleRedisFailurePolicy(sw, r, resolvedKey, extLimits)
+}
+
+// applyRequestTimeout returns a context with a timeout derived from the global
+// config and optionally overridden by the external rate-limit response. The
+// caller must defer the returned cancel func when non-nil.
+func (c *Chain) applyRequestTimeout(ctx context.Context, extLimits *ratelimit.ExternalLimits) (context.Context, context.CancelFunc) {
 	timeout := c.requestTimeout.Load().(time.Duration)
 	if extLimits != nil && extLimits.RequestTimeout != "" {
 		if d, parseErr := time.ParseDuration(extLimits.RequestTimeout); parseErr == nil && d > 0 {
@@ -534,32 +551,30 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-		r = r.WithContext(ctx)
+		return context.WithTimeout(ctx, timeout)
 	}
+	return ctx, nil
+}
 
-	// Inject per-tenant backend URL into the request context when the
-	// external service provides one. The proxy reads this value in its
-	// Director, falling back to the static backend.url from config.
-	if extLimits != nil && extLimits.BackendURL != "" {
-		if backendURL, parseErr := url.Parse(extLimits.BackendURL); parseErr != nil {
-			c.logger.Warn("invalid backend_url from external service, using default",
-				"backend_url", extLimits.BackendURL, "error", parseErr)
-		} else if validErr := c.validateBackendURL(backendURL); validErr != nil {
-			c.logger.Warn("backend_url from external service blocked by policy, using default",
-				"backend_url", extLimits.BackendURL, "error", validErr)
-		} else {
-			r = proxy.WithBackendURL(r, backendURL)
-		}
+// injectBackendURL sets a per-tenant backend URL in the request context when
+// the external service provides one. Falls back to the static backend URL on
+// parse or policy validation failure.
+func (c *Chain) injectBackendURL(r *http.Request, extLimits *ratelimit.ExternalLimits) *http.Request {
+	if extLimits == nil || extLimits.BackendURL == "" {
+		return r
 	}
-
-	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
-		return
+	backendURL, parseErr := url.Parse(extLimits.BackendURL)
+	if parseErr != nil {
+		c.logger.Warn("invalid backend_url from external service, using default",
+			"backend_url", extLimits.BackendURL, "error", parseErr)
+		return r
 	}
-
-	c.handleRedisFailurePolicy(sw, r, resolvedKey, extLimits)
+	if validErr := c.validateBackendURL(backendURL); validErr != nil {
+		c.logger.Warn("backend_url from external service blocked by policy, using default",
+			"backend_url", extLimits.BackendURL, "error", validErr)
+		return r
+	}
+	return proxy.WithBackendURL(r, backendURL)
 }
 
 // checkAuth verifies the request with the external auth service.
@@ -704,6 +719,18 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 			c.logger.Warn("invalid tenant_key from external service, using extracted key as fallback",
 				"tenant_key_len", len(extLimits.TenantKey),
 				"max_len", maxTenantKeyLen)
+			c.metrics.IncTenantKeyRejected()
+			if c.emitter != nil {
+				c.emitter.Emit(events.UsageEvent{
+					Key:       resolvedKey,
+					Method:    r.Method,
+					Path:      r.URL.Path,
+					Allowed:   true, // request still proceeds
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					RequestID: r.Header.Get(requestIDHeader),
+					Reason:    "tenant_key_rejected",
+				})
+			}
 		}
 	}
 
