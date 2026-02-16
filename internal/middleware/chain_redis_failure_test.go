@@ -122,20 +122,15 @@ func TestChainServeHTTPRedisFailureMidRequest(t *testing.T) {
 	})
 }
 
-func TestChainRecoveryLoop(t *testing.T) {
-	// Override backoff for fast testing.
-	origBase := recoveryBackoffBase
-	origMax := recoveryBackoffMax
-	origJitter := backoffJitter
-	recoveryBackoffBase = 50 * time.Millisecond
-	recoveryBackoffMax = 200 * time.Millisecond
-	backoffJitter = func(d time.Duration) time.Duration { return d }
-	defer func() {
-		recoveryBackoffBase = origBase
-		recoveryBackoffMax = origMax
-		backoffJitter = origJitter
-	}()
+func testFastRecovery() ChainOption {
+	return WithRecoveryBackoff(
+		50*time.Millisecond,
+		200*time.Millisecond,
+		func(d time.Duration) time.Duration { return d },
+	)
+}
 
+func TestChainRecoveryLoop(t *testing.T) {
 	t.Run("recovers and restores Redis limiter", func(t *testing.T) {
 		// Start with Redis down.
 		cfg := testConfig("127.0.0.1:1")
@@ -148,7 +143,7 @@ func TestChainRecoveryLoop(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics)
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics, testFastRecovery())
 		require.NoError(t, err)
 		defer chain.Close()
 
@@ -182,7 +177,7 @@ func TestChainRecoveryLoop(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics)
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics, testFastRecovery())
 		require.NoError(t, err)
 
 		// Give recovery loop a moment to start.

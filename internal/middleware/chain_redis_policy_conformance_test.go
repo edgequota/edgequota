@@ -181,19 +181,6 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 // TestRedisRecoveryConformance verifies that each failure policy correctly
 // recovers and resumes Redis-based rate limiting when Redis comes back.
 func TestRedisRecoveryConformance(t *testing.T) {
-	// Speed up recovery for testing.
-	origBase := recoveryBackoffBase
-	origMax := recoveryBackoffMax
-	origJitter := backoffJitter
-	recoveryBackoffBase = 50 * time.Millisecond
-	recoveryBackoffMax = 200 * time.Millisecond
-	backoffJitter = func(d time.Duration) time.Duration { return d }
-	defer func() {
-		recoveryBackoffBase = origBase
-		recoveryBackoffMax = origMax
-		backoffJitter = origJitter
-	}()
-
 	t.Run("passthrough recovers limiter from nil state", func(t *testing.T) {
 		// Start with Redis down.
 		cfg := testConfig("127.0.0.1:1")
@@ -206,7 +193,7 @@ func TestRedisRecoveryConformance(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics)
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics, testFastRecovery())
 		require.NoError(t, err)
 		defer chain.Close()
 
@@ -242,7 +229,7 @@ func TestRedisRecoveryConformance(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		})
 
-		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics)
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics, testFastRecovery())
 		require.NoError(t, err)
 		defer chain.Close()
 

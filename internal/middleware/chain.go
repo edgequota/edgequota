@@ -118,12 +118,12 @@ func cryptoRandFloat64() float64 {
 	return float64(binary.BigEndian.Uint64(buf[:])>>11) / (1 << 53)
 }
 
-// Recovery backoff configuration.
+// Default recovery backoff configuration.
 var (
-	recoveryBackoffBase = time.Second
-	recoveryBackoffMax  = 30 * time.Second
+	defaultRecoveryBackoffBase = time.Second
+	defaultRecoveryBackoffMax  = 30 * time.Second
 
-	backoffJitter = func(d time.Duration) time.Duration {
+	defaultBackoffJitter = func(d time.Duration) time.Duration {
 		factor := 0.8 + cryptoRandFloat64()*0.4
 		return time.Duration(float64(d) * factor)
 	}
@@ -201,6 +201,14 @@ type Chain struct {
 	cancel       context.CancelFunc
 	reconnectMu  sync.Mutex
 	reconnecting bool
+
+	// Per-instance backoff config for the recovery loop. Copied from
+	// package-level defaults at construction; tests override these on
+	// individual Chain instances to avoid data races with goroutines
+	// from other tests reading the same values.
+	recoveryBackoffBase time.Duration
+	recoveryBackoffMax  time.Duration
+	backoffJitter       func(time.Duration) time.Duration
 }
 
 // rateLimitParams holds parsed rate limit configuration.
@@ -264,12 +272,27 @@ func parseRateLimitParams(cfg *config.RateLimitConfig) rateLimitParams {
 }
 
 // NewChain creates the middleware chain with auth, rate limiting, and the given next handler.
+// ChainOption configures optional Chain behavior. Used in tests to override
+// defaults before any background goroutines are started.
+type ChainOption func(*Chain)
+
+// WithRecoveryBackoff overrides the recovery loop backoff parameters.
+// This is intended for testing; production callers should use the defaults.
+func WithRecoveryBackoff(base, maxBackoff time.Duration, jitter func(time.Duration) time.Duration) ChainOption {
+	return func(c *Chain) {
+		c.recoveryBackoffBase = base
+		c.recoveryBackoffMax = maxBackoff
+		c.backoffJitter = jitter
+	}
+}
+
 func NewChain(
 	parentCtx context.Context,
 	next http.Handler,
 	cfg *config.Config,
 	logger *slog.Logger,
 	metrics *observability.Metrics,
+	opts ...ChainOption,
 ) (*Chain, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -288,19 +311,25 @@ func NewChain(
 	reqTimeout, _ := time.ParseDuration(cfg.Server.RequestTimeout)
 
 	chain := &Chain{
-		next:          next,
-		logger:        logger,
-		metrics:       metrics,
-		fallback:      ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
-		ratePerSecond: p.ratePerSecond,
-		burst:         p.burst,
-		ttl:           p.ttl,
-		prefix:        prefix,
-		failurePolicy: p.failurePolicy,
-		failureCode:   p.failureCode,
-		average:       cfg.RateLimit.Average,
-		ctx:           ctx,
-		cancel:        cancel,
+		next:                next,
+		logger:              logger,
+		metrics:             metrics,
+		fallback:            ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
+		ratePerSecond:       p.ratePerSecond,
+		burst:               p.burst,
+		ttl:                 p.ttl,
+		prefix:              prefix,
+		failurePolicy:       p.failurePolicy,
+		failureCode:         p.failureCode,
+		average:             cfg.RateLimit.Average,
+		ctx:                 ctx,
+		cancel:              cancel,
+		recoveryBackoffBase: defaultRecoveryBackoffBase,
+		recoveryBackoffMax:  defaultRecoveryBackoffMax,
+		backoffJitter:       defaultBackoffJitter,
+	}
+	for _, o := range opts {
+		o(chain)
 	}
 	chain.requestTimeout.Store(reqTimeout)
 	chain.urlPolicy.Store(proxy.BackendURLPolicy{
@@ -959,7 +988,7 @@ func (c *Chain) startRecoveryIfNeeded() {
 }
 
 func (c *Chain) recoveryLoop() {
-	backoff := recoveryBackoffBase
+	backoff := c.recoveryBackoffBase
 	attempt := 0
 
 	for {
@@ -970,7 +999,7 @@ func (c *Chain) recoveryLoop() {
 		client, err := redis.NewClient(c.cfg.Load().Redis)
 		if err != nil {
 			attempt++
-			sleep := backoffJitter(backoff)
+			sleep := c.backoffJitter(backoff)
 
 			if attempt <= 5 || attempt%10 == 0 {
 				c.logger.Warn("redis recovery attempt failed",
@@ -990,7 +1019,7 @@ func (c *Chain) recoveryLoop() {
 			case <-timer.C:
 			}
 
-			backoff = min(backoff*2, recoveryBackoffMax)
+			backoff = min(backoff*2, c.recoveryBackoffMax)
 			continue
 		}
 
