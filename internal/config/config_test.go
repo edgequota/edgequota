@@ -1,6 +1,9 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -798,5 +801,179 @@ func TestEnumValid(t *testing.T) {
 		assert.True(t, TLSVersion13.Valid())
 		assert.True(t, TLSVersion("").Valid()) // empty = use default
 		assert.False(t, TLSVersion("1.1").Valid())
+	})
+}
+
+func TestRedactedString(t *testing.T) {
+	secret := RedactedString("super-secret-password")
+
+	t.Run("Value exposes secret", func(t *testing.T) {
+		assert.Equal(t, "super-secret-password", secret.Value())
+	})
+
+	t.Run("String masks non-empty", func(t *testing.T) {
+		assert.Equal(t, "[REDACTED]", secret.String())
+	})
+
+	t.Run("String returns empty for empty", func(t *testing.T) {
+		assert.Equal(t, "", RedactedString("").String())
+	})
+
+	t.Run("GoString masks same as String", func(t *testing.T) {
+		assert.Equal(t, "[REDACTED]", secret.GoString())
+		assert.Equal(t, "", RedactedString("").GoString())
+	})
+
+	t.Run("MarshalJSON masks non-empty", func(t *testing.T) {
+		data, err := json.Marshal(secret)
+		require.NoError(t, err)
+		assert.Equal(t, `"[REDACTED]"`, string(data))
+	})
+
+	t.Run("MarshalJSON preserves empty", func(t *testing.T) {
+		data, err := json.Marshal(RedactedString(""))
+		require.NoError(t, err)
+		assert.Equal(t, `""`, string(data))
+	})
+
+	t.Run("Sprintf uses String", func(t *testing.T) {
+		assert.Equal(t, "[REDACTED]", fmt.Sprintf("%s", secret))
+		assert.Equal(t, "[REDACTED]", fmt.Sprintf("%#v", secret))
+	})
+}
+
+func TestDenyPrivateNetworksEnabled(t *testing.T) {
+	t.Run("defaults to true when nil", func(t *testing.T) {
+		p := BackendURLPolicy{}
+		assert.True(t, p.DenyPrivateNetworksEnabled())
+	})
+
+	t.Run("returns explicit true", func(t *testing.T) {
+		v := true
+		p := BackendURLPolicy{DenyPrivateNetworks: &v}
+		assert.True(t, p.DenyPrivateNetworksEnabled())
+	})
+
+	t.Run("returns explicit false", func(t *testing.T) {
+		v := false
+		p := BackendURLPolicy{DenyPrivateNetworks: &v}
+		assert.False(t, p.DenyPrivateNetworksEnabled())
+	})
+}
+
+func TestResolveServerName(t *testing.T) {
+	t.Run("explicit server name takes precedence", func(t *testing.T) {
+		c := GRPCTLSConfig{ServerName: "override.example.com"}
+		assert.Equal(t, "override.example.com", c.ResolveServerName("host:443"))
+	})
+
+	t.Run("extracts host from host:port", func(t *testing.T) {
+		c := GRPCTLSConfig{}
+		assert.Equal(t, "grpc.example.com", c.ResolveServerName("grpc.example.com:443"))
+	})
+
+	t.Run("returns bare hostname when no port", func(t *testing.T) {
+		c := GRPCTLSConfig{}
+		assert.Equal(t, "bare-host", c.ResolveServerName("bare-host"))
+	})
+}
+
+func TestBuildFilteredHeaderMap(t *testing.T) {
+	hf := NewHeaderFilter(HeaderFilterConfig{
+		DenyList: []string{"Authorization", "Cookie"},
+	})
+
+	h := http.Header{
+		"Authorization": {"Bearer token"},
+		"Content-Type":  {"application/json"},
+		"Cookie":        {"session=abc"},
+		"X-Request-Id":  {"123"},
+	}
+
+	got := hf.BuildFilteredHeaderMap(h)
+	assert.Equal(t, "application/json", got["Content-Type"])
+	assert.Equal(t, "123", got["X-Request-Id"])
+	assert.NotContains(t, got, "Authorization")
+	assert.NotContains(t, got, "Cookie")
+}
+
+func TestMustParseDuration(t *testing.T) {
+	t.Run("parses valid duration", func(t *testing.T) {
+		assert.Equal(t, 5e9, float64(MustParseDuration("5s", 0)))
+	})
+
+	t.Run("returns default on empty", func(t *testing.T) {
+		assert.Equal(t, 10e9, float64(MustParseDuration("", 10e9)))
+	})
+
+	t.Run("returns default on invalid", func(t *testing.T) {
+		assert.Equal(t, 3e9, float64(MustParseDuration("not-a-duration", 3e9)))
+	})
+}
+
+func TestRequiresRestart(t *testing.T) {
+	base := &Config{
+		Server: ServerConfig{Address: ":8080", TLS: ServerTLSConfig{Enabled: false}},
+		Admin:  AdminConfig{Address: ":9090"},
+		Redis:  RedisConfig{Mode: RedisModeSingle},
+	}
+
+	t.Run("nil old returns nil", func(t *testing.T) {
+		cfg := &Config{}
+		assert.Nil(t, cfg.RequiresRestart(nil))
+	})
+
+	t.Run("identical configs require no restart", func(t *testing.T) {
+		same := *base
+		assert.Empty(t, base.RequiresRestart(&same))
+	})
+
+	t.Run("server address change", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Server.Address = ":8081"
+		fields := cfg.RequiresRestart(&old)
+		assert.Contains(t, fields, "server.address")
+	})
+
+	t.Run("admin address change", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Admin.Address = ":9091"
+		fields := cfg.RequiresRestart(&old)
+		assert.Contains(t, fields, "admin.address")
+	})
+
+	t.Run("redis mode change", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Redis.Mode = RedisModeCluster
+		fields := cfg.RequiresRestart(&old)
+		assert.Contains(t, fields, "redis.mode")
+	})
+
+	t.Run("TLS enabled change", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Server.TLS.Enabled = true
+		fields := cfg.RequiresRestart(&old)
+		assert.Contains(t, fields, "server.tls.enabled")
+	})
+
+	t.Run("HTTP3 enabled change", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Server.TLS.HTTP3Enabled = true
+		fields := cfg.RequiresRestart(&old)
+		assert.Contains(t, fields, "server.tls.http3_enabled")
+	})
+
+	t.Run("multiple changes reported", func(t *testing.T) {
+		old := *base
+		cfg := *base
+		cfg.Server.Address = ":9999"
+		cfg.Redis.Mode = RedisModeSentinel
+		fields := cfg.RequiresRestart(&old)
+		assert.Len(t, fields, 2)
 	})
 }

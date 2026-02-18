@@ -41,16 +41,15 @@ const requestIDHeader = "X-Request-Id"
 // maxRequestIDLen is the maximum allowed length for a client-supplied X-Request-Id.
 const maxRequestIDLen = 128
 
-// requestIDRng is a per-goroutine-safe PRNG seeded from crypto/rand.
-// math/rand/v2.ChaCha8 is cryptographically strong and avoids a
-// syscall per ID (unlike crypto/rand.Read), which reduces latency
-// under high concurrency.
-var requestIDRng = func() *rand.Rand {
+// requestIDRng is a per-goroutine-safe CSPRNG seeded from crypto/rand.
+// ChaCha8 is cryptographically strong and avoids a syscall per ID
+// (unlike crypto/rand.Read), which reduces latency under high concurrency.
+var requestIDRng = func() *rand.ChaCha8 {
 	var seed [32]byte
 	if _, err := cryptorand.Read(seed[:]); err != nil {
 		panic("failed to seed ChaCha8: " + err.Error())
 	}
-	return rand.New(rand.NewChaCha8(seed))
+	return rand.NewChaCha8(seed)
 }()
 
 // generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
@@ -193,8 +192,8 @@ type Chain struct {
 	// otherwise it is nil and the main rate-limit Redis client is reused.
 	cacheRedis redis.Client
 
-	fallback        *ratelimit.InMemoryLimiter
-	globalBackstop  *ratelimit.InMemoryLimiter // optional global RPS safety valve for passthrough mode
+	fallback       *ratelimit.InMemoryLimiter
+	globalBackstop *ratelimit.InMemoryLimiter // optional global RPS safety valve for passthrough mode
 
 	ratePerSecond float64
 	burst         int64
@@ -1066,34 +1065,9 @@ func (c *Chain) recoveryLoop() {
 		client, err := redis.NewClient(c.cfg.Load().Redis)
 		if err != nil {
 			attempt++
-
-			if maxAttempts > 0 && attempt >= maxAttempts {
-				c.logger.Error("redis recovery exhausted max attempts, giving up",
-					"attempts", attempt, "max", maxAttempts, "last_error", err)
+			if done := c.recoveryRetry(&backoff, attempt, maxAttempts, err); done {
 				return
 			}
-
-			sleep := c.backoffJitter(backoff)
-
-			if attempt <= 5 || attempt%10 == 0 {
-				c.logger.Warn("redis recovery attempt failed",
-					"attempt", attempt, "error", err, "next_in", sleep)
-			}
-
-			timer := time.NewTimer(sleep)
-			select {
-			case <-c.ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return
-			case <-timer.C:
-			}
-
-			backoff = min(backoff*2, c.recoveryBackoffMax)
 			continue
 		}
 
@@ -1102,34 +1076,69 @@ func (c *Chain) recoveryLoop() {
 			return
 		}
 
-		if c.ratePerSecond <= 0 {
-			c.mu.Lock()
-			old := c.swapLimiterLocked(nil)
-			c.redisUnhealthy = false
-			c.mu.Unlock()
-			if old != nil {
-				_ = old.Close()
+		c.recoveryInstall(client)
+		return
+	}
+}
+
+func (c *Chain) recoveryRetry(backoff *time.Duration, attempt, maxAttempts int, err error) (done bool) {
+	if maxAttempts > 0 && attempt >= maxAttempts {
+		c.logger.Error("redis recovery exhausted max attempts, giving up",
+			"attempts", attempt, "max", maxAttempts, "last_error", err)
+		return true
+	}
+
+	sleep := c.backoffJitter(*backoff)
+
+	if attempt <= 5 || attempt%10 == 0 {
+		c.logger.Warn("redis recovery attempt failed",
+			"attempt", attempt, "error", err, "next_in", sleep)
+	}
+
+	timer := time.NewTimer(sleep)
+	select {
+	case <-c.ctx.Done():
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
-			_ = client.Close()
-			c.logger.Info("redis reachable (no limit configured)")
-			return
 		}
+		return true
+	case <-timer.C:
+	}
 
-		limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger)
+	*backoff = min(*backoff*2, c.recoveryBackoffMax)
+	return false
+}
 
+func (c *Chain) recoveryInstall(client redis.Client) {
+	if c.ratePerSecond <= 0 {
 		c.mu.Lock()
-		old := c.swapLimiterLocked(limiter)
+		old := c.swapLimiterLocked(nil)
 		c.redisUnhealthy = false
 		c.mu.Unlock()
-
 		if old != nil {
 			_ = old.Close()
 		}
-
-		c.metrics.PromRedisHealthy.Set(1)
-		c.logger.Info("redis connection recovered")
+		_ = client.Close()
+		c.logger.Info("redis reachable (no limit configured)")
 		return
 	}
+
+	limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger)
+
+	c.mu.Lock()
+	old := c.swapLimiterLocked(limiter)
+	c.redisUnhealthy = false
+	c.mu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
+
+	c.metrics.PromRedisHealthy.Set(1)
+	c.logger.Info("redis connection recovered")
 }
 
 func (c *Chain) swapLimiterLocked(newLim *ratelimit.Limiter) redis.Client {
@@ -1319,24 +1328,28 @@ func (c *Chain) Close() error {
 	c.redisUnhealthy = true
 	c.mu.Unlock()
 
+	return c.closeResources(old)
+}
+
+func (c *Chain) closeResources(redisClient redis.Client) error {
 	var firstErr error
-	if old != nil {
-		firstErr = old.Close()
+	collect := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if redisClient != nil {
+		collect(redisClient.Close())
 	}
 	if c.cacheRedis != nil {
-		if err := c.cacheRedis.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		collect(c.cacheRedis.Close())
 	}
 	if ac := c.authClient.Load(); ac != nil {
-		if err := ac.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		collect(ac.Close())
 	}
 	if ext := c.externalRL.Load(); ext != nil {
-		if err := ext.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		collect(ext.Close())
 	}
 	if c.fallback != nil {
 		c.fallback.Close()
@@ -1345,9 +1358,7 @@ func (c *Chain) Close() error {
 		c.globalBackstop.Close()
 	}
 	if c.emitter != nil {
-		if err := c.emitter.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		collect(c.emitter.Close())
 	}
 
 	return firstErr

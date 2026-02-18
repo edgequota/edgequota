@@ -202,13 +202,13 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Backend", "testbackend")
 	w.WriteHeader(http.StatusOK)
 	resp := map[string]string{
-		"protocol":         r.Proto,
-		"method":           r.Method,
-		"path":             r.URL.Path,
-		"host":             r.Host,
-		"remote":           r.RemoteAddr,
-		"x-forwarded-host": r.Header.Get("X-Forwarded-Host"),
-		"x-forwarded-for":  r.Header.Get("X-Forwarded-For"),
+		"protocol":          r.Proto,
+		"method":            r.Method,
+		"path":              r.URL.Path,
+		"host":              r.Host,
+		"remote":            r.RemoteAddr,
+		"x-forwarded-host":  r.Header.Get("X-Forwarded-Host"),
+		"x-forwarded-for":   r.Header.Get("X-Forwarded-For"),
 		"x-forwarded-proto": r.Header.Get("X-Forwarded-Proto"),
 	}
 	json.NewEncoder(w).Encode(resp)

@@ -394,3 +394,11 @@ func TestReadlink(t *testing.T) {
 		assert.Empty(t, readlink("/tmp/does-not-exist-xyz"))
 	})
 }
+
+func TestSetLastConfig(t *testing.T) {
+	w := NewWatcher("/tmp/nonexistent.yaml", func(_ *Config) {}, slog.Default())
+
+	last := Defaults()
+	w.SetLastConfig(last)
+	assert.Equal(t, last, w.lastConfig)
+}

@@ -200,3 +200,29 @@ func TestMakeTLSConfig(t *testing.T) {
 		assert.True(t, cfg.InsecureSkipVerify)
 	})
 }
+
+func TestWarnInsecureRedis(t *testing.T) {
+	t.Run("logs warning when skip verify enabled", func(t *testing.T) {
+		var logged bool
+		logger := &testLogger{onWarn: func(msg string, args ...any) { logged = true }}
+		WarnInsecureRedis(config.RedisTLSConfig{InsecureSkipVerify: true}, logger)
+		assert.True(t, logged)
+	})
+
+	t.Run("no warning when skip verify disabled", func(t *testing.T) {
+		var logged bool
+		logger := &testLogger{onWarn: func(msg string, args ...any) { logged = true }}
+		WarnInsecureRedis(config.RedisTLSConfig{InsecureSkipVerify: false}, logger)
+		assert.False(t, logged)
+	})
+}
+
+type testLogger struct {
+	onWarn func(string, ...any)
+}
+
+func (l *testLogger) Warn(msg string, args ...any) {
+	if l.onWarn != nil {
+		l.onWarn(msg, args...)
+	}
+}

@@ -221,9 +221,9 @@ type Proxy struct {
 	backendTLSInsecure  bool
 	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
 	wsDialTimeout       time.Duration
-	wsLimiter           *WSLimiter // nil when no per-key WS limit is configured.
-	maxRequestBodySize  int64      // 0 = unlimited
-	maxWSTransferBytes  int64      // 0 = unlimited per-direction
+	wsLimiter           *WSLimiter    // nil when no per-key WS limit is configured.
+	maxRequestBodySize  int64         // 0 = unlimited
+	maxWSTransferBytes  int64         // 0 = unlimited per-direction
 	wsIdleTimeout       time.Duration // 0 = no idle timeout
 }
 
@@ -609,14 +609,13 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	wg.Add(2)
 
 	wsWrap := func(r io.Reader, conn net.Conn) io.Reader {
-		var wrapped io.Reader = r
 		if p.maxWSTransferBytes > 0 {
-			wrapped = io.LimitReader(wrapped, p.maxWSTransferBytes)
+			r = io.LimitReader(r, p.maxWSTransferBytes)
 		}
 		if p.wsIdleTimeout > 0 {
-			wrapped = &idleTimeoutReader{inner: wrapped, conn: conn, peerConn: nil, timeout: p.wsIdleTimeout}
+			r = &idleTimeoutReader{inner: r, conn: conn, peerConn: nil, timeout: p.wsIdleTimeout}
 		}
-		return wrapped
+		return r
 	}
 
 	// Set initial deadlines if idle timeout is configured.

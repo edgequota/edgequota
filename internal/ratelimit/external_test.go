@@ -535,3 +535,107 @@ func TestExternalClientGoroutineLeak(t *testing.T) {
 	assert.LessOrEqual(t, after, before+2,
 		"goroutine count should not grow after closing clients (before=%d, after=%d)", before, after)
 }
+
+func TestSetMetricHooks(t *testing.T) {
+	c := &ExternalClient{done: make(chan struct{})}
+
+	var semCalled, sfCalled bool
+	c.SetMetricHooks(func() { semCalled = true }, func() { sfCalled = true })
+
+	c.onSemaphoreReject()
+	c.onSingleflightShare()
+	assert.True(t, semCalled)
+	assert.True(t, sfCalled)
+}
+
+func TestTenantCBIsStale(t *testing.T) {
+	cb := newTenantCB(5, 30*time.Second)
+	now := time.Now()
+
+	t.Run("not stale when recently accessed", func(t *testing.T) {
+		assert.False(t, cb.isStale(now, time.Minute))
+	})
+
+	t.Run("stale when idle exceeds threshold", func(t *testing.T) {
+		future := now.Add(2 * time.Minute)
+		assert.True(t, cb.isStale(future, time.Minute))
+	})
+}
+
+func TestEvictStaleBreakers(t *testing.T) {
+	c := &ExternalClient{
+		cbThreshold:    5,
+		cbResetTimeout: 50 * time.Millisecond,
+		maxBreakers:    100,
+		done:           make(chan struct{}),
+	}
+
+	cb := newTenantCB(5, 50*time.Millisecond)
+	cb.mu.Lock()
+	cb.lastAccess = time.Now().Add(-10 * time.Minute)
+	cb.mu.Unlock()
+	c.breakers.Store("stale-tenant", cb)
+	c.breakerCount.Store(1)
+
+	fresh := newTenantCB(5, 50*time.Millisecond)
+	c.breakers.Store("fresh-tenant", fresh)
+	c.breakerCount.Add(1)
+
+	c.evictStaleBreakers()
+
+	_, staleFound := c.breakers.Load("stale-tenant")
+	_, freshFound := c.breakers.Load("fresh-tenant")
+	assert.False(t, staleFound, "stale breaker should be evicted")
+	assert.True(t, freshFound, "fresh breaker should remain")
+	assert.Equal(t, int64(1), c.breakerCount.Load())
+}
+
+func TestFailurePolicyFromProto(t *testing.T) {
+	assert.Equal(t, config.FailurePolicyPassThrough, failurePolicyFromProto(1))
+	assert.Equal(t, config.FailurePolicyFailClosed, failurePolicyFromProto(2))
+	assert.Equal(t, config.FailurePolicyInMemoryFallback, failurePolicyFromProto(3))
+	assert.Equal(t, config.FailurePolicy(""), failurePolicyFromProto(0))
+	assert.Equal(t, config.FailurePolicy(""), failurePolicyFromProto(99))
+}
+
+func TestExternalClientFilterHeaders(t *testing.T) {
+	c := &ExternalClient{
+		headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{
+			DenyList: []string{"Authorization", "Cookie"},
+		}),
+		done: make(chan struct{}),
+	}
+
+	headers := map[string]string{
+		"Authorization": "Bearer tok",
+		"Content-Type":  "application/json",
+		"Cookie":        "session=abc",
+		"X-Request-Id":  "123",
+	}
+	c.FilterHeaders(headers)
+
+	assert.NotContains(t, headers, "Authorization")
+	assert.NotContains(t, headers, "Cookie")
+	assert.Equal(t, "application/json", headers["Content-Type"])
+	assert.Equal(t, "123", headers["X-Request-Id"])
+}
+
+func TestExternalClientBuildFilteredHeaders(t *testing.T) {
+	c := &ExternalClient{
+		headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{
+			AllowList: []string{"X-Request-Id", "Content-Type"},
+		}),
+		done: make(chan struct{}),
+	}
+
+	h := http.Header{
+		"Authorization": {"Bearer tok"},
+		"Content-Type":  {"application/json"},
+		"X-Request-Id":  {"456"},
+	}
+	got := c.BuildFilteredHeaders(h)
+
+	assert.Equal(t, "application/json", got["Content-Type"])
+	assert.Equal(t, "456", got["X-Request-Id"])
+	assert.NotContains(t, got, "Authorization")
+}

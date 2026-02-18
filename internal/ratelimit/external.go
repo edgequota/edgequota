@@ -121,7 +121,7 @@ type ExternalClient struct {
 	done chan struct{}
 
 	// Optional metric hooks — set via WithExternalMetrics.
-	onSemaphoreReject  func()
+	onSemaphoreReject   func()
 	onSingleflightShare func()
 }
 

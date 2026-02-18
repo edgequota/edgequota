@@ -64,8 +64,8 @@ type Metrics struct {
 	promTenantKeyRejects prometheus.Counter
 
 	// External RL concurrency metrics.
-	PromExtRLSemaphoreRejected   prometheus.Counter
-	PromExtRLSingleflightShared  prometheus.Counter
+	PromExtRLSemaphoreRejected  prometheus.Counter
+	PromExtRLSingleflightShared prometheus.Counter
 }
 
 // NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps

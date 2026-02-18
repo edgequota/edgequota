@@ -170,7 +170,7 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
 		propagateBody:          cfg.PropagateRequestBody,
-		maxBodySize: maxBodySize,
+		maxBodySize:            maxBodySize,
 		cb: newCircuitBreaker(
 			cfg.CircuitBreaker.Threshold,
 			config.MustParseDuration(cfg.CircuitBreaker.ResetTimeout, 0),
