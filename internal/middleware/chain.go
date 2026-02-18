@@ -6,7 +6,7 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,7 +29,11 @@ import (
 	"github.com/edgequota/edgequota/internal/proxy"
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/edgequota/edgequota/internal/redis"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+var tracer = otel.Tracer("edgequota.middleware")
 
 // requestIDHeader is the canonical HTTP header for request correlation.
 const requestIDHeader = "X-Request-Id"
@@ -36,13 +41,24 @@ const requestIDHeader = "X-Request-Id"
 // maxRequestIDLen is the maximum allowed length for a client-supplied X-Request-Id.
 const maxRequestIDLen = 128
 
+// requestIDRng is a per-goroutine-safe PRNG seeded from crypto/rand.
+// math/rand/v2.ChaCha8 is cryptographically strong and avoids a
+// syscall per ID (unlike crypto/rand.Read), which reduces latency
+// under high concurrency.
+var requestIDRng = func() *rand.Rand {
+	var seed [32]byte
+	if _, err := cryptorand.Read(seed[:]); err != nil {
+		panic("failed to seed ChaCha8: " + err.Error())
+	}
+	return rand.New(rand.NewChaCha8(seed))
+}()
+
 // generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
-// Uses crypto/rand for uniqueness. This is simpler and faster than UUID v7
-// while still being globally unique for practical purposes.
 func generateRequestID() string {
 	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "unknown"
+	for i := 0; i < len(buf); i += 8 {
+		v := requestIDRng.Uint64()
+		binary.LittleEndian.PutUint64(buf[i:], v)
 	}
 	return hex.EncodeToString(buf[:])
 }
@@ -110,11 +126,9 @@ func writeJSONError(w http.ResponseWriter, code int, errType, message string, re
 // cryptoRandFloat64 returns a cryptographically random float64 in [0, 1).
 func cryptoRandFloat64() float64 {
 	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		// Fallback: zero jitter is safe — it just removes randomness.
+	if _, err := cryptorand.Read(buf[:]); err != nil {
 		return 0.5
 	}
-	// Use top 53 bits for a uniform float64 in [0, 1).
 	return float64(binary.BigEndian.Uint64(buf[:])>>11) / (1 << 53)
 }
 
@@ -156,7 +170,7 @@ const (
 // Chain is the main request processing middleware. It chains authentication,
 // rate limiting, and proxying into a single http.Handler.
 type Chain struct {
-	next    http.Handler
+	next    atomic.Pointer[http.Handler]  // swappable proxy for backend hot-reload
 	cfg     atomic.Pointer[config.Config] // atomic: read by recoveryLoop without lock, written by Reload under mu
 	logger  *slog.Logger
 	metrics *observability.Metrics
@@ -179,7 +193,8 @@ type Chain struct {
 	// otherwise it is nil and the main rate-limit Redis client is reused.
 	cacheRedis redis.Client
 
-	fallback *ratelimit.InMemoryLimiter
+	fallback        *ratelimit.InMemoryLimiter
+	globalBackstop  *ratelimit.InMemoryLimiter // optional global RPS safety valve for passthrough mode
 
 	ratePerSecond float64
 	burst         int64
@@ -311,7 +326,6 @@ func NewChain(
 	reqTimeout, _ := time.ParseDuration(cfg.Server.RequestTimeout)
 
 	chain := &Chain{
-		next:                next,
 		logger:              logger,
 		metrics:             metrics,
 		fallback:            ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
@@ -331,6 +345,7 @@ func NewChain(
 	for _, o := range opts {
 		o(chain)
 	}
+	chain.next.Store(&next)
 	chain.requestTimeout.Store(reqTimeout)
 	chain.urlPolicy.Store(proxy.BackendURLPolicy{
 		AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
@@ -339,6 +354,13 @@ func NewChain(
 	})
 	chain.keyStrategy.Store(&ks)
 	chain.cfg.Store(cfg)
+	if cfg.RateLimit.GlobalPassthroughRPS > 0 {
+		chain.globalBackstop = ratelimit.NewInMemoryLimiter(
+			cfg.RateLimit.GlobalPassthroughRPS,
+			max(int64(cfg.RateLimit.GlobalPassthroughRPS), 1),
+			time.Minute,
+		)
+	}
 	chain.emitter = events.NewEmitter(cfg.Events, logger, metrics)
 
 	if err := chain.initRedis(cfg, logger, p); err != nil {
@@ -379,6 +401,10 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			}
 			return fmt.Errorf("external ratelimit client: %w", extErr)
 		}
+		extClient.SetMetricHooks(
+			c.metrics.PromExtRLSemaphoreRejected.Inc,
+			c.metrics.PromExtRLSingleflightShared.Inc,
+		)
 		c.externalRL.Store(extClient)
 		logger.Info("external rate limit service enabled",
 			"cache_backend", cacheBackendName(cacheClient),
@@ -529,13 +555,22 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		statusWriterPool.Put(sw)
 	}()
 
-	if ac := c.authClient.Load(); ac != nil && !c.checkAuth(sw, r, ac) {
-		return
+	if ac := c.authClient.Load(); ac != nil {
+		_, authSpan := tracer.Start(r.Context(), "edgequota.auth")
+		authStart := time.Now()
+		allowed := c.checkAuth(sw, r, ac)
+		c.metrics.PromAuthDuration.Observe(time.Since(authStart).Seconds())
+		authSpan.End()
+		if !allowed {
+			return
+		}
 	}
 
 	if c.average == 0 && c.externalRL.Load() == nil {
 		c.metrics.IncAllowed()
-		c.next.ServeHTTP(sw, r)
+		backendStart := time.Now()
+		(*c.next.Load()).ServeHTTP(sw, r)
+		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 		return
 	}
 
@@ -552,7 +587,17 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), ratelimit.KeyContextKey, key)
 	r = r.WithContext(ctx)
 
-	extLimits, resolvedKey := c.fetchExternalLimits(r, key)
+	var extLimits *ratelimit.ExternalLimits
+	var resolvedKey string
+	if c.externalRL.Load() != nil {
+		_, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
+		extStart := time.Now()
+		extLimits, resolvedKey = c.fetchExternalLimits(r, key)
+		c.metrics.PromExternalRLDuration.Observe(time.Since(extStart).Seconds())
+		extSpan.End()
+	} else {
+		extLimits, resolvedKey = c.fetchExternalLimits(r, key)
+	}
 
 	ctx, cancel := c.applyRequestTimeout(ctx, extLimits)
 	if cancel != nil {
@@ -624,8 +669,10 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 		if err != nil {
 			c.logger.Warn("failed to read request body for auth propagation", "error", err)
 		}
-		// Replace the body so downstream handlers (proxy) can still read it.
-		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
+		// Replace the body with ONLY the bytes that were buffered. The
+		// remainder of the original body (beyond MaxBodySize) is discarded
+		// to prevent forwarding an unbounded tail to the backend.
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	authReq := ac.BuildCheckRequest(r, bodyBytes)
@@ -718,10 +765,7 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 		return nil, resolvedKey
 	}
 
-	headers := getHeaderMap(r)
-
-	// Strip sensitive headers before sending to external rate-limit service.
-	ext.FilterHeaders(headers)
+	headers := ext.BuildFilteredHeaders(r.Header)
 
 	extReq := &ratelimit.ExternalRequest{
 		Key:     key,
@@ -861,7 +905,16 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 		c.metrics.IncTenantAllowed(tenantID)
 	}
 	c.emitUsageEvent(r, resolvedKey, tenantID, result, http.StatusOK)
-	c.next.ServeHTTP(w, r)
+	ctx, proxySpan := tracer.Start(r.Context(), "edgequota.proxy")
+	proxySpan.SetAttributes(
+		attribute.String("tenant_key", tenantID),
+		attribute.Bool("rate_limit.allowed", result.Allowed),
+		attribute.Int64("rate_limit.remaining", result.Remaining),
+	)
+	backendStart := time.Now()
+	(*c.next.Load()).ServeHTTP(w, r.WithContext(ctx))
+	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+	proxySpan.End()
 }
 
 // emitUsageEvent enqueues a usage event to the events emitter (if configured).
@@ -895,12 +948,16 @@ func setRateLimitHeaders(w http.ResponseWriter, result *ratelimit.Result) {
 }
 
 func (c *Chain) serveRateLimited(w http.ResponseWriter, result *ratelimit.Result) {
-	retrySeconds := math.Ceil(result.RetryAfter.Seconds())
+	// Apply +/-10% jitter to retry timing to prevent thundering herd and
+	// avoid leaking precise token-bucket refill timing.
+	jitterFactor := 0.9 + cryptoRandFloat64()*0.2 // [0.9, 1.1)
+	retryDuration := time.Duration(float64(result.RetryAfter) * jitterFactor)
+	retrySeconds := math.Ceil(retryDuration.Seconds())
 	if retrySeconds < 1 {
 		retrySeconds = 1
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retrySeconds))
-	w.Header().Set("X-Retry-In", result.RetryAfter.String())
+	w.Header().Set("X-Retry-In", retryDuration.String())
 	writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "Too Many Requests", retrySeconds)
 }
 
@@ -940,8 +997,15 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 
 	switch fp {
 	case policyPassthrough:
+		if c.globalBackstop != nil && !c.globalBackstop.Allow("__global__") {
+			c.metrics.IncLimited()
+			c.serveRateLimited(w, &ratelimit.Result{RetryAfter: time.Second, Limit: c.burst})
+			return
+		}
 		c.metrics.IncAllowed()
-		c.next.ServeHTTP(w, r)
+		backendStart := time.Now()
+		(*c.next.Load()).ServeHTTP(w, r)
+		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 
 	case policyFailClosed:
 		c.metrics.IncLimited()
@@ -951,7 +1015,9 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		c.metrics.IncFallbackUsed()
 		if c.fallback.Allow(key) {
 			c.metrics.IncAllowed()
-			c.next.ServeHTTP(w, r)
+			backendStart := time.Now()
+			(*c.next.Load()).ServeHTTP(w, r)
+			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 		} else {
 			c.metrics.IncLimited()
 			c.serveRateLimited(w, &ratelimit.Result{
@@ -990,6 +1056,7 @@ func (c *Chain) startRecoveryIfNeeded() {
 func (c *Chain) recoveryLoop() {
 	backoff := c.recoveryBackoffBase
 	attempt := 0
+	maxAttempts := c.cfg.Load().RateLimit.MaxRecoveryAttempts
 
 	for {
 		if c.ctx.Err() != nil {
@@ -999,6 +1066,13 @@ func (c *Chain) recoveryLoop() {
 		client, err := redis.NewClient(c.cfg.Load().Redis)
 		if err != nil {
 			attempt++
+
+			if maxAttempts > 0 && attempt >= maxAttempts {
+				c.logger.Error("redis recovery exhausted max attempts, giving up",
+					"attempts", attempt, "max", maxAttempts, "last_error", err)
+				return
+			}
+
 			sleep := c.backoffJitter(backoff)
 
 			if attempt <= 5 || attempt%10 == 0 {
@@ -1216,6 +1290,10 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 		c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
 		return
 	}
+	newExt.SetMetricHooks(
+		c.metrics.PromExtRLSemaphoreRejected.Inc,
+		c.metrics.PromExtRLSingleflightShared.Inc,
+	)
 	oldExt := c.externalRL.Swap(newExt)
 	if oldExt != nil {
 		_ = oldExt.Close()
@@ -1225,6 +1303,12 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 // validateBackendURL checks a dynamic backend URL against the configured policy.
 func (c *Chain) validateBackendURL(u *url.URL) error {
 	return proxy.ValidateBackendURL(u, c.urlPolicy.Load().(proxy.BackendURLPolicy))
+}
+
+// SwapProxy atomically replaces the downstream proxy handler.
+// Used for hot-reloading backend configuration changes.
+func (c *Chain) SwapProxy(next http.Handler) {
+	c.next.Store(&next)
 }
 
 func (c *Chain) Close() error {
@@ -1256,6 +1340,9 @@ func (c *Chain) Close() error {
 	}
 	if c.fallback != nil {
 		c.fallback.Close()
+	}
+	if c.globalBackstop != nil {
+		c.globalBackstop.Close()
 	}
 	if c.emitter != nil {
 		if err := c.emitter.Close(); err != nil && firstErr == nil {

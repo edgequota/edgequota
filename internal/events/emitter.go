@@ -53,6 +53,8 @@ type Emitter struct {
 	ringTail int
 	ringLen  int
 
+	lastDropWarn time.Time // rate-limits overflow warnings to once per flush interval
+
 	flushCh chan struct{}
 	done    chan struct{}
 	wg      sync.WaitGroup
@@ -111,6 +113,12 @@ func (e *Emitter) Emit(ev UsageEvent) {
 		// Buffer full — drop oldest by advancing head.
 		e.ringHead = (e.ringHead + 1) % e.bufferSize
 		e.metrics.IncEventsDropped()
+		now := time.Now()
+		if now.Sub(e.lastDropWarn) >= e.flushInterval {
+			e.lastDropWarn = now
+			e.logger.Warn("event buffer overflow, dropping oldest events",
+				"buffer_size", e.bufferSize)
+		}
 	} else {
 		e.ringLen++
 	}

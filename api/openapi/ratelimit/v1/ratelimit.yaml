@@ -1,0 +1,121 @@
+openapi: "3.0.3"
+info:
+  title: EdgeQuota Rate Limit Service API
+  description: |
+    External rate limit services must implement this HTTP API.
+    EdgeQuota calls POST /limits to fetch dynamic per-key rate limits
+    when the external rate limit feature is enabled.
+
+    This spec mirrors edgequota.ratelimit.v1 (proto) for the JSON/HTTP wire format.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+
+paths:
+  /limits:
+    post:
+      operationId: getLimits
+      summary: Look up rate limit parameters for a given key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GetLimitsRequest"
+      responses:
+        "200":
+          description: Rate limit parameters for the key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetLimitsResponse"
+
+components:
+  schemas:
+    GetLimitsRequest:
+      type: object
+      description: Identifies the client and context for limit lookup.
+      required:
+        - key
+        - headers
+        - method
+        - path
+      properties:
+        key:
+          type: string
+          description: Rate limit bucket key (e.g. tenant ID, client IP).
+        headers:
+          type: object
+          description: Flattened request headers for context.
+          additionalProperties:
+            type: string
+        method:
+          type: string
+          description: HTTP method.
+        path:
+          type: string
+          description: Request path.
+
+    FailurePolicy:
+      type: string
+      description: |
+        Controls EdgeQuota's behaviour when Redis is unavailable.
+        The external rate-limit service can override the static config on a
+        per-request basis by returning one of these values.
+      enum:
+        - ""
+        - passthrough
+        - failclosed
+        - inmemory_fallback
+
+    GetLimitsResponse:
+      type: object
+      description: Rate limit parameters and optional cache/override directives.
+      required:
+        - average
+        - burst
+        - period
+      properties:
+        average:
+          type: integer
+          format: int64
+          description: Maximum number of requests per period (0 = unlimited).
+        burst:
+          type: integer
+          format: int64
+          description: Maximum burst size.
+        period:
+          type: string
+          description: Duration string (e.g. "1s", "1m").
+        tenant_key:
+          type: string
+          description: |
+            Tenant key for Redis bucket isolation (optional). When non-empty,
+            EdgeQuota uses this as the rate-limit key instead of the extracted key.
+        failure_policy:
+          $ref: "#/components/schemas/FailurePolicy"
+        failure_code:
+          type: integer
+          format: int32
+          description: |
+            Override HTTP status code for failclosed policy (e.g. 503).
+            0 = use static config.
+        backend_url:
+          type: string
+          description: |
+            Backend URL override (optional). When non-empty, EdgeQuota proxies
+            this request to the given URL instead of the static backend.url.
+        request_timeout:
+          type: string
+          description: |
+            Per-request timeout override (optional). Duration string (e.g. "10s").
+            When non-empty, overrides the global server.request_timeout.
+        cache_max_age_seconds:
+          type: integer
+          format: int64
+          description: |
+            Cache duration in seconds. When present and > 0, overrides the
+            default cache TTL.
+        cache_no_store:
+          type: boolean
+          description: If true, the response must not be cached.

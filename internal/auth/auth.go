@@ -54,10 +54,16 @@ type circuitBreaker struct {
 	resetTimeout time.Duration
 }
 
-func newCircuitBreaker() *circuitBreaker {
+func newCircuitBreaker(threshold int, resetTimeout time.Duration) *circuitBreaker {
+	if threshold <= 0 {
+		threshold = defaultAuthCBThreshold
+	}
+	if resetTimeout <= 0 {
+		resetTimeout = defaultAuthCBResetTimeout
+	}
 	return &circuitBreaker{
-		threshold:    defaultAuthCBThreshold,
-		resetTimeout: defaultAuthCBResetTimeout,
+		threshold:    threshold,
+		resetTimeout: resetTimeout,
 	}
 }
 
@@ -164,8 +170,11 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
 		propagateBody:          cfg.PropagateRequestBody,
-		maxBodySize:            maxBodySize,
-		cb:                     newCircuitBreaker(),
+		maxBodySize: maxBodySize,
+		cb: newCircuitBreaker(
+			cfg.CircuitBreaker.Threshold,
+			config.MustParseDuration(cfg.CircuitBreaker.ResetTimeout, 0),
+		),
 	}
 
 	if cfg.GRPC.Address != "" {

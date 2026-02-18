@@ -18,12 +18,11 @@
 package authv1
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -45,6 +44,7 @@ type CheckRequest struct {
 	// Client remote address (ip:port).
 	RemoteAddr string `protobuf:"bytes,4,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
 	// Optional request body, included when propagate_request_body is enabled.
+	// Capped to max_auth_body_size (default 64 KiB).
 	Body          []byte `protobuf:"bytes,5,opt,name=body,proto3" json:"body,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -204,13 +204,14 @@ var File_edgequota_auth_v1_auth_proto protoreflect.FileDescriptor
 
 const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\n" +
-	"\x1cedgequota/auth/v1/auth.proto\x12\x11edgequota.auth.v1\"\xdf\x01\n" +
+	"\x1cedgequota/auth/v1/auth.proto\x12\x11edgequota.auth.v1\"\xf3\x01\n" +
 	"\fCheckRequest\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12F\n" +
 	"\aheaders\x18\x03 \x03(\v2,.edgequota.auth.v1.CheckRequest.HeadersEntryR\aheaders\x12\x1f\n" +
 	"\vremote_addr\x18\x04 \x01(\tR\n" +
-	"remoteAddr\x1a:\n" +
+	"remoteAddr\x12\x12\n" +
+	"\x04body\x18\x05 \x01(\fR\x04body\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaf\x03\n" +
@@ -228,7 +229,7 @@ const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012Y\n" +
 	"\vAuthService\x12J\n" +
-	"\x05Check\x12\x1f.edgequota.auth.v1.CheckRequest\x1a .edgequota.auth.v1.CheckResponseB7Z5github.com/edgequota/edgequota/api/gen/auth/v1;authv1b\x06proto3"
+	"\x05Check\x12\x1f.edgequota.auth.v1.CheckRequest\x1a .edgequota.auth.v1.CheckResponseBAZ?github.com/edgequota/edgequota/api/gen/edgequota/auth/v1;authv1b\x06proto3"
 
 var (
 	file_edgequota_auth_v1_auth_proto_rawDescOnce sync.Once

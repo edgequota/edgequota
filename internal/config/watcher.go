@@ -31,6 +31,8 @@ type Watcher struct {
 	debounce     time.Duration
 	pollInterval time.Duration // how often to check content hash.
 
+	lastConfig *Config // last successfully loaded config, for restart detection.
+
 	mu      sync.Mutex
 	stopped bool
 	cancel  context.CancelFunc
@@ -194,6 +196,12 @@ func hashFile(path string) string {
 
 // reload loads, validates, and publishes the new config. On failure the
 // old config is preserved and an error is logged.
+// SetLastConfig records the current running config for restart detection.
+// Called at startup before the watcher is started.
+func (w *Watcher) SetLastConfig(cfg *Config) {
+	w.lastConfig = cfg
+}
+
 func (w *Watcher) reload() {
 	newCfg, err := LoadFromPath(w.path)
 	if err != nil {
@@ -201,6 +209,15 @@ func (w *Watcher) reload() {
 		return
 	}
 
+	if w.lastConfig != nil {
+		if restartFields := newCfg.RequiresRestart(w.lastConfig); len(restartFields) > 0 {
+			w.logger.Warn("config change requires restart, skipping hot-reload",
+				"fields", restartFields)
+			return
+		}
+	}
+
+	w.lastConfig = newCfg
 	w.logger.Info("config reloaded successfully", "path", w.path)
 	w.callback(newCfg)
 }

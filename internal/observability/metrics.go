@@ -35,6 +35,11 @@ type Metrics struct {
 	// Prometheus histograms.
 	PromRequestDuration *prometheus.HistogramVec
 
+	// Per-stage latency histograms for identifying bottlenecks.
+	PromAuthDuration       prometheus.Histogram
+	PromExternalRLDuration prometheus.Histogram
+	PromBackendDuration    prometheus.Histogram
+
 	// Rate limit remaining tokens distribution (histogram, not per-key gauge
 	// — avoids unbounded cardinality from high-cardinality keys like IPs).
 	PromRLRemaining prometheus.Histogram
@@ -57,6 +62,10 @@ type Metrics struct {
 	// External service response validation.
 	tenantKeyRejected    int64
 	promTenantKeyRejects prometheus.Counter
+
+	// External RL concurrency metrics.
+	PromExtRLSemaphoreRejected   prometheus.Counter
+	PromExtRLSingleflightShared  prometheus.Counter
 }
 
 // NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
@@ -116,6 +125,24 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			// Edge-proxy-tuned buckets with sub-millisecond granularity.
 			Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10},
 		}, []string{"method", "status_code"}),
+		PromAuthDuration: factory.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "edgequota",
+			Name:      "auth_duration_seconds",
+			Help:      "Latency of external auth checks.",
+			Buckets:   []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5},
+		}),
+		PromExternalRLDuration: factory.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_duration_seconds",
+			Help:      "Latency of external rate limit service calls.",
+			Buckets:   []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5},
+		}),
+		PromBackendDuration: factory.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "edgequota",
+			Name:      "backend_duration_seconds",
+			Help:      "Latency of backend proxy calls.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10, 30},
+		}),
 		PromRLRemaining: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",
 			Name:      "ratelimit_remaining_tokens",
@@ -151,6 +178,16 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Namespace: "edgequota",
 			Name:      "tenant_key_rejected_total",
 			Help:      "Number of tenant keys rejected due to validation failure (length or charset).",
+		}),
+		PromExtRLSemaphoreRejected: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_semaphore_rejected_total",
+			Help:      "Number of external RL requests rejected due to concurrency semaphore.",
+		}),
+		PromExtRLSingleflightShared: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_singleflight_shared_total",
+			Help:      "Number of external RL requests that shared a singleflight result.",
 		}),
 	}
 

@@ -1,0 +1,108 @@
+openapi: "3.0.3"
+info:
+  title: EdgeQuota Events Service API
+  description: |
+    External event receivers must implement this HTTP API.
+    EdgeQuota calls POST /events to emit usage events (rate-limit decisions)
+    when the events feature is enabled.
+
+    This spec mirrors edgequota.events.v1 (proto) for the JSON/HTTP wire format.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+
+paths:
+  /events:
+    post:
+      operationId: publishEvents
+      summary: Receive a batch of usage events from EdgeQuota.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishEventsRequest"
+      responses:
+        "200":
+          description: Number of accepted events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishEventsResponse"
+
+components:
+  schemas:
+    UsageEvent:
+      type: object
+      description: A single rate-limit decision.
+      required:
+        - key
+        - method
+        - path
+        - allowed
+        - remaining
+        - limit
+        - timestamp
+        - status_code
+      properties:
+        key:
+          type: string
+          description: Rate limit bucket key.
+        tenant_key:
+          type: string
+          description: Tenant key (if assigned by external rate limit service).
+        method:
+          type: string
+          description: HTTP method.
+        path:
+          type: string
+          description: Request path.
+        allowed:
+          type: boolean
+          description: Whether the request was allowed.
+        remaining:
+          type: integer
+          format: int64
+          description: Remaining tokens after this decision.
+        limit:
+          type: integer
+          format: int64
+          description: Configured limit (burst).
+        timestamp:
+          type: string
+          description: RFC 3339 timestamp.
+        status_code:
+          type: integer
+          format: int32
+          description: HTTP status code returned.
+        request_id:
+          type: string
+          description: |
+            X-Request-Id for event deduplication and correlation.
+            Enables idempotent event processing in downstream systems.
+        reason:
+          type: string
+          description: |
+            Non-empty for anomaly events (e.g. "tenant_key_rejected").
+
+    PublishEventsRequest:
+      type: object
+      description: Batch of usage events sent by EdgeQuota.
+      required:
+        - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageEvent"
+
+    PublishEventsResponse:
+      type: object
+      description: Acknowledgement of received events.
+      required:
+        - accepted
+      properties:
+        accepted:
+          type: integer
+          format: int64
+          description: Number of events accepted.

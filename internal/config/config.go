@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -202,6 +203,11 @@ type ServerConfig struct {
 	// MaxWebSocketTransferBytes limits the total bytes transferred per
 	// direction on a single WebSocket connection. 0 means unlimited.
 	MaxWebSocketTransferBytes int64 `yaml:"max_websocket_transfer_bytes" env:"MAX_WEBSOCKET_TRANSFER_BYTES"`
+
+	// WebSocketIdleTimeout closes WebSocket connections that have no data
+	// transfer in either direction for this duration. 0 means unlimited.
+	// Default: "5m".
+	WebSocketIdleTimeout string `yaml:"websocket_idle_timeout" env:"WEBSOCKET_IDLE_TIMEOUT"`
 }
 
 // ServerTLSConfig holds optional TLS termination settings.
@@ -358,6 +364,19 @@ func (hf *HeaderFilter) FilterHeaders(headers map[string]string) map[string]stri
 	return out
 }
 
+// BuildFilteredHeaderMap builds a single-value header map from an
+// http.Header, applying the filter in a single pass. This avoids
+// building the full map and then deleting entries.
+func (hf *HeaderFilter) BuildFilteredHeaderMap(h http.Header) map[string]string {
+	m := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 && hf.Allowed(k) {
+			m[k] = v[0]
+		}
+	}
+	return m
+}
+
 // AuthConfig holds optional external authentication service settings.
 type AuthConfig struct {
 	Enabled       bool               `yaml:"enabled"        env:"ENABLED"`
@@ -374,6 +393,17 @@ type AuthConfig struct {
 	// still forward it to the backend.
 	PropagateRequestBody bool  `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
 	MaxAuthBodySize      int64 `yaml:"max_auth_body_size"     env:"MAX_AUTH_BODY_SIZE"` // bytes; 0 = use default (64 KiB)
+
+	// CircuitBreaker configures the auth service circuit breaker.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker" envPrefix:"CIRCUIT_BREAKER_"`
+}
+
+// CircuitBreakerConfig holds circuit breaker tuning parameters.
+type CircuitBreakerConfig struct {
+	// Threshold is the number of consecutive failures before opening. 0 uses the default (5).
+	Threshold int `yaml:"threshold" env:"THRESHOLD"`
+	// ResetTimeout is the duration the circuit stays open before probing. 0 uses the default (30s).
+	ResetTimeout string `yaml:"reset_timeout" env:"RESET_TIMEOUT"`
 }
 
 // AuthHTTPConfig holds HTTP-based auth backend settings.
@@ -429,6 +459,16 @@ type RateLimitConfig struct {
 	// per-tenant Prometheus metrics to prevent cardinality explosions.
 	// 0 uses the default of 1000.
 	MaxTenantLabels int `yaml:"max_tenant_labels" env:"MAX_TENANT_LABELS"`
+
+	// MaxRecoveryAttempts limits the number of Redis recovery attempts
+	// before giving up. 0 means unlimited (retry forever, the default).
+	MaxRecoveryAttempts int `yaml:"max_recovery_attempts" env:"MAX_RECOVERY_ATTEMPTS"`
+
+	// GlobalPassthroughRPS is an optional global in-memory rate limit
+	// (requests per second) applied as a safety valve when the failure
+	// policy is "passthrough" and Redis is unavailable. 0 means no global
+	// limit (all traffic passes through).
+	GlobalPassthroughRPS float64 `yaml:"global_passthrough_rps" env:"GLOBAL_PASSTHROUGH_RPS"`
 }
 
 // KeyStrategyConfig defines how the per-client rate-limit key is extracted.
@@ -475,6 +515,9 @@ type ExternalRLConfig struct {
 	// external rate limit service. When exceeded, the call is abandoned
 	// and stale cache is used if available. 0 or empty disables.
 	MaxLatency string `yaml:"max_latency" env:"MAX_LATENCY"`
+
+	// CircuitBreaker configures the per-tenant circuit breaker.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker" envPrefix:"CIRCUIT_BREAKER_"`
 }
 
 // ExternalHTTPConfig holds HTTP external rate limit service settings.
@@ -943,4 +986,39 @@ func ParseDuration(s string, def time.Duration) (time.Duration, error) {
 		return def, nil
 	}
 	return time.ParseDuration(s)
+}
+
+// MustParseDuration parses a duration string, returning def on empty or error.
+func MustParseDuration(s string, def time.Duration) time.Duration {
+	d, err := ParseDuration(s, def)
+	if err != nil {
+		return def
+	}
+	return d
+}
+
+// RequiresRestart compares this config to old and returns a list of field
+// paths that changed and require a process restart. An empty slice means
+// the new config can be hot-reloaded safely.
+func (c *Config) RequiresRestart(old *Config) []string {
+	if old == nil {
+		return nil
+	}
+	var fields []string
+	if c.Server.Address != old.Server.Address {
+		fields = append(fields, "server.address")
+	}
+	if c.Admin.Address != old.Admin.Address {
+		fields = append(fields, "admin.address")
+	}
+	if c.Redis.Mode != old.Redis.Mode {
+		fields = append(fields, "redis.mode")
+	}
+	if c.Server.TLS.Enabled != old.Server.TLS.Enabled {
+		fields = append(fields, "server.tls.enabled")
+	}
+	if c.Server.TLS.HTTP3Enabled != old.Server.TLS.HTTP3Enabled {
+		fields = append(fields, "server.tls.http3_enabled")
+	}
+	return fields
 }

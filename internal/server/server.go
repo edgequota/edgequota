@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -74,7 +75,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer, adminRL := buildAdminServer(cfg, health, reg)
+	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics)
 
 	return &Server{
 		cfg:         cfg,
@@ -113,6 +114,10 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	}
 	if cfg.Server.MaxWebSocketTransferBytes > 0 {
 		proxyOpts = append(proxyOpts, proxy.WithMaxWSTransferBytes(cfg.Server.MaxWebSocketTransferBytes))
+	}
+	wsIdleTimeout, _ := config.ParseDuration(cfg.Server.WebSocketIdleTimeout, 5*time.Minute)
+	if wsIdleTimeout > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithWSIdleTimeout(wsIdleTimeout))
 	}
 	if cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled() {
 		proxyOpts = append(proxyOpts, proxy.WithDenyPrivateNetworks())
@@ -249,7 +254,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry) (*http.Server, *adminRateLimiter) {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -261,6 +266,33 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 	adminMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
 	}))
+	adminMux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(data)
+	})
+	adminMux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		snapshot := metrics.Snapshot()
+		data, err := json.MarshalIndent(snapshot, "", "  ")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(data)
+	})
 
 	// Wrap the admin mux in a rate limiter (100 req/s burst).
 	rl := newAdminRateLimiter(adminMux, 100)
@@ -439,6 +471,17 @@ func (s *Server) Reload(newCfg *config.Config) error {
 		return err
 	}
 
+	// Hot-reload proxy when backend configuration changes.
+	if backendChanged(s.cfg, newCfg) {
+		newProxy, err := buildProxy(newCfg, s.logger)
+		if err != nil {
+			s.logger.Error("failed to rebuild proxy on reload, keeping old proxy", "error", err)
+		} else {
+			s.chain.SwapProxy(newProxy)
+			s.logger.Info("proxy rebuilt after backend config change")
+		}
+	}
+
 	// Reload TLS certificates if TLS is enabled and cert files are configured.
 	if s.certs != nil && newCfg.Server.TLS.CertFile != "" && newCfg.Server.TLS.KeyFile != "" {
 		if err := s.certs.Reload(newCfg.Server.TLS.CertFile, newCfg.Server.TLS.KeyFile); err != nil {
@@ -450,6 +493,15 @@ func (s *Server) Reload(newCfg *config.Config) error {
 
 	s.cfg = newCfg
 	return nil
+}
+
+func backendChanged(old, new_ *config.Config) bool {
+	return old.Backend.URL != new_.Backend.URL ||
+		old.Backend.Timeout != new_.Backend.Timeout ||
+		old.Backend.MaxIdleConns != new_.Backend.MaxIdleConns ||
+		old.Backend.IdleConnTimeout != new_.Backend.IdleConnTimeout ||
+		old.Backend.TLSInsecureVerify != new_.Backend.TLSInsecureVerify ||
+		old.Backend.MaxRequestBodySize != new_.Backend.MaxRequestBodySize
 }
 
 // ReloadCerts hot-swaps TLS certificates from the given files without

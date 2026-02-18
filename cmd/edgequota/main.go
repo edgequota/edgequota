@@ -59,6 +59,7 @@ func main() {
 			logger.Error("config reload failed", "error", reloadErr)
 		}
 	}, logger)
+	watcher.SetLastConfig(cfg)
 	go func() {
 		if watchErr := watcher.Start(ctx); watchErr != nil {
 			logger.Error("config watcher error", "error", watchErr)

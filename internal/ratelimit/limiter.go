@@ -64,14 +64,19 @@ end
 -- seconds ago (converted to microseconds since now is in microseconds).
 -- This avoids the extra TTL command on every request while still keeping
 -- keys alive under steady traffic.
+-- Uses EXPIREAT with an absolute timestamp to eliminate drift from
+-- the relative EXPIRE command.
 local ttl_half_us = ttl * 500000
 local needs_expire = (now - last_expire) > ttl_half_us
+
+-- Compute absolute expiry: now is in microseconds, convert to seconds and add TTL.
+local expire_at = math.floor(now / 1000000) + ttl
 
 if tokens >= 1 then
   tokens = tokens - 1
   if needs_expire then
     redis.call('hset', key, 'last', now, 'tokens', tokens, 'last_expire', now)
-    redis.call('expire', key, ttl)
+    redis.call('expireat', key, expire_at)
   else
     redis.call('hset', key, 'last', now, 'tokens', tokens)
   end
@@ -81,7 +86,7 @@ end
 
 if needs_expire then
   redis.call('hset', key, 'last', now, 'tokens', tokens, 'last_expire', now)
-  redis.call('expire', key, ttl)
+  redis.call('expireat', key, expire_at)
 else
   redis.call('hset', key, 'last', now, 'tokens', tokens)
 end

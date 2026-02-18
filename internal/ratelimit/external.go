@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -118,6 +119,10 @@ type ExternalClient struct {
 
 	// done is closed by Close() to stop the background eviction goroutine.
 	done chan struct{}
+
+	// Optional metric hooks — set via WithExternalMetrics.
+	onSemaphoreReject  func()
+	onSingleflightShare func()
 }
 
 // Circuit breaker and concurrency defaults.
@@ -205,6 +210,22 @@ func (cb *tenantCircuitBreaker) isStale(now time.Time, maxIdle time.Duration) bo
 	return now.Sub(cb.lastAccess) > maxIdle
 }
 
+func resolveCBThreshold(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return defaultCBThreshold
+}
+
+func resolveCBResetTimeout(configured string) time.Duration {
+	if configured != "" {
+		if d, err := time.ParseDuration(configured); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultCBResetTimeout
+}
+
 // NewExternalClient creates a client for the external rate limit service.
 // The redisClient is used for distributed caching; pass nil to disable caching.
 func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*ExternalClient, error) {
@@ -257,8 +278,8 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		maxLatency:     maxLatency,
 		fetchSem:       semaphore.NewWeighted(maxConcurrent),
 		maxBreakers:    maxBreakers,
-		cbThreshold:    defaultCBThreshold,
-		cbResetTimeout: defaultCBResetTimeout,
+		cbThreshold:    resolveCBThreshold(cfg.CircuitBreaker.Threshold),
+		cbResetTimeout: resolveCBResetTimeout(cfg.CircuitBreaker.ResetTimeout),
 		done:           make(chan struct{}),
 	}
 
@@ -306,6 +327,13 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 	return ec, nil
 }
 
+// SetMetricHooks configures optional callbacks for semaphore rejection and
+// singleflight sharing events. Must be called before the client is used.
+func (ec *ExternalClient) SetMetricHooks(onSemReject, onSFShare func()) {
+	ec.onSemaphoreReject = onSemReject
+	ec.onSingleflightShare = onSFShare
+}
+
 // GetLimits fetches rate limits for the given key. Returns cached results from
 // Redis if available. On cache miss, calls the external service and caches the
 // response. Cache TTL is resolved as follows:
@@ -339,6 +367,9 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 	// cascading latency when thousands of distinct keys miss simultaneously
 	// (e.g. after a Redis flush).
 	if !ec.fetchSem.TryAcquire(1) {
+		if ec.onSemaphoreReject != nil {
+			ec.onSemaphoreReject()
+		}
 		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
 			return stale, nil
 		}
@@ -353,7 +384,7 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		ttl    time.Duration
 	}
 
-	v, err, _ := ec.sfGroup.Do(req.Key, func() (any, error) {
+	v, err, shared := ec.sfGroup.Do(req.Key, func() (any, error) {
 		// Double-check cache inside singleflight — another goroutine may
 		// have populated it while we were waiting.
 		if cached := ec.getFromCache(ctx, req.Key); cached != nil {
@@ -373,6 +404,10 @@ func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (
 		ec.setStaleInCache(ctx, req.Key, limits)
 		return &sfResult{limits: limits, ttl: ttl}, nil
 	})
+
+	if shared && ec.onSingleflightShare != nil {
+		ec.onSingleflightShare()
+	}
 
 	if err != nil {
 		return nil, err
@@ -480,24 +515,28 @@ func (ec *ExternalClient) getStaleFromCache(ctx context.Context, key string) *Ex
 		return nil
 	}
 	var limits ExternalLimits
-	if err := json.Unmarshal(data, &limits); err != nil {
-		return nil
+	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
+		return &limits
 	}
-	return &limits
+	if json.Unmarshal(data, &limits) == nil {
+		return &limits
+	}
+	return nil
 }
 
 func (ec *ExternalClient) setStaleInCache(ctx context.Context, key string, limits *ExternalLimits) {
 	if ec.redisClient == nil {
 		return
 	}
-	data, err := json.Marshal(limits)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(limits); err != nil {
 		return
 	}
-	_ = ec.redisClient.Set(ctx, staleCachePrefix+key, data, staleCacheTTL).Err()
+	_ = ec.redisClient.Set(ctx, staleCachePrefix+key, buf.Bytes(), staleCacheTTL).Err()
 }
 
 // getFromCache attempts to read cached limits from Redis.
+// Tries gob first (new format), falls back to JSON for backward compatibility.
 func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *ExternalLimits {
 	if ec.redisClient == nil {
 		return nil
@@ -509,25 +548,27 @@ func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *Externa
 	}
 
 	var limits ExternalLimits
-	if err := json.Unmarshal(data, &limits); err != nil {
-		return nil // corrupt entry — treat as miss
+	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
+		return &limits
 	}
-
-	return &limits
+	if json.Unmarshal(data, &limits) == nil {
+		return &limits
+	}
+	return nil // corrupt entry — treat as miss
 }
 
-// setInCache stores limits in Redis with the given TTL.
+// setInCache stores limits in Redis with the given TTL using gob encoding.
 func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *ExternalLimits, ttl time.Duration) {
 	if ec.redisClient == nil || ttl <= 0 {
 		return
 	}
 
-	data, err := json.Marshal(limits)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(limits); err != nil {
 		return
 	}
 
-	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, data, ttl).Err()
+	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, buf.Bytes(), ttl).Err()
 }
 
 // getLimitsHTTP fetches limits via HTTP.
@@ -690,6 +731,12 @@ func (ec *ExternalClient) FilterHeaders(headers map[string]string) {
 			delete(headers, k)
 		}
 	}
+}
+
+// BuildFilteredHeaders builds a filtered header map from an http.Header
+// in a single pass, avoiding the allocate-then-delete pattern.
+func (ec *ExternalClient) BuildFilteredHeaders(h http.Header) map[string]string {
+	return ec.headerFilter.BuildFilteredHeaderMap(h)
 }
 
 // Close shuts down the external client and releases resources, including

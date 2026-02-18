@@ -184,6 +184,15 @@ type GetLimitsResponse struct {
 	// Tenant key for Redis bucket isolation (optional). When non-empty,
 	// EdgeQuota uses this as the rate-limit key instead of the extracted key.
 	// This allows the external service to assign per-tenant buckets.
+	//
+	// Constraints enforced by EdgeQuota:
+	//   - Maximum length: 256 characters.
+	//   - Allowed characters: alphanumeric (a-z, A-Z, 0-9), hyphens (-),
+	//     underscores (_), dots (.), and colons (:).
+	//   - Keys that violate these constraints trigger a warning log, a
+	//     tenant_key_rejected_total metric increment, and a usage event with
+	//     reason="tenant_key_rejected". The originally extracted key is used
+	//     as fallback.
 	TenantKey string `protobuf:"bytes,6,opt,name=tenant_key,json=tenantKey,proto3" json:"tenant_key,omitempty"`
 	// Override failure policy. FAILURE_POLICY_UNSPECIFIED (0) = use static config.
 	FailurePolicy FailurePolicy `protobuf:"varint,7,opt,name=failure_policy,json=failurePolicy,proto3,enum=edgequota.ratelimit.v1.FailurePolicy" json:"failure_policy,omitempty"`
@@ -192,8 +201,12 @@ type GetLimitsResponse struct {
 	FailureCode int32 `protobuf:"varint,8,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
 	// Backend URL override (optional). When non-empty, EdgeQuota proxies this
 	// request to the given URL instead of the static backend.url from config.
+	// This enables per-tenant backend routing — the external service can direct
+	// each tenant's traffic to a different upstream.
 	BackendUrl string `protobuf:"bytes,9,opt,name=backend_url,json=backendUrl,proto3" json:"backend_url,omitempty"`
 	// Per-request timeout override (optional). Duration string (e.g. "10s").
+	// When non-empty, overrides the global server.request_timeout for this
+	// request. This enables per-tenant timeout differentiation.
 	RequestTimeout *string `protobuf:"bytes,10,opt,name=request_timeout,json=requestTimeout,proto3,oneof" json:"request_timeout,omitempty"`
 	// Cache duration in seconds. When present and > 0, overrides the default
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
@@ -316,7 +329,7 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe3\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc6\x03\n" +
 	"\x11GetLimitsResponse\x12\x18\n" +
 	"\aaverage\x18\x01 \x01(\x03R\aaverage\x12\x14\n" +
 	"\x05burst\x18\x02 \x01(\x03R\x05burst\x12\x16\n" +
@@ -324,9 +337,14 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\n" +
 	"tenant_key\x18\x06 \x01(\tR\ttenantKey\x12L\n" +
 	"\x0efailure_policy\x18\a \x01(\x0e2%.edgequota.ratelimit.v1.FailurePolicyR\rfailurePolicy\x12!\n" +
-	"\ffailure_code\x18\b \x01(\x05R\vfailureCode\x126\n" +
-	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x00R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
-	"\x0ecache_no_store\x18\x05 \x01(\bR\fcacheNoStoreB\x18\n" +
+	"\ffailure_code\x18\b \x01(\x05R\vfailureCode\x12\x1f\n" +
+	"\vbackend_url\x18\t \x01(\tR\n" +
+	"backendUrl\x12,\n" +
+	"\x0frequest_timeout\x18\n" +
+	" \x01(\tH\x00R\x0erequestTimeout\x88\x01\x01\x126\n" +
+	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x01R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
+	"\x0ecache_no_store\x18\x05 \x01(\bR\fcacheNoStoreB\x12\n" +
+	"\x10_request_timeoutB\x18\n" +
 	"\x16_cache_max_age_seconds*\x96\x01\n" +
 	"\rFailurePolicy\x12\x1e\n" +
 	"\x1aFAILURE_POLICY_UNSPECIFIED\x10\x00\x12\x1e\n" +

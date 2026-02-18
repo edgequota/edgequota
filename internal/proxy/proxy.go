@@ -28,6 +28,15 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// wsBufPool provides reusable 4 KiB buffers for WebSocket relay, reducing
+// GC pressure under high WebSocket concurrency.
+var wsBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 4096)
+		return &buf
+	},
+}
+
 // backendURLKey is the context key for per-request backend URL overrides.
 type backendURLKey struct{}
 
@@ -81,6 +90,13 @@ func WithMaxRequestBodySize(n int64) Option {
 // on a single WebSocket connection. A value of 0 means unlimited.
 func WithMaxWSTransferBytes(n int64) Option {
 	return func(p *Proxy) { p.maxWSTransferBytes = n }
+}
+
+// WithWSIdleTimeout sets the idle timeout for WebSocket connections.
+// Connections with no data transfer in either direction for this duration
+// are closed. A value of 0 means no idle timeout.
+func WithWSIdleTimeout(d time.Duration) Option {
+	return func(p *Proxy) { p.wsIdleTimeout = d }
 }
 
 // WithDenyPrivateNetworks enables DNS rebinding protection on all backend
@@ -208,6 +224,7 @@ type Proxy struct {
 	wsLimiter           *WSLimiter // nil when no per-key WS limit is configured.
 	maxRequestBodySize  int64      // 0 = unlimited
 	maxWSTransferBytes  int64      // 0 = unlimited per-direction
+	wsIdleTimeout       time.Duration // 0 = no idle timeout
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -586,21 +603,38 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 
 // relayWebSocket copies data bidirectionally between client and backend.
 // When maxWSTransferBytes > 0, each direction is capped to that many bytes.
+// When wsIdleTimeout > 0, connections with no activity are closed.
 func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// wsReader wraps a reader with an optional byte limit.
-	wsReader := func(r io.Reader) io.Reader {
+	wsWrap := func(r io.Reader, conn net.Conn) io.Reader {
+		var wrapped io.Reader = r
 		if p.maxWSTransferBytes > 0 {
-			return io.LimitReader(r, p.maxWSTransferBytes)
+			wrapped = io.LimitReader(wrapped, p.maxWSTransferBytes)
 		}
-		return r
+		if p.wsIdleTimeout > 0 {
+			wrapped = &idleTimeoutReader{inner: wrapped, conn: conn, peerConn: nil, timeout: p.wsIdleTimeout}
+		}
+		return wrapped
+	}
+
+	// Set initial deadlines if idle timeout is configured.
+	if p.wsIdleTimeout > 0 {
+		deadline := time.Now().Add(p.wsIdleTimeout)
+		_ = clientConn.SetDeadline(deadline)
+		_ = backendConn.SetDeadline(deadline)
 	}
 
 	go func() {
 		defer wg.Done()
-		if _, cpErr := io.Copy(clientConn, wsReader(backendConn)); cpErr != nil {
+		bufp := wsBufPool.Get().(*[]byte)
+		defer wsBufPool.Put(bufp)
+		src := wsWrap(backendConn, backendConn)
+		if itr, ok := src.(*idleTimeoutReader); ok {
+			itr.peerConn = clientConn
+		}
+		if _, cpErr := io.CopyBuffer(clientConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: backend→client copy ended", "error", cpErr)
 		}
 		if tc, tcOK := clientConn.(*net.TCPConn); tcOK {
@@ -612,7 +646,13 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		if _, cpErr := io.Copy(backendConn, wsReader(clientConn)); cpErr != nil {
+		bufp := wsBufPool.Get().(*[]byte)
+		defer wsBufPool.Put(bufp)
+		src := wsWrap(clientConn, clientConn)
+		if itr, ok := src.(*idleTimeoutReader); ok {
+			itr.peerConn = backendConn
+		}
+		if _, cpErr := io.CopyBuffer(backendConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: client→backend copy ended", "error", cpErr)
 		}
 		if tc, tcOK := backendConn.(*net.TCPConn); tcOK {
@@ -623,6 +663,28 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	}()
 
 	wg.Wait()
+}
+
+// idleTimeoutReader wraps a reader and resets deadlines on both the source
+// and peer connections after each successful read. This keeps active WebSocket
+// connections alive while closing idle ones.
+type idleTimeoutReader struct {
+	inner    io.Reader
+	conn     net.Conn // connection being read from
+	peerConn net.Conn // peer connection (write side)
+	timeout  time.Duration
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	if n > 0 && r.timeout > 0 {
+		deadline := time.Now().Add(r.timeout)
+		_ = r.conn.SetDeadline(deadline)
+		if r.peerConn != nil {
+			_ = r.peerConn.SetDeadline(deadline)
+		}
+	}
+	return n, err
 }
 
 // ---------------------------------------------------------------------------

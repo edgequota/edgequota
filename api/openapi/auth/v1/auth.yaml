@@ -1,0 +1,94 @@
+openapi: "3.0.3"
+info:
+  title: EdgeQuota Auth Service API
+  description: |
+    External authentication services must implement this HTTP API.
+    EdgeQuota calls POST /check for every incoming request when auth is enabled.
+
+    This spec mirrors edgequota.auth.v1 (proto) for the JSON/HTTP wire format.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+
+paths:
+  /check:
+    post:
+      operationId: check
+      summary: Verify whether a request should be allowed or denied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckRequest"
+      responses:
+        "200":
+          description: Auth decision (allowed or denied).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckResponse"
+
+components:
+  schemas:
+    CheckRequest:
+      type: object
+      description: Original request metadata forwarded by EdgeQuota.
+      required:
+        - method
+        - path
+        - headers
+        - remote_addr
+      properties:
+        method:
+          type: string
+          description: HTTP method (GET, POST, etc.).
+        path:
+          type: string
+          description: Request path (e.g. /api/v1/resource).
+        headers:
+          type: object
+          description: Flattened request headers (first value per key).
+          additionalProperties:
+            type: string
+        remote_addr:
+          type: string
+          description: Client remote address (ip:port).
+        body:
+          type: string
+          format: byte
+          description: |
+            Optional base64-encoded request body, included when
+            propagate_request_body is enabled. Capped to max_auth_body_size
+            (default 64 KiB).
+
+    CheckResponse:
+      type: object
+      description: Auth decision returned to EdgeQuota.
+      required:
+        - allowed
+        - status_code
+      properties:
+        allowed:
+          type: boolean
+          description: Whether the request is allowed to proceed.
+        status_code:
+          type: integer
+          format: int32
+          description: HTTP status code to return when denied (e.g. 401, 403).
+        request_headers:
+          type: object
+          description: |
+            Headers to inject into the upstream request when allowed.
+            Use this to pass auth-derived metadata (e.g. tenant ID, plan tier)
+            to downstream stages such as rate limiting and the backend.
+          additionalProperties:
+            type: string
+        deny_body:
+          type: string
+          description: Response body to send when denied.
+        response_headers:
+          type: object
+          description: Additional headers to set on the deny response.
+          additionalProperties:
+            type: string
