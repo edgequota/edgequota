@@ -92,6 +92,8 @@ module "eq_single_pt" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -138,6 +140,8 @@ module "eq_single_fc" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -184,6 +188,8 @@ module "eq_single_fb" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -230,6 +236,8 @@ module "eq_repl_basic" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -277,6 +285,8 @@ module "eq_sentinel_basic" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -324,6 +334,8 @@ module "eq_cluster_basic" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -372,6 +384,8 @@ module "eq_key_header" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -419,6 +433,8 @@ module "eq_key_composite" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 10
@@ -467,6 +483,8 @@ module "eq_burst_test" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 2
       burst: 3
@@ -513,6 +531,8 @@ module "eq_no_limit" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 0
       burst: 1
@@ -563,6 +583,8 @@ module "eq_protocol" {
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 0
       burst: 1
@@ -609,6 +631,8 @@ module "eq_protocol_rl" {
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 2
       burst: 3
@@ -684,6 +708,8 @@ module "eq_protocol_h3" {
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       tls_insecure_skip_verify: true
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 0
       burst: 1
@@ -730,6 +756,8 @@ module "eq_config_reload" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
     rate_limit:
       average: 100
       burst: 50
@@ -818,4 +846,3 @@ module "eq_dynamic_backend" {
 
   depends_on = [module.redis_single, module.whoami, module.testbackend, module.mockextrl]
 }
-

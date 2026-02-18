@@ -379,6 +379,40 @@ func buildTransports(
 	return h1, h2, h3
 }
 
+// setForwardingHeaders adds standard proxy forwarding headers (Host, Proto)
+// to the request. These headers enable the upstream (e.g. Traefik) to route
+// correctly based on the original client host and detect the original protocol.
+//
+// Headers are only set when not already present, so values injected by an
+// upstream proxy in front of EdgeQuota are preserved.
+//
+// Note: X-Forwarded-For is NOT set here for the HTTP path because
+// httputil.ReverseProxy already handles it. The WebSocket handler calls
+// setForwardedFor separately since it bypasses ReverseProxy.
+func setForwardingHeaders(req *http.Request) {
+	if req.Header.Get("X-Forwarded-Host") == "" {
+		req.Header.Set("X-Forwarded-Host", req.Host)
+	}
+	if req.Header.Get("X-Forwarded-Proto") == "" {
+		proto := "http"
+		if req.TLS != nil {
+			proto = "https"
+		}
+		req.Header.Set("X-Forwarded-Proto", proto)
+	}
+}
+
+// setForwardedFor adds X-Forwarded-For from RemoteAddr when not already present.
+// Called only by the WebSocket handler, which bypasses httputil.ReverseProxy
+// (the ReverseProxy already adds X-Forwarded-For on the HTTP path).
+func setForwardedFor(req *http.Request) {
+	if req.Header.Get("X-Forwarded-For") == "" {
+		if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			req.Header.Set("X-Forwarded-For", clientIP)
+		}
+	}
+}
+
 func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *slog.Logger) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -399,16 +433,7 @@ func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *sl
 			if effective.Path != "" && effective.Path != "/" {
 				req.URL.Path = singleJoiningSlash(effective.Path, req.URL.Path)
 			}
-			if req.Header.Get("X-Forwarded-Host") == "" {
-				req.Header.Set("X-Forwarded-Host", req.Host)
-			}
-			if req.Header.Get("X-Forwarded-Proto") == "" {
-				proto := "http"
-				if req.TLS != nil {
-					proto = "https"
-				}
-				req.Header.Set("X-Forwarded-Proto", proto)
-			}
+			setForwardingHeaders(req)
 		},
 		Transport: &protocolAwareTransport{
 			http1:  h1,
@@ -484,12 +509,20 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Rewrite the request to target the backend before writing it to the
 	// raw connection. handleWebSocket bypasses httputil.ReverseProxy (and
-	// its Director), so we must apply the same URL/Host rewriting here.
-	origHost := r.Host
+	// its Director), so we must apply the same rewriting here.
+	//
+	// Unlike the HTTP path (where httputil.ReverseProxy keeps r.Host as
+	// the original and uses r.URL.Host for routing), the WebSocket path
+	// writes the raw HTTP upgrade request via r.Write(backendConn).
+	// Request.Write uses r.Host for the Host header, so we MUST set it
+	// to the backend host for the upgrade to succeed. The original host
+	// is preserved in X-Forwarded-Host so the upstream (e.g. Traefik)
+	// can still route based on the client's requested domain.
+	setForwardingHeaders(r)
+	setForwardedFor(r)
 	r.Host = effective.Host
 	r.URL.Host = effective.Host
 	r.URL.Scheme = effective.Scheme
-	r.Header.Set("X-Forwarded-Host", origHost)
 
 	if writeErr := r.Write(backendConn); writeErr != nil {
 		p.logger.Error("websocket: write upgrade request failed", "error", writeErr)

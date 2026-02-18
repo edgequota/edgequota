@@ -200,6 +200,9 @@ func allTestCases(urls map[string]string) []testCase {
 		// Concurrency
 		{"Concurrent burst — no 500s under load", "single-pt", func() testResult { return testConcurrentBurst(urls["single-pt"]) }},
 
+		// Host/domain forwarding — ensures upstream (e.g. Traefik) gateway routing works
+		{"Forwarding — Host header preserved for upstream routing", "protocol", func() testResult { return testHostHeaderForwarding(urls["protocol"]) }},
+
 		// Protocol tests — no rate limit
 		{"Protocol — HTTP/1.1 proxies correctly", "protocol", func() testResult { return testProtocolHTTP(urls["protocol"]) }},
 		{"Protocol — HTTP/2 (h2c) proxies correctly", "protocol", func() testResult { return testProtocolHTTP2(urls["protocol"]) }},
@@ -1038,6 +1041,63 @@ func pass(name, format string, args ...any) testResult {
 
 func fail(name, format string, args ...any) testResult {
 	return testResult{name: name, passed: false, detail: fmt.Sprintf(format, args...)}
+}
+
+// ---------------------------------------------------------------------------
+// Host/domain forwarding test — Traefik gateway compatibility
+// ---------------------------------------------------------------------------
+
+// testHostHeaderForwarding verifies that when a request flows through
+// EdgeQuota, the original Host header is preserved for the backend (e.g.
+// Traefik) so that host-based routing (IngressRoute, Gateway API) works
+// correctly. It also checks that X-Forwarded-Host and X-Forwarded-Proto
+// are set.
+func testHostHeaderForwarding(base string) testResult {
+	const name = "host-fwd"
+
+	// Send a request with a custom Host header simulating a real domain.
+	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
+	if err != nil {
+		return fail(name, "create request: %v", err)
+	}
+	req.Host = "app.example.com"
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, clientErr := client.Do(req)
+	if clientErr != nil {
+		return fail(name, "request error: %v", clientErr)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail(name, "expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	if decErr := json.NewDecoder(resp.Body).Decode(&body); decErr != nil {
+		return fail(name, "cannot decode JSON: %v", decErr)
+	}
+
+	// The backend must see the original Host header for upstream routing.
+	backendHost := body["host"]
+	if backendHost != "app.example.com" {
+		return fail(name, "Host not preserved: backend saw %q, expected 'app.example.com'", backendHost)
+	}
+
+	// X-Forwarded-Host must be set to the original Host.
+	xfh := body["x-forwarded-host"]
+	if xfh != "app.example.com" {
+		return fail(name, "X-Forwarded-Host incorrect: got %q, expected 'app.example.com'", xfh)
+	}
+
+	// X-Forwarded-Proto must be set.
+	xfp := body["x-forwarded-proto"]
+	if xfp == "" {
+		return fail(name, "X-Forwarded-Proto not set")
+	}
+
+	return pass(name, "Host preserved='%s', X-Forwarded-Host='%s', X-Forwarded-Proto='%s'",
+		backendHost, xfh, xfp)
 }
 
 // ---------------------------------------------------------------------------

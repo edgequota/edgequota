@@ -159,9 +159,28 @@ func TestProxyHTTP(t *testing.T) {
 		assert.Equal(t, http.StatusBadGateway, rr.Code)
 	})
 
+	t.Run("preserves original Host header for upstream routing", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "api.example.com", r.Host, "backend must see original Host for upstream routing (e.g. Traefik)")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Host = "api.example.com"
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
 	t.Run("sets X-Forwarded-Host header", func(t *testing.T) {
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.NotEmpty(t, r.Header.Get("X-Forwarded-Host"))
+			assert.Equal(t, "example.com", r.Header.Get("X-Forwarded-Host"))
 			w.WriteHeader(http.StatusOK)
 		}))
 		defer backend.Close()
@@ -196,6 +215,26 @@ func TestProxyHTTP(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 
+	t.Run("sets X-Forwarded-For from RemoteAddr", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// httputil.ReverseProxy adds X-Forwarded-For automatically.
+			assert.Contains(t, r.Header.Get("X-Forwarded-For"), "192.0.2.1")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "192.0.2.1:12345"
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
 	t.Run("preserves existing X-Forwarded-Host", func(t *testing.T) {
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "original-host.com", r.Header.Get("X-Forwarded-Host"))
@@ -208,6 +247,28 @@ func TestProxyHTTP(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("X-Forwarded-Host", "original-host.com")
+		rr := httptest.NewRecorder()
+
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
+	t.Run("preserves existing X-Forwarded-For and appends RemoteAddr", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			xff := r.Header.Get("X-Forwarded-For")
+			// httputil.ReverseProxy appends RemoteAddr to existing XFF.
+			assert.Contains(t, xff, "198.51.100.1", "original X-Forwarded-For must be preserved")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.50:12345"
+		req.Header.Set("X-Forwarded-For", "198.51.100.1")
 		rr := httptest.NewRecorder()
 
 		p.ServeHTTP(rr, req)
