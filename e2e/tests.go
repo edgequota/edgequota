@@ -674,9 +674,16 @@ func testProtocolHTTP3(base string) testResult {
 
 func testProtocolHTTPS(base string) testResult {
 	// HTTPS (HTTP/2 over TLS) client — connects directly via TCP.
+	// http2.ConfigureTransport is required so the transport advertises "h2"
+	// in the TLS ALPN extension; a bare http.Transport with a custom
+	// TLSClientConfig does NOT negotiate HTTP/2 by default.
 	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // e2e self-signed certs
+	tr := &http.Transport{TLSClientConfig: tlsCfg}
+	if err := http2.ConfigureTransport(tr); err != nil {
+		return fail("proto-https", "failed to configure h2 transport: %v", err)
+	}
 	h2Client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Transport: tr,
 		Timeout:   10 * time.Second,
 	}
 
@@ -690,7 +697,10 @@ func testProtocolHTTPS(base string) testResult {
 		return fail("proto-https", "expected 200, got %d", resp.StatusCode)
 	}
 
-	// Verify Alt-Svc header advertises HTTP/3.
+	if !strings.HasPrefix(resp.Proto, "HTTP/2") {
+		return fail("proto-https", "expected HTTP/2 via ALPN, got %s", resp.Proto)
+	}
+
 	altSvc := resp.Header.Get("Alt-Svc")
 	detail := fmt.Sprintf("HTTPS proxied: proto=%s, status=%d", resp.Proto, resp.StatusCode)
 	if altSvc != "" {

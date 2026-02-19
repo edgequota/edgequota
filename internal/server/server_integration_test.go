@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 func TestServerRunAndShutdown(t *testing.T) {
@@ -192,6 +195,135 @@ func TestServerProxiesTraffic(t *testing.T) {
 		assert.Equal(t, "true", resp.Header.Get("X-Backend"))
 		body, _ := io.ReadAll(resp.Body)
 		assert.Equal(t, "hello from backend", string(body))
+
+		cancel()
+		<-done
+	})
+}
+
+func TestServerTLSHTTP2(t *testing.T) {
+	t.Run("negotiates HTTP/2 over TLS without h2c conflict", func(t *testing.T) {
+		// The backend must support h2c (HTTP/2 over cleartext) because the proxy's
+		// protocolAwareTransport forwards HTTP/2 requests using the h2 transport
+		// with AllowHTTP (prior-knowledge h2c).
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Backend", "true")
+			fmt.Fprint(w, "ok")
+		})
+		h2cBackend := httptest.NewUnstartedServer(h2c.NewHandler(handler, &http2.Server{}))
+		h2cBackend.Start()
+		defer h2cBackend.Close()
+
+		dir := t.TempDir()
+		certFile := dir + "/tls.crt"
+		keyFile := dir + "/tls.key"
+		require.NoError(t, generateSelfSignedCert(certFile, keyFile))
+
+		proxyAddr := freeAddr(t)
+		adminAddr := freeAddr(t)
+
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.Backend.URL = h2cBackend.URL
+		cfg.Server.Address = proxyAddr
+		cfg.Admin.Address = adminAddr
+		cfg.RateLimit.Average = 0
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+		denyPrivate := false
+		cfg.Backend.URLPolicy.DenyPrivateNetworks = &denyPrivate
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.CertFile = certFile
+		cfg.Server.TLS.KeyFile = keyFile
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- srv.Run(ctx)
+		}()
+
+		require.Eventually(t, func() bool {
+			resp, httpErr := http.Get("http://" + adminAddr + "/healthz")
+			if httpErr != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}, 5*time.Second, 50*time.Millisecond, "server did not become ready")
+
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		require.NoError(t, http2.ConfigureTransport(tr))
+		tlsClient := &http.Client{Timeout: 5 * time.Second, Transport: tr}
+
+		resp, err := tlsClient.Get("https://" + proxyAddr + "/")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "HTTP/2.0", resp.Proto, "TLS connection must negotiate HTTP/2 via ALPN")
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "true", resp.Header.Get("X-Backend"))
+		assert.Equal(t, "ok", string(body))
+
+		cancel()
+		<-done
+	})
+
+	t.Run("cleartext still supports h2c upgrade", func(t *testing.T) {
+		backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "ok")
+		}))
+		defer backendServer.Close()
+
+		proxyAddr := freeAddr(t)
+		adminAddr := freeAddr(t)
+
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.Backend.URL = backendServer.URL
+		cfg.Server.Address = proxyAddr
+		cfg.Admin.Address = adminAddr
+		cfg.RateLimit.Average = 0
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+		denyPrivate := false
+		cfg.Backend.URLPolicy.DenyPrivateNetworks = &denyPrivate
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- srv.Run(ctx)
+		}()
+
+		require.Eventually(t, func() bool {
+			resp, httpErr := http.Get("http://" + adminAddr + "/healthz")
+			if httpErr != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}, 5*time.Second, 50*time.Millisecond, "server did not become ready")
+
+		// Standard HTTP/1.1 client should still work on cleartext.
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get("http://" + proxyAddr + "/")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, "ok", string(body))
 
 		cancel()
 		<-done

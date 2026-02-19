@@ -145,8 +145,15 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	writeTimeout, _ := config.ParseDuration(cfg.Server.WriteTimeout, 30*time.Second)
 	idleTimeout, _ := config.ParseDuration(cfg.Server.IdleTimeout, 120*time.Second)
 
-	h2s := &http2.Server{}
-	mainHandler := h2c.NewHandler(chain, h2s)
+	// When TLS is enabled, Go's native HTTP/2 (via NextProtos in tls.Config)
+	// handles h2 negotiation. h2c.NewHandler is only needed for cleartext
+	// HTTP/2 upgrades (e.g. gRPC without TLS).
+	var mainHandler http.Handler
+	if cfg.Server.TLS.Enabled {
+		mainHandler = chain
+	} else {
+		mainHandler = h2c.NewHandler(chain, &http2.Server{})
+	}
 
 	var h3srv *http3.Server
 	if cfg.Server.TLS.HTTP3Enabled {
