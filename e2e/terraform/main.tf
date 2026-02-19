@@ -800,7 +800,6 @@ module "eq_dynamic_backend" {
   scenario  = "dynamic-backend"
   image     = var.edgequota_image
   node_port = 30116
-
   config_yaml = <<-YAML
     server:
       address: ":8080"

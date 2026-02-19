@@ -3,6 +3,7 @@ package proxy
 import (
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -499,6 +500,93 @@ func TestCountingReader(t *testing.T) {
 			rc: io.NopCloser(strings.NewReader("")),
 		}
 		assert.NoError(t, cr.Close())
+	})
+}
+
+func TestSafeDialer(t *testing.T) {
+	inner := &net.Dialer{Timeout: 2 * time.Second}
+
+	t.Run("disabled passes through to inner dialer", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		d := &SafeDialer{Inner: inner, Enabled: false}
+		conn, err := d.DialContext(t.Context(), "tcp", backend.Listener.Addr().String())
+		require.NoError(t, err)
+		conn.Close()
+	})
+
+	t.Run("enabled blocks direct private IP", func(t *testing.T) {
+		d := &SafeDialer{Inner: inner, Enabled: true}
+		_, err := d.DialContext(t.Context(), "tcp", "127.0.0.1:8080")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "private/reserved IP")
+	})
+
+	t.Run("enabled blocks 10.x private IP", func(t *testing.T) {
+		d := &SafeDialer{Inner: inner, Enabled: true}
+		_, err := d.DialContext(t.Context(), "tcp", "10.96.0.1:443")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "private/reserved IP")
+	})
+
+	t.Run("enabled allows loopback when disabled", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		d := &SafeDialer{Inner: inner, Enabled: false}
+		conn, err := d.DialContext(t.Context(), "tcp", backend.Listener.Addr().String())
+		require.NoError(t, err)
+		conn.Close()
+	})
+
+	t.Run("fallback for unparseable addr", func(t *testing.T) {
+		d := &SafeDialer{Inner: inner, Enabled: true}
+		_, err := d.DialContext(t.Context(), "tcp", "no-port")
+		require.Error(t, err)
+	})
+
+	t.Run("enabled blocks hostname resolving to loopback", func(t *testing.T) {
+		d := &SafeDialer{Inner: inner, Enabled: true}
+		_, err := d.DialContext(t.Context(), "tcp", "localhost:8080")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "private/reserved")
+	})
+}
+
+func TestProxy_DenyPrivateNetworks_Integration(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Reached", "true")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	t.Run("proxy without deny reaches loopback backend", func(t *testing.T) {
+		p, err := New(backend.URL, 5*time.Second, 10, 30*time.Second, config.TransportConfig{}, testLogger())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "true", rr.Header().Get("X-Reached"))
+	})
+
+	t.Run("proxy with deny blocks loopback backend", func(t *testing.T) {
+		p, err := New(backend.URL, 5*time.Second, 10, 30*time.Second, config.TransportConfig{}, testLogger(), WithDenyPrivateNetworks())
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusBadGateway, rr.Code)
+		assert.Empty(t, rr.Header().Get("X-Reached"))
 	})
 }
 

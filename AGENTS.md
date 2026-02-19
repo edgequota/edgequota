@@ -118,6 +118,21 @@ GitHub Actions workflow (`.github/workflows/ci.yml`):
 - **Singleflight** for cache misses on external rate limit responses.
 - **Distroless container** — `gcr.io/distroless/static-debian12:nonroot`, no shell, non-root user (UID 65534).
 
+## Mandatory Verification After Every Change
+
+**Every time you modify code, config, Terraform, Helm templates, or any other file in this repository, you MUST run the relevant verification steps before considering the work done.** Do not wait for the user to ask — this is your responsibility.
+
+| What changed | What to run |
+|---|---|
+| Any Go source (`internal/`, `cmd/`, `e2e/`) | `make lint && make test` |
+| Go source in core packages | Also check `make coverage` passes (80% total, 70% per-package) |
+| `.proto` files | `make proto` then `make lint && make test` |
+| `e2e/terraform/*.tf` | `cd e2e && terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate` |
+| Helm chart (`edgequota-helm/`) | `helm lint . && helm lint . -f values-minimal.yaml && helm lint . -f values-production.yaml` and `helm template test . -s templates/configmap.yaml` to verify rendered output |
+| Multiple areas | Run ALL applicable checks |
+
+**Never skip these.** A change is not complete until verification passes.
+
 ## Common Pitfalls
 
 - Forgetting `make proto` after editing `.proto` files — the build will use stale generated code.

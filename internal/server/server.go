@@ -119,7 +119,7 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	if wsIdleTimeout > 0 {
 		proxyOpts = append(proxyOpts, proxy.WithWSIdleTimeout(wsIdleTimeout))
 	}
-	if cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled() {
+	if cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled() && cfg.RateLimit.External.Enabled {
 		proxyOpts = append(proxyOpts, proxy.WithDenyPrivateNetworks())
 	}
 
