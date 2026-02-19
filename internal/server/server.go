@@ -375,6 +375,7 @@ func (s *Server) Run(ctx context.Context) error {
 		tlsCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
 			MinVersion:     minVer,
 			GetCertificate: ch.GetCertificate,
+			NextProtos:     []string{"h2", "http/1.1"},
 		}
 		s.mainServer.TLSConfig = tlsCfg
 
