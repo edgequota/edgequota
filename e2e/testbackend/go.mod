@@ -1,6 +1,6 @@
 module github.com/edgequota/edgequota/e2e/testbackend
 
-go 1.25
+go 1.26
 
 require (
 	github.com/quic-go/quic-go v0.59.0

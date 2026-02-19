@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-EdgeQuota is a high-performance reverse proxy (Go 1.25) that enforces rate limits and external authentication at the edge of a Kubernetes cluster. It sits in front of backend services and applies a middleware chain: **Auth Check → Rate Limit → Reverse Proxy**.
+EdgeQuota is a high-performance reverse proxy (Go 1.26) that enforces rate limits and external authentication at the edge of a Kubernetes cluster. It sits in front of backend services and applies a middleware chain: **Auth Check → Rate Limit → Reverse Proxy**.
 
 All shared state lives in Redis. EdgeQuota instances are fully stateless and horizontally scalable.
 

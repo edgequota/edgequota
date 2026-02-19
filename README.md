@@ -506,7 +506,7 @@ See [docs/deployment.md](docs/deployment.md) for production topology, autoscalin
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker (for container builds)
 - golangci-lint v2+ (for linting)
 - Minikube + Terraform (for E2E tests)

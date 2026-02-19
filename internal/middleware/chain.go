@@ -146,7 +146,7 @@ var (
 const maxTTL = 7 * 24 * 3600
 
 // getHeaderMap returns a fresh map populated with the first value of each header.
-// Uses plain allocation instead of sync.Pool — Go 1.25's GC handles short-lived
+// Uses plain allocation instead of sync.Pool — Go 1.26's GC handles short-lived
 // maps efficiently, and the pool adds contention under high concurrency with no
 // measurable benefit (validated by BenchmarkGetHeaderMap in chain_bench_test.go).
 func getHeaderMap(r *http.Request) map[string]string {
