@@ -212,6 +212,7 @@ func allTestCases(urls map[string]string) []testCase {
 
 		// HTTP/3 (QUIC) — tested locally via the routable minikube IP + UDP NodePort
 		{"Protocol — HTTP/3 (QUIC)", "protocol-h3", func() testResult { return testProtocolHTTP3(urls["protocol-h3"]) }},
+		{"Protocol — HTTP/3 forced (QUIC-only, no TCP fallback)", "protocol-h3", func() testResult { return testProtocolHTTP3Forced(urls["protocol-h3"]) }},
 		{"Protocol — HTTPS (HTTP/2 over TLS)", "protocol-h3", func() testResult { return testProtocolHTTPS(urls["protocol-h3"]) }},
 
 		// Protocol tests — with rate limiting (SSE/WS first since they each use 1
@@ -664,12 +665,46 @@ func testProtocolHTTP3(base string) testResult {
 		return fail("proto-h3", "expected 200, got %d, body: %s", resp.StatusCode, body)
 	}
 
+	if resp.ProtoMajor != 3 {
+		return fail("proto-h3", "expected HTTP/3, got %s", resp.Proto)
+	}
+
 	var m map[string]string
 	if err := json.Unmarshal(body, &m); err != nil {
 		return fail("proto-h3", "cannot decode response: %v", err)
 	}
 
 	return pass("proto-h3", "HTTP/3 (QUIC) proxied: proto=%s, status=%d", m["protocol"], resp.StatusCode)
+}
+
+func testProtocolHTTP3Forced(base string) testResult {
+	// Force HTTP/3 by using the QUIC transport exclusively, verifying the
+	// server accepts and responds over QUIC without falling back to TCP.
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // e2e self-signed certs
+	h3Only := &http.Client{
+		Transport: &http3.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   10 * time.Second,
+	}
+
+	// Make multiple requests to confirm the QUIC connection is stable.
+	for i := range 3 {
+		resp, err := h3Only.Get(base + "/")
+		if err != nil {
+			return fail("proto-h3-forced", "request %d failed: %v", i+1, err)
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fail("proto-h3-forced", "request %d: expected 200, got %d, body: %s", i+1, resp.StatusCode, body)
+		}
+		if resp.ProtoMajor != 3 {
+			return fail("proto-h3-forced", "request %d: expected HTTP/3, got %s", i+1, resp.Proto)
+		}
+	}
+
+	return pass("proto-h3-forced", "3 consecutive HTTP/3 (QUIC-only) requests succeeded")
 }
 
 func testProtocolHTTPS(base string) testResult {

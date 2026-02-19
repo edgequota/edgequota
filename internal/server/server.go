@@ -396,6 +396,14 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		s.mainServer.TLSConfig = tlsCfg
 
+		// Serve() (with a manual tls.NewListener) does NOT auto-configure
+		// HTTP/2 — only ListenAndServeTLS / ServeTLS do. We must register
+		// the h2 handler explicitly so the server can actually speak HTTP/2
+		// after advertising it via ALPN.
+		if err := http2.ConfigureServer(s.mainServer, nil); err != nil {
+			return fmt.Errorf("configure HTTP/2: %w", err)
+		}
+
 		if s.http3Server != nil {
 			s.http3Server.TLSConfig = tlsCfg
 		}
