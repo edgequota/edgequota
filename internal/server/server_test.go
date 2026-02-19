@@ -79,6 +79,22 @@ func TestNew(t *testing.T) {
 	})
 }
 
+func TestServerErrorLog(t *testing.T) {
+	t.Run("main and admin servers have ErrorLog set", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		assert.NotNil(t, srv.mainServer.ErrorLog, "main server ErrorLog must be set")
+		assert.NotNil(t, srv.adminServer.ErrorLog, "admin server ErrorLog must be set")
+	})
+}
+
 func TestServerConfigAddresses(t *testing.T) {
 	t.Run("uses configured server and admin addresses", func(t *testing.T) {
 		mr := miniredis.RunT(t)

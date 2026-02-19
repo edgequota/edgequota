@@ -170,6 +170,7 @@ redis:
 logging:
   level: "info"
   format: "json"
+  access_log_enabled: true
 
 # Optional OpenTelemetry tracing.
 # tracing:

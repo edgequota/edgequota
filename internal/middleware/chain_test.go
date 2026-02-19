@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,6 +25,23 @@ func testLogger() *slog.Logger {
 
 func testMetrics() *observability.Metrics {
 	return observability.NewMetrics(prometheus.NewRegistry(), 0)
+}
+
+// findAccessLog scans newline-delimited JSON log output and returns the first
+// entry whose "msg" field is "access", or nil if not found.
+func findAccessLog(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for dec.More() {
+		var entry map[string]any
+		if err := dec.Decode(&entry); err != nil {
+			break
+		}
+		if entry["msg"] == "access" {
+			return entry
+		}
+	}
+	return nil
 }
 
 func testConfig(redisAddr string) *config.Config {
@@ -463,5 +482,139 @@ func TestValidTenantKey(t *testing.T) {
 		for _, k := range invalid {
 			assert.False(t, validTenantKey(k), "expected %q to be invalid", k)
 		}
+	})
+}
+
+func TestStatusWriterBytesWritten(t *testing.T) {
+	t.Run("counts bytes across multiple writes", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		sw := &statusWriter{ResponseWriter: rr}
+
+		n1, err := sw.Write([]byte("hello"))
+		require.NoError(t, err)
+		assert.Equal(t, 5, n1)
+
+		n2, err := sw.Write([]byte(" world!"))
+		require.NoError(t, err)
+		assert.Equal(t, 7, n2)
+
+		assert.Equal(t, int64(12), sw.bytesWritten)
+		assert.Equal(t, http.StatusOK, sw.code)
+		assert.True(t, sw.written)
+	})
+
+	t.Run("zero on no writes", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		sw := &statusWriter{ResponseWriter: rr}
+		sw.WriteHeader(http.StatusNoContent)
+		assert.Equal(t, int64(0), sw.bytesWritten)
+	})
+}
+
+func TestAccessLog(t *testing.T) {
+	t.Run("emits structured access log entry", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, logger, testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		buf.Reset()
+		req := httptest.NewRequest(http.MethodGet, "/test/path", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		req.Header.Set("User-Agent", "test-agent/1.0")
+		rr := httptest.NewRecorder()
+
+		chain.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+
+		entry := findAccessLog(t, buf.Bytes())
+		require.NotNil(t, entry, "expected an access log entry")
+
+		assert.Equal(t, "GET", entry["method"])
+		assert.Equal(t, "/test/path", entry["path"])
+		assert.EqualValues(t, 200, entry["status"])
+		assert.Contains(t, entry, "duration_ms")
+		assert.EqualValues(t, 2, entry["bytes"])
+		assert.Equal(t, "10.0.0.1:12345", entry["remote_addr"])
+		assert.Contains(t, entry, "request_id")
+		assert.Equal(t, "test-agent/1.0", entry["user_agent"])
+		assert.Equal(t, "HTTP/1.1", entry["proto"])
+	})
+
+	t.Run("no access log when disabled", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		disabled := false
+		cfg.Logging.AccessLog = &disabled
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, logger, testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		buf.Reset()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+
+		assert.Nil(t, findAccessLog(t, buf.Bytes()),
+			"no access log entry expected when disabled")
+	})
+
+	t.Run("access log toggleable via reload", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, logger, testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		buf.Reset()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		assert.NotNil(t, findAccessLog(t, buf.Bytes()),
+			"access log entry expected before disabling")
+
+		// Disable access log via reload.
+		newCfg := testConfig(mr.Addr())
+		disabled := false
+		newCfg.Logging.AccessLog = &disabled
+		require.NoError(t, chain.Reload(newCfg))
+
+		buf.Reset()
+		rr = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		chain.ServeHTTP(rr, req)
+		assert.Nil(t, findAccessLog(t, buf.Bytes()),
+			"access log must be silent after disabling via reload")
 	})
 }

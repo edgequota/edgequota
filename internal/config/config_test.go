@@ -977,3 +977,22 @@ func TestRequiresRestart(t *testing.T) {
 		assert.Len(t, fields, 2)
 	})
 }
+
+func TestAccessLogEnabled(t *testing.T) {
+	t.Run("defaults to true when nil", func(t *testing.T) {
+		l := LoggingConfig{}
+		assert.True(t, l.AccessLogEnabled())
+	})
+
+	t.Run("returns explicit true", func(t *testing.T) {
+		v := true
+		l := LoggingConfig{AccessLog: &v}
+		assert.True(t, l.AccessLogEnabled())
+	})
+
+	t.Run("returns explicit false", func(t *testing.T) {
+		v := false
+		l := LoggingConfig{AccessLog: &v}
+		assert.False(t, l.AccessLogEnabled())
+	})
+}

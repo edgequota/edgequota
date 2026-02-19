@@ -587,8 +587,18 @@ type RedisTLSConfig struct {
 
 // LoggingConfig holds structured logging settings.
 type LoggingConfig struct {
-	Level  LogLevel  `yaml:"level"  env:"LEVEL"`
-	Format LogFormat `yaml:"format" env:"FORMAT"`
+	Level     LogLevel  `yaml:"level"            env:"LEVEL"`
+	Format    LogFormat `yaml:"format"           env:"FORMAT"`
+	AccessLog *bool     `yaml:"access_log_enabled" env:"ACCESS_LOG_ENABLED"`
+}
+
+// AccessLogEnabled returns whether access logging is active.
+// Defaults to true when not explicitly configured.
+func (l LoggingConfig) AccessLogEnabled() bool {
+	if l.AccessLog == nil {
+		return true
+	}
+	return *l.AccessLog
 }
 
 // TracingConfig holds OpenTelemetry tracing settings.

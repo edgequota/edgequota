@@ -75,7 +75,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics)
+	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger)
 
 	return &Server{
 		cfg:         cfg,
@@ -102,8 +102,10 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 
 	var proxyOpts []proxy.Option
 	if cfg.Backend.TLSInsecureVerify {
-		logger.Warn("SECURITY WARNING: backend TLS certificate verification is DISABLED (tls_insecure_skip_verify=true). " +
-			"This should NEVER be used in production — it exposes the proxy to man-in-the-middle attacks.")
+		logger.Warn("backend TLS certificate verification is disabled (tls_insecure_skip_verify=true). "+
+			"This is acceptable for cluster-internal backends with self-signed certificates, "+
+			"but should not be used when proxying to external services over untrusted networks.",
+			"backend_url", cfg.Backend.URL)
 		proxyOpts = append(proxyOpts, proxy.WithBackendTLSInsecure())
 	}
 	if cfg.Server.MaxWebSocketConnsPerKey > 0 {
@@ -178,6 +180,7 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		IdleTimeout:       idleTimeout,
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default to prevent large-header DoS.
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 		BaseContext: func(_ net.Listener) context.Context {
 			return context.Background()
 		},
@@ -254,7 +257,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics) (*http.Server, *adminRateLimiter) {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -305,6 +308,7 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 		IdleTimeout:       adminIdleTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default.
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 	return srv, rl
 }

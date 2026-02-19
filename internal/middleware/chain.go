@@ -203,11 +203,12 @@ type Chain struct {
 	failureCode   int
 	average       int64
 
-	// requestTimeout and urlPolicy are read from ServeHTTP (hot path)
-	// without holding mu, and written by Reload. Using atomic.Value
-	// avoids a data race without adding lock contention.
+	// requestTimeout, urlPolicy, and accessLog are read from ServeHTTP
+	// (hot path) without holding mu, and written by Reload. Using atomic
+	// types avoids a data race without adding lock contention.
 	requestTimeout atomic.Value // time.Duration
 	urlPolicy      atomic.Value // proxy.BackendURLPolicy
+	accessLog      atomic.Bool
 
 	emitter *events.Emitter
 
@@ -352,6 +353,7 @@ func NewChain(
 		AllowedHosts:        cfg.Backend.URLPolicy.AllowedHosts,
 	})
 	chain.keyStrategy.Store(&ks)
+	chain.accessLog.Store(cfg.Logging.AccessLogEnabled())
 	chain.cfg.Store(cfg)
 	if cfg.RateLimit.GlobalPassthroughRPS > 0 {
 		chain.globalBackstop = ratelimit.NewInMemoryLimiter(
@@ -484,11 +486,13 @@ func (c *Chain) handleRedisStartupFailure(err error, fp config.FailurePolicy, lo
 	}
 }
 
-// statusWriter captures the HTTP status code written by downstream handlers.
+// statusWriter captures the HTTP status code and response size written by
+// downstream handlers.
 type statusWriter struct {
 	http.ResponseWriter
-	code    int
-	written bool
+	code         int
+	written      bool
+	bytesWritten int64
 }
 
 func (sw *statusWriter) WriteHeader(code int) {
@@ -504,7 +508,9 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 		sw.code = http.StatusOK
 		sw.written = true
 	}
-	return sw.ResponseWriter.Write(b)
+	n, err := sw.ResponseWriter.Write(b)
+	sw.bytesWritten += int64(n)
+	return n, err
 }
 
 // Unwrap supports http.ResponseController and middleware that check for
@@ -534,6 +540,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw.ResponseWriter = w
 	sw.code = http.StatusOK
 	sw.written = false
+	sw.bytesWritten = 0
 
 	// Propagate or generate X-Request-Id for request correlation.
 	// Validate client-supplied IDs to prevent CRLF injection and log pollution.
@@ -545,11 +552,24 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw.Header().Set(requestIDHeader, reqID)
 
 	defer func() {
-		duration := time.Since(start).Seconds()
+		elapsed := time.Since(start)
 		c.metrics.PromRequestDuration.WithLabelValues(
 			r.Method,
 			strconv.Itoa(sw.code),
-		).Observe(duration)
+		).Observe(elapsed.Seconds())
+		if c.accessLog.Load() {
+			c.logger.Info("access",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", sw.code,
+				"duration_ms", elapsed.Milliseconds(),
+				"bytes", sw.bytesWritten,
+				"remote_addr", r.RemoteAddr,
+				"request_id", reqID,
+				"user_agent", r.UserAgent(),
+				"proto", r.Proto,
+			)
+		}
 		sw.ResponseWriter = nil // prevent dangling reference
 		statusWriterPool.Put(sw)
 	}()
@@ -1238,6 +1258,8 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	if d, parseErr := time.ParseDuration(newCfg.Server.RequestTimeout); parseErr == nil {
 		c.requestTimeout.Store(d)
 	}
+
+	c.accessLog.Store(newCfg.Logging.AccessLogEnabled())
 
 	// Recreate emitter if events config changed.
 	oldEmitter := c.emitter
