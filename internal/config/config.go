@@ -212,11 +212,12 @@ type ServerConfig struct {
 
 // ServerTLSConfig holds optional TLS termination settings.
 type ServerTLSConfig struct {
-	Enabled      bool       `yaml:"enabled"       env:"ENABLED"`
-	CertFile     string     `yaml:"cert_file"     env:"CERT_FILE"`
-	KeyFile      string     `yaml:"key_file"      env:"KEY_FILE"`
-	HTTP3Enabled bool       `yaml:"http3_enabled" env:"HTTP3_ENABLED"`
-	MinVersion   TLSVersion `yaml:"min_version"   env:"MIN_VERSION"`
+	Enabled            bool       `yaml:"enabled"             env:"ENABLED"`
+	CertFile           string     `yaml:"cert_file"           env:"CERT_FILE"`
+	KeyFile            string     `yaml:"key_file"            env:"KEY_FILE"`
+	HTTP3Enabled       bool       `yaml:"http3_enabled"       env:"HTTP3_ENABLED"`
+	HTTP3AdvertisePort int        `yaml:"http3_advertise_port" env:"HTTP3_ADVERTISE_PORT"`
+	MinVersion         TLSVersion `yaml:"min_version"         env:"MIN_VERSION"`
 }
 
 // AdminConfig holds the admin/observability server settings.

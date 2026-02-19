@@ -162,14 +162,24 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		}
 
 		tcpHandler := mainHandler
-		mainHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.ProtoMajor < 3 {
-				if setErr := h3srv.SetQUICHeaders(w.Header()); setErr != nil {
-					logger.Debug("failed to set Alt-Svc header", "error", setErr)
+		if port := cfg.Server.TLS.HTTP3AdvertisePort; port > 0 {
+			altSvc := fmt.Sprintf(`h3=":%d"; ma=2592000`, port)
+			mainHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ProtoMajor < 3 {
+					w.Header().Set("Alt-Svc", altSvc)
 				}
-			}
-			tcpHandler.ServeHTTP(w, r)
-		})
+				tcpHandler.ServeHTTP(w, r)
+			})
+		} else {
+			mainHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ProtoMajor < 3 {
+					if setErr := h3srv.SetQUICHeaders(w.Header()); setErr != nil {
+						logger.Debug("failed to set Alt-Svc header", "error", setErr)
+					}
+				}
+				tcpHandler.ServeHTTP(w, r)
+			})
+		}
 	}
 
 	srv := &http.Server{

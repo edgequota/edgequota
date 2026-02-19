@@ -14,7 +14,8 @@ server:
   #   enabled: true
   #   cert_file: "/etc/edgequota/tls/cert.pem"
   #   key_file: "/etc/edgequota/tls/key.pem"
-  #   http3_enabled: true   # Serve HTTP/3 (QUIC) on the same address over UDP
+  #   http3_enabled: true        # Serve HTTP/3 (QUIC) on the same address over UDP
+  #   http3_advertise_port: 443  # External port for Alt-Svc header (0 = use listen port)
   #   min_version: "1.2"    # Minimum TLS version: "1.2" (default) or "1.3"
 
 admin:
