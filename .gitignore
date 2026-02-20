@@ -11,11 +11,13 @@ bin/
 # E2E artifacts
 e2e/e2e
 e2e/reports/
+e2e/mockextrl/mockextrl
 
 # Terraform
 e2e/terraform/.terraform/
 e2e/terraform/.terraform.lock.hcl
 e2e/terraform/terraform.tfstate*
+e2e/terraform/.terraform.tfstate.lock.info
 
 # Go vendor (optional, uncomment if vendoring)
 # vendor/
