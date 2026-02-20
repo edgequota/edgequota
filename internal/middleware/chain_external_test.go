@@ -229,3 +229,109 @@ func TestChainBackendURLFromExternalService(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 }
+
+func TestChainBackendProtocolFromExternalService(t *testing.T) {
+	t.Run("injects backend_protocol from external service into request context", func(t *testing.T) {
+		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"average":          100,
+				"burst":            50,
+				"period":           "1s",
+				"backend_protocol": "h2",
+			})
+		}))
+		defer externalRL.Close()
+
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = externalRL.URL
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctxProto := r.Context().Value(proxy.BackendProtocolContextKey)
+			assert.Equal(t, "h2", ctxProto, "backend protocol should be h2 in context")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
+	t.Run("no context protocol when external service omits backend_protocol", func(t *testing.T) {
+		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"average": 100,
+				"burst":   50,
+				"period":  "1s",
+			})
+		}))
+		defer externalRL.Close()
+
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = externalRL.URL
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctxProto := r.Context().Value(proxy.BackendProtocolContextKey)
+			assert.Nil(t, ctxProto, "backend protocol should NOT be in context when omitted")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
+	t.Run("invalid backend_protocol from external service is ignored", func(t *testing.T) {
+		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"average":          100,
+				"burst":            50,
+				"period":           "1s",
+				"backend_protocol": "ftp",
+			})
+		}))
+		defer externalRL.Close()
+
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = externalRL.URL
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctxProto := r.Context().Value(proxy.BackendProtocolContextKey)
+			assert.Nil(t, ctxProto, "invalid backend protocol should not be in context")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+}

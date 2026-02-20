@@ -229,6 +229,14 @@ func allTestCases(urls map[string]string) []testCase {
 		{"Dynamic backend — tenant-a routes to whoami", "dynamic-backend", func() testResult { return testDynamicBackendTenantA(urls["dynamic-backend"]) }},
 		{"Dynamic backend — tenant-b routes to testbackend", "dynamic-backend", func() testResult { return testDynamicBackendTenantB(urls["dynamic-backend"]) }},
 		{"Dynamic backend — unknown tenant uses default backend", "dynamic-backend", func() testResult { return testDynamicBackendDefault(urls["dynamic-backend"]) }},
+
+		// Backend protocol — h1 forced via config, verified through dynamic backend scenario
+		{"Dynamic backend — backend_protocol=h1 works with dynamic routing", "dynamic-backend", func() testResult { return testDynamicBackendProtocolH1(urls["dynamic-backend"]) }},
+
+		// Per-request backend_protocol override via external RL
+		{"Dynamic backend — per-request backend_protocol=h1 from ext RL", "dynamic-backend", func() testResult {
+			return testDynamicBackendProtocolOverride(urls["dynamic-backend"])
+		}},
 	}
 }
 
@@ -1230,6 +1238,65 @@ func testDynamicBackendDefault(base string) testResult {
 	}
 
 	return fail("dyn-default", "unexpected response body: %s", truncate(bodyStr, 200))
+}
+
+func testDynamicBackendProtocolH1(base string) testResult {
+	// This scenario has backend_protocol: "h1" explicitly set in its config.
+	// Verify that tenant routing still works correctly with forced h1.
+	// Both tenant-a (whoami) and tenant-b (testbackend) should be reachable
+	// since they all speak HTTP/1.1.
+
+	// Test tenant-a (routed to whoami via external RL).
+	headers := map[string]string{"X-Tenant-Id": "tenant-a"}
+	resp, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-proto-h1", "tenant-a request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail("dyn-proto-h1", "tenant-a: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Test tenant-b (routed to testbackend via external RL).
+	headers = map[string]string{"X-Tenant-Id": "tenant-b"}
+	resp2, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-proto-h1", "tenant-b request error: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != 200 {
+		return fail("dyn-proto-h1", "tenant-b: expected 200, got %d", resp2.StatusCode)
+	}
+
+	if resp2.Header.Get("X-Backend") != "testbackend" {
+		return fail("dyn-proto-h1", "tenant-b: expected X-Backend: testbackend, got %q", resp2.Header.Get("X-Backend"))
+	}
+
+	return pass("dyn-proto-h1", "backend_protocol=h1 works correctly with dynamic tenant routing")
+}
+
+// testDynamicBackendProtocolOverride verifies that the external RL service can
+// set backend_protocol per-request. The mock returns backend_protocol="h1" for
+// tenant-proto-h1 and the request should succeed (the testbackend speaks h1).
+func testDynamicBackendProtocolOverride(base string) testResult {
+	headers := map[string]string{"X-Tenant-Id": "tenant-proto-h1"}
+	resp, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail("dyn-proto-override", "request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fail("dyn-proto-override", "expected 200, got %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("X-Backend"); got != "testbackend" {
+		return fail("dyn-proto-override", "expected X-Backend: testbackend, got %q", got)
+	}
+
+	return pass("dyn-proto-override", "per-request backend_protocol=h1 from external RL works correctly")
 }
 
 func truncate(s string, maxLen int) string {

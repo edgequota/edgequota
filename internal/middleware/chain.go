@@ -625,6 +625,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	r = c.injectBackendURL(r, extLimits)
+	r = c.injectBackendProtocol(r, extLimits)
 
 	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
 		return
@@ -668,6 +669,24 @@ func (c *Chain) injectBackendURL(r *http.Request, extLimits *ratelimit.ExternalL
 		return r
 	}
 	return proxy.WithBackendURL(r, backendURL)
+}
+
+// injectBackendProtocol sets a per-request backend protocol in the request
+// context when the external rate-limit service returns one. Invalid values
+// are logged and ignored (the static config default is used instead).
+func (c *Chain) injectBackendProtocol(r *http.Request, extLimits *ratelimit.ExternalLimits) *http.Request {
+	if extLimits == nil || extLimits.BackendProtocol == "" {
+		return r
+	}
+	proto := extLimits.BackendProtocol
+	switch proto {
+	case config.BackendProtocolH1, config.BackendProtocolH2, config.BackendProtocolH3:
+		return proxy.WithBackendProtocol(r, proto)
+	default:
+		c.logger.Warn("invalid backend_protocol from external service, using default",
+			"backend_protocol", proto)
+		return r
+	}
 }
 
 // checkAuth verifies the request with the external auth service.

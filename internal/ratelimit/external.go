@@ -60,6 +60,11 @@ type ExternalLimits struct {
 	// the default backend. This enables per-tenant backend routing.
 	BackendURL string `json:"backend_url,omitempty"`
 
+	// BackendProtocol overrides the static backend.transport.backend_protocol
+	// for this request. Values: "h1", "h2", "h3". Empty means no override
+	// (use the static config). gRPC traffic always uses h2 regardless.
+	BackendProtocol string `json:"backend_protocol,omitempty"`
+
 	// RequestTimeout overrides the global server.request_timeout for this
 	// request. Duration string (e.g. "10s", "30s"). Empty means no override.
 	RequestTimeout string `json:"request_timeout,omitempty"`
@@ -681,15 +686,16 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 	}
 
 	limits := &ExternalLimits{
-		Average:        pbResp.GetAverage(),
-		Burst:          pbResp.GetBurst(),
-		Period:         pbResp.GetPeriod(),
-		CacheNoStore:   pbResp.GetCacheNoStore(),
-		TenantKey:      pbResp.GetTenantKey(),
-		FailurePolicy:  failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
-		FailureCode:    int(pbResp.GetFailureCode()),
-		BackendURL:     pbResp.GetBackendUrl(),
-		RequestTimeout: pbResp.GetRequestTimeout(),
+		Average:         pbResp.GetAverage(),
+		Burst:           pbResp.GetBurst(),
+		Period:          pbResp.GetPeriod(),
+		CacheNoStore:    pbResp.GetCacheNoStore(),
+		TenantKey:       pbResp.GetTenantKey(),
+		FailurePolicy:   failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
+		FailureCode:     int(pbResp.GetFailureCode()),
+		BackendURL:      pbResp.GetBackendUrl(),
+		BackendProtocol: pbResp.GetBackendProtocol(),
+		RequestTimeout:  pbResp.GetRequestTimeout(),
 	}
 
 	if pbResp.CacheMaxAgeSeconds != nil {

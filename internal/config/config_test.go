@@ -996,3 +996,22 @@ func TestAccessLogEnabled(t *testing.T) {
 		assert.False(t, l.AccessLogEnabled())
 	})
 }
+
+func TestBackendProtocol(t *testing.T) {
+	t.Run("valid values pass validation", func(t *testing.T) {
+		for _, v := range []string{"", "auto", "h1", "h2", "h3"} {
+			tc := TransportConfig{BackendProtocol: v}
+			assert.NoError(t, tc.ValidateBackendProtocol(), "value: %q", v)
+		}
+	})
+
+	t.Run("invalid value rejected", func(t *testing.T) {
+		tc := TransportConfig{BackendProtocol: "h4"}
+		assert.Error(t, tc.ValidateBackendProtocol())
+	})
+
+	t.Run("resolved normalizes empty to auto", func(t *testing.T) {
+		assert.Equal(t, "auto", TransportConfig{}.ResolvedBackendProtocol())
+		assert.Equal(t, "h2", TransportConfig{BackendProtocol: "h2"}.ResolvedBackendProtocol())
+	})
+}

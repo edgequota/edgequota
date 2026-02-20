@@ -54,6 +54,24 @@ backend:
 
   # Low-level HTTP transport tuning. All values have sensible defaults.
   transport:
+    # Backend protocol for non-gRPC traffic. gRPC always uses HTTP/2.
+    #   "auto" (default) — probe the backend via TLS ALPN at startup:
+    #       cleartext (http://) -> h1
+    #       HTTPS with h2 ALPN  -> h2
+    #       HTTPS without h2    -> h1
+    #     When no static backend_url is set (dynamic backends from ext RL),
+    #     "auto" defaults to h1 since the target varies per-request and
+    #     can't be probed at startup.
+    #   "h1"  — force HTTP/1.1
+    #   "h2"  — force HTTP/2 (h2c for http://, h2 over TLS for https://)
+    #   "h3"  — force HTTP/3 (QUIC); requires an https:// backend
+    #
+    # This value can be overridden per-request by the external rate-limit
+    # service. When the GetLimitsResponse includes a non-empty
+    # "backend_protocol" field ("h1", "h2", or "h3"), it takes precedence
+    # over this static setting for that request only. gRPC traffic always
+    # uses h2 regardless.
+    backend_protocol: "auto"
     dial_timeout: "30s"             # TCP dial timeout for backend connections
     dial_keep_alive: "30s"          # TCP keep-alive interval
     tls_handshake_timeout: "10s"    # TLS handshake timeout

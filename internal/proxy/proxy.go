@@ -57,6 +57,26 @@ func backendURLFromContext(ctx context.Context) *url.URL {
 	return u
 }
 
+// backendProtocolKey is the context key for per-request backend protocol overrides.
+type backendProtocolKey struct{}
+
+// BackendProtocolContextKey is used by the middleware chain to inject a
+// per-request backend protocol. The proxy's transport reads this value,
+// falling back to the startup-resolved default when absent.
+var BackendProtocolContextKey = backendProtocolKey{}
+
+// WithBackendProtocol returns a copy of r with the backend protocol set in its
+// context. Valid values: "h1", "h2", "h3". Empty string means no override.
+func WithBackendProtocol(r *http.Request, proto string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), BackendProtocolContextKey, proto))
+}
+
+// backendProtocolFromContext returns the per-request backend protocol override, or "".
+func backendProtocolFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(BackendProtocolContextKey).(string)
+	return s
+}
+
 // Option configures optional proxy behavior.
 type Option func(*Proxy)
 
@@ -267,6 +287,10 @@ func New(
 		schemeHint = target.Scheme
 	}
 
+	if err := transportCfg.ValidateBackendProtocol(); err != nil {
+		return nil, err
+	}
+
 	httpTransport, h2Transport, h3Transport := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure, p.denyPrivateNetworks)
 	wsDialTimeout, _ := config.ParseDuration(transportCfg.WebSocketDialTimeout, 10*time.Second)
 
@@ -283,13 +307,105 @@ func New(
 			h3RT = &streamingTransport{inner: h3Transport, maxBytes: p.maxRequestBodySize}
 		}
 	}
-	rp := buildReverseProxy(target, h1RT, h2RT, h3RT, logger)
+
+	defaultRT, protoMode := resolveBackendTransportMode(transportCfg, schemeHint, target, h1RT, h2RT, h3RT, p.backendTLSInsecure, logger)
+	rp := buildReverseProxy(target, defaultRT, h1RT, h2RT, h3RT, protoMode, logger)
 
 	p.httpProxy = rp
 	p.http2Transport = h2Transport
 	p.wsDialTimeout = wsDialTimeout
 
 	return p, nil
+}
+
+// resolveBackendTransportMode determines the initial default transport and
+// whether the protocolAwareTransport should do per-request auto-detection.
+// When the backend is dynamic (no static URL) and mode is "auto", we can't
+// probe at startup — the transport must decide per-request.
+func resolveBackendTransportMode(
+	cfg config.TransportConfig,
+	scheme string,
+	target *url.URL,
+	h1, h2, h3 http.RoundTripper,
+	tlsInsecure bool,
+	logger *slog.Logger,
+) (defaultRT http.RoundTripper, mode string) {
+	proto := cfg.ResolvedBackendProtocol()
+
+	switch proto {
+	case config.BackendProtocolH1:
+		logger.Info("backend transport: forced h1", "backend_protocol", proto)
+		return h1, proto
+	case config.BackendProtocolH2:
+		logger.Info("backend transport: forced h2", "backend_protocol", proto)
+		return h2, proto
+	case config.BackendProtocolH3:
+		if h3 == nil {
+			logger.Warn("backend_protocol=h3 requires an https:// backend, falling back to h1",
+				"backend_protocol", proto, "scheme", scheme)
+			return h1, config.BackendProtocolH1
+		}
+		logger.Info("backend transport: forced h3", "backend_protocol", proto)
+		return h3, proto
+	default: // "auto"
+		if target == nil {
+			logger.Info("backend transport: auto (dynamic backends — per-request protocol selection)")
+			return h1, config.BackendProtocolAuto
+		}
+		probed := probeBackendProtocol(scheme, target, h1, h2, tlsInsecure, logger)
+		if probed == h2 {
+			return h2, config.BackendProtocolAuto
+		}
+		return h1, config.BackendProtocolAuto
+	}
+}
+
+// probeBackendProtocol performs a TLS ALPN handshake to an HTTPS backend to
+// discover whether it supports HTTP/2. Cleartext backends default to HTTP/1.1.
+func probeBackendProtocol(
+	scheme string,
+	target *url.URL,
+	h1, h2 http.RoundTripper,
+	tlsInsecure bool,
+	logger *slog.Logger,
+) http.RoundTripper {
+	if scheme == "http" || scheme == "ws" {
+		logger.Info("backend transport: h1 (auto — cleartext backend)", "backend_url", target.String())
+		return h1
+	}
+
+	addr := target.Host
+	if !strings.Contains(addr, ":") {
+		addr += ":443"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := (&tls.Dialer{
+		Config: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			NextProtos:         []string{"h2", "http/1.1"},
+			InsecureSkipVerify: tlsInsecure, //nolint:gosec // Matches the proxy's own TLS config.
+		},
+	}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		logger.Warn("backend ALPN probe failed, defaulting to h1",
+			"error", err, "backend_addr", addr)
+		return h1
+	}
+	defer func() { _ = conn.Close() }()
+
+	negotiated := conn.(*tls.Conn).ConnectionState().NegotiatedProtocol
+	if negotiated == "h2" {
+		logger.Info("backend transport: h2 (auto — ALPN negotiated h2)",
+			"backend_addr", addr)
+		return h2
+	}
+
+	logger.Info("backend transport: h1 (auto — backend negotiated "+negotiated+")",
+		"backend_addr", addr)
+	return h1
 }
 
 func buildTransports(
@@ -383,9 +499,6 @@ func buildTransports(
 		PingTimeout:     h2PingTimeout,
 	}
 
-	// HTTP/3 transport — only created when the backend is HTTPS, since
-	// QUIC requires TLS by design. When the backend is cleartext, h3 is
-	// nil and HTTP/3 requests fall back to HTTP/2.
 	var h3 http.RoundTripper
 	if !backendIsCleartext {
 		h3 = &http3.Transport{
@@ -430,7 +543,7 @@ func setForwardedFor(req *http.Request) {
 	}
 }
 
-func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *slog.Logger) *httputil.ReverseProxy {
+func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTripper, protoMode string, logger *slog.Logger) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			// Use per-request backend URL from context if available,
@@ -453,10 +566,12 @@ func buildReverseProxy(target *url.URL, h1, h2, h3 http.RoundTripper, logger *sl
 			setForwardingHeaders(req)
 		},
 		Transport: &protocolAwareTransport{
-			http1:  h1,
-			http2:  h2,
-			http3:  h3,
-			logger: logger,
+			defaultRT: defaultRT,
+			h1:        h1RT,
+			h2:        h2RT,
+			h3:        h3RT,
+			mode:      protoMode,
+			logger:    logger,
 		},
 		FlushInterval: -1, // Flush immediately for SSE and streaming.
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
@@ -710,30 +825,58 @@ func IsSSE(r *http.Request) bool {
 // Protocol-aware transport
 // ---------------------------------------------------------------------------
 
-// protocolAwareTransport selects the outbound transport based on the incoming
-// request's protocol version, preserving the protocol end-to-end:
+// protocolAwareTransport selects the outbound backend transport:
 //
-//   - HTTP/3 (QUIC) requests use the HTTP/3 transport (when available)
-//   - HTTP/2 (gRPC, h2c, TLS) requests use the HTTP/2 transport
-//   - HTTP/1.1 requests use the pooled HTTP/1.1 transport
+//   - gRPC always uses h2 (required for trailers/streaming)
+//   - All other traffic uses defaultRT, resolved at startup:
+//   - Explicit mode (h1/h2/h3): the forced transport
+//   - Auto + static backend: ALPN-probed result
+//   - Auto + dynamic backends (no static URL): h1 (safe default)
 //
-// When an HTTP/3 transport is not available (e.g. cleartext backends that
-// don't support QUIC), HTTP/3 requests fall back to the HTTP/2 transport.
+// All transports (h1/h2/h3) are retained for gRPC's h2 requirement and
+// per-request protocol overrides via the external rate-limit service.
+// The client's incoming protocol is decoupled from the backend protocol.
 type protocolAwareTransport struct {
-	http1  http.RoundTripper
-	http2  http.RoundTripper
-	http3  http.RoundTripper // nil when backend doesn't support QUIC
-	logger *slog.Logger
+	defaultRT http.RoundTripper // pre-resolved for static backends or explicit mode
+	h1        http.RoundTripper
+	h2        http.RoundTripper
+	h3        http.RoundTripper // nil when backend is cleartext
+	mode      string            // "auto", "h1", "h2", "h3"
+	logger    *slog.Logger
 }
 
 func (t *protocolAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.ProtoMajor >= 3 && t.http3 != nil {
-		return t.http3.RoundTrip(req)
+	if isGRPC(req) {
+		return t.h2.RoundTrip(req)
 	}
-	if req.ProtoMajor >= 2 {
-		return t.http2.RoundTrip(req)
+	if proto := backendProtocolFromContext(req.Context()); proto != "" {
+		return t.roundTripForProtocol(proto, req)
 	}
-	return t.http1.RoundTrip(req)
+	if t.mode == config.BackendProtocolAuto && req.ProtoMajor == 2 {
+		return t.h2.RoundTrip(req)
+	}
+	return t.defaultRT.RoundTrip(req)
+}
+
+// roundTripForProtocol selects the transport for a per-request protocol
+// override from the external rate-limit service. Falls back to defaultRT
+// for unknown values or when the requested transport is unavailable.
+func (t *protocolAwareTransport) roundTripForProtocol(proto string, req *http.Request) (*http.Response, error) {
+	switch proto {
+	case config.BackendProtocolH2:
+		return t.h2.RoundTrip(req)
+	case config.BackendProtocolH3:
+		if t.h3 != nil {
+			return t.h3.RoundTrip(req)
+		}
+		t.logger.Warn("per-request backend_protocol=h3 requested but no h3 transport available, falling back to default",
+			"path", req.URL.Path)
+		return t.defaultRT.RoundTrip(req)
+	case config.BackendProtocolH1:
+		return t.h1.RoundTrip(req)
+	default:
+		return t.defaultRT.RoundTrip(req)
+	}
 }
 
 // ---------------------------------------------------------------------------

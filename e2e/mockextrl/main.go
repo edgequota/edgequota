@@ -4,9 +4,10 @@
 //
 // Routing logic:
 //
-//   - Key "tenant-a" → backend_url = BACKEND_A_URL env var
-//   - Key "tenant-b" → backend_url = BACKEND_B_URL env var
-//   - Any other key  → no backend_url (use EdgeQuota's default)
+//   - Key "tenant-a"        → backend_url = BACKEND_A_URL env var
+//   - Key "tenant-b"        → backend_url = BACKEND_B_URL env var
+//   - Key "tenant-proto-h1" → backend_url = BACKEND_B_URL, backend_protocol = "h1"
+//   - Any other key         → no backend_url (use EdgeQuota's default)
 package main
 
 import (
@@ -24,10 +25,11 @@ type limitsRequest struct {
 }
 
 type limitsResponse struct {
-	Average    int64  `json:"average"`
-	Burst      int64  `json:"burst"`
-	Period     string `json:"period"`
-	BackendURL string `json:"backend_url,omitempty"`
+	Average         int64  `json:"average"`
+	Burst           int64  `json:"burst"`
+	Period          string `json:"period"`
+	BackendURL      string `json:"backend_url,omitempty"`
+	BackendProtocol string `json:"backend_protocol,omitempty"`
 }
 
 func main() {
@@ -65,6 +67,9 @@ func main() {
 			resp.BackendURL = backendA
 		case "tenant-b":
 			resp.BackendURL = backendB
+		case "tenant-proto-h1":
+			resp.BackendURL = backendB
+			resp.BackendProtocol = "h1"
 		}
 
 		w.Header().Set("Content-Type", "application/json")

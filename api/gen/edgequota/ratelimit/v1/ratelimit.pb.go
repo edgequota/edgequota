@@ -208,6 +208,11 @@ type GetLimitsResponse struct {
 	// When non-empty, overrides the global server.request_timeout for this
 	// request. This enables per-tenant timeout differentiation.
 	RequestTimeout *string `protobuf:"bytes,10,opt,name=request_timeout,json=requestTimeout,proto3,oneof" json:"request_timeout,omitempty"`
+	// Backend protocol override (optional). Controls the outbound protocol
+	// EdgeQuota uses to reach the backend for this request.
+	// Values: "" (use static config), "h1", "h2", "h3".
+	// gRPC traffic always uses h2 regardless of this setting.
+	BackendProtocol *string `protobuf:"bytes,11,opt,name=backend_protocol,json=backendProtocol,proto3,oneof" json:"backend_protocol,omitempty"`
 	// Cache duration in seconds. When present and > 0, overrides the default
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
 	CacheMaxAgeSeconds *int64 `protobuf:"varint,4,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
@@ -303,6 +308,13 @@ func (x *GetLimitsResponse) GetRequestTimeout() string {
 	return ""
 }
 
+func (x *GetLimitsResponse) GetBackendProtocol() string {
+	if x != nil && x.BackendProtocol != nil {
+		return *x.BackendProtocol
+	}
+	return ""
+}
+
 func (x *GetLimitsResponse) GetCacheMaxAgeSeconds() int64 {
 	if x != nil && x.CacheMaxAgeSeconds != nil {
 		return *x.CacheMaxAgeSeconds
@@ -329,7 +341,7 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc6\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x04\n" +
 	"\x11GetLimitsResponse\x12\x18\n" +
 	"\aaverage\x18\x01 \x01(\x03R\aaverage\x12\x14\n" +
 	"\x05burst\x18\x02 \x01(\x03R\x05burst\x12\x16\n" +
@@ -341,10 +353,12 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\vbackend_url\x18\t \x01(\tR\n" +
 	"backendUrl\x12,\n" +
 	"\x0frequest_timeout\x18\n" +
-	" \x01(\tH\x00R\x0erequestTimeout\x88\x01\x01\x126\n" +
-	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x01R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
+	" \x01(\tH\x00R\x0erequestTimeout\x88\x01\x01\x12.\n" +
+	"\x10backend_protocol\x18\v \x01(\tH\x01R\x0fbackendProtocol\x88\x01\x01\x126\n" +
+	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x02R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
 	"\x0ecache_no_store\x18\x05 \x01(\bR\fcacheNoStoreB\x12\n" +
-	"\x10_request_timeoutB\x18\n" +
+	"\x10_request_timeoutB\x13\n" +
+	"\x11_backend_protocolB\x18\n" +
 	"\x16_cache_max_age_seconds*\x96\x01\n" +
 	"\rFailurePolicy\x12\x1e\n" +
 	"\x1aFAILURE_POLICY_UNSPECIFIED\x10\x00\x12\x1e\n" +

@@ -259,6 +259,56 @@ func TestReloadCerts(t *testing.T) {
 	})
 }
 
+func TestBackendChanged(t *testing.T) {
+	base := func() *config.Config {
+		c := config.Defaults()
+		c.Backend.URL = "http://backend:8080"
+		return c
+	}
+
+	t.Run("detects backend_protocol change", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		new_.Backend.Transport.BackendProtocol = "h2"
+		assert.True(t, backendChanged(old, new_))
+	})
+
+	t.Run("no change when configs are identical", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		assert.False(t, backendChanged(old, new_))
+	})
+
+	t.Run("detects URL change", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		new_.Backend.URL = "https://other:443"
+		assert.True(t, backendChanged(old, new_))
+	})
+
+	t.Run("detects body size change", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		new_.Backend.MaxRequestBodySize = 999
+		assert.True(t, backendChanged(old, new_))
+	})
+
+	t.Run("detects nested transport timeout change", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		new_.Backend.Transport.DialTimeout = "5s"
+		assert.True(t, backendChanged(old, new_))
+	})
+
+	t.Run("detects url_policy change", func(t *testing.T) {
+		old := base()
+		new_ := base()
+		deny := false
+		new_.Backend.URLPolicy.DenyPrivateNetworks = &deny
+		assert.True(t, backendChanged(old, new_))
+	})
+}
+
 // generateSelfSignedCert creates a minimal self-signed cert+key for testing.
 func generateSelfSignedCert(certFile, keyFile string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

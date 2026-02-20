@@ -103,6 +103,12 @@ message GetLimitsResponse {
   // request. This enables per-tenant timeout differentiation.
   optional string request_timeout = 10;
 
+  // Backend protocol override (optional). Controls the outbound protocol
+  // EdgeQuota uses to reach the backend for this request.
+  // Values: "" (use static config), "h1", "h2", "h3".
+  // gRPC traffic always uses h2 regardless of this setting.
+  optional string backend_protocol = 11;
+
   // Cache control (optional). When omitted, the configured default TTL is used.
 
   // Cache duration in seconds. When present and > 0, overrides the default

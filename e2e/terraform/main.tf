@@ -814,6 +814,8 @@ module "eq_dynamic_backend" {
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
+      transport:
+        backend_protocol: "h1"
       url_policy:
         deny_private_networks: false
     rate_limit:

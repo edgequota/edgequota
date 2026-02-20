@@ -262,8 +262,23 @@ func (p BackendURLPolicy) DenyPrivateNetworksEnabled() bool {
 	return *p.DenyPrivateNetworks
 }
 
+// BackendProtocol constants for TransportConfig.BackendProtocol.
+const (
+	BackendProtocolAuto = "auto"
+	BackendProtocolH1   = "h1"
+	BackendProtocolH2   = "h2"
+	BackendProtocolH3   = "h3"
+)
+
 // TransportConfig holds low-level HTTP transport tuning for the proxy.
 type TransportConfig struct {
+	// BackendProtocol selects the outbound protocol to the backend:
+	//   "" / "auto" — probe the backend at startup and pick the best (default)
+	//   "h1"        — force HTTP/1.1
+	//   "h2"        — force HTTP/2
+	//   "h3"        — force HTTP/3 (QUIC); requires an HTTPS backend
+	// gRPC traffic always uses HTTP/2 regardless of this setting.
+	BackendProtocol       string `yaml:"backend_protocol"        env:"BACKEND_PROTOCOL"`
 	DialTimeout           string `yaml:"dial_timeout"            env:"DIAL_TIMEOUT"`
 	DialKeepAlive         string `yaml:"dial_keep_alive"         env:"DIAL_KEEP_ALIVE"`
 	TLSHandshakeTimeout   string `yaml:"tls_handshake_timeout"   env:"TLS_HANDSHAKE_TIMEOUT"`
@@ -271,6 +286,26 @@ type TransportConfig struct {
 	H2ReadIdleTimeout     string `yaml:"h2_read_idle_timeout"    env:"H2_READ_IDLE_TIMEOUT"`
 	H2PingTimeout         string `yaml:"h2_ping_timeout"         env:"H2_PING_TIMEOUT"`
 	WebSocketDialTimeout  string `yaml:"websocket_dial_timeout"  env:"WEBSOCKET_DIAL_TIMEOUT"`
+}
+
+// ValidateBackendProtocol returns an error if BackendProtocol is not a
+// recognized value.
+func (c TransportConfig) ValidateBackendProtocol() error {
+	switch c.BackendProtocol {
+	case "", BackendProtocolAuto, BackendProtocolH1, BackendProtocolH2, BackendProtocolH3:
+		return nil
+	default:
+		return fmt.Errorf("invalid backend_protocol %q: must be auto, h1, h2, or h3", c.BackendProtocol)
+	}
+}
+
+// ResolvedBackendProtocol returns the canonical protocol string, normalizing
+// empty to "auto".
+func (c TransportConfig) ResolvedBackendProtocol() string {
+	if c.BackendProtocol == "" {
+		return BackendProtocolAuto
+	}
+	return c.BackendProtocol
 }
 
 // HeaderFilterConfig controls which request headers are forwarded to external

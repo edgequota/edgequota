@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -526,12 +527,7 @@ func (s *Server) Reload(newCfg *config.Config) error {
 }
 
 func backendChanged(old, new_ *config.Config) bool {
-	return old.Backend.URL != new_.Backend.URL ||
-		old.Backend.Timeout != new_.Backend.Timeout ||
-		old.Backend.MaxIdleConns != new_.Backend.MaxIdleConns ||
-		old.Backend.IdleConnTimeout != new_.Backend.IdleConnTimeout ||
-		old.Backend.TLSInsecureVerify != new_.Backend.TLSInsecureVerify ||
-		old.Backend.MaxRequestBodySize != new_.Backend.MaxRequestBodySize
+	return !reflect.DeepEqual(old.Backend, new_.Backend)
 }
 
 // ReloadCerts hot-swaps TLS certificates from the given files without

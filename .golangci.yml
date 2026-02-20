@@ -62,6 +62,13 @@ linters:
       rules:
         - name: context-as-argument
           disabled: true
+    gosec:
+      excludes:
+        # G704: SSRF taint analysis — false positive for a reverse proxy.
+        # All dynamic URLs are validated through BackendURLPolicy (scheme,
+        # host allowlist, private network blocking) and the SafeDialer
+        # re-validates IPs at connect time to prevent DNS rebinding.
+        - G704
     errcheck:
       exclude-functions:
         - (io.Closer).Close
