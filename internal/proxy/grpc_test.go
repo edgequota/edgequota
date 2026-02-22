@@ -460,6 +460,7 @@ func TestProtocolAwareTransport(t *testing.T) {
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Custom", "test-value")
 			w.Header().Set("X-Request-Id", "abc123")
+			w.Header().Set("Alt-Svc", `h3=":443"; ma=2592000`)
 			w.WriteHeader(http.StatusOK)
 		}))
 		defer backend.Close()
@@ -474,7 +475,8 @@ func TestProtocolAwareTransport(t *testing.T) {
 		p.ServeHTTP(rr, req)
 
 		assert.Equal(t, "test-value", rr.Header().Get("X-Custom"))
-		assert.Equal(t, "abc123", rr.Header().Get("X-Request-Id"))
+		assert.Empty(t, rr.Header().Get("X-Request-Id"), "X-Request-Id from backend must be stripped (middleware owns it)")
+		assert.Empty(t, rr.Header().Get("Alt-Svc"), "Alt-Svc from backend must be stripped (server layer owns it)")
 	})
 
 	t.Run("passes query parameters to backend", func(t *testing.T) {
