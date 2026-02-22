@@ -229,7 +229,8 @@ const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012Y\n" +
 	"\vAuthService\x12J\n" +
-	"\x05Check\x12\x1f.edgequota.auth.v1.CheckRequest\x1a .edgequota.auth.v1.CheckResponseBAZ?github.com/edgequota/edgequota/api/gen/edgequota/auth/v1;authv1b\x06proto3"
+	"\x05Check\x12\x1f.edgequota.auth.v1.CheckRequest\x1a .edgequota.auth.v1.CheckResponseB\xce\x01\n" +
+	"\x15com.edgequota.auth.v1B\tAuthProtoP\x01ZDgithub.com/edgequota/edgequota/api/gen/grpc/edgequota/auth/v1;authv1\xa2\x02\x03EAX\xaa\x02\x11Edgequota.Auth.V1\xca\x02\x11Edgequota\\Auth\\V1\xe2\x02\x1dEdgequota\\Auth\\V1\\GPBMetadata\xea\x02\x13Edgequota::Auth::V1b\x06proto3"
 
 var (
 	file_edgequota_auth_v1_auth_proto_rawDescOnce sync.Once

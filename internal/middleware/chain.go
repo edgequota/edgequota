@@ -50,7 +50,7 @@ var requestIDRng = func() *rand.Rand {
 	if _, err := cryptorand.Read(seed[:]); err != nil {
 		panic("failed to seed ChaCha8: " + err.Error())
 	}
-	return rand.New(rand.NewChaCha8(seed))
+	return rand.New(rand.NewChaCha8(seed)) //nolint:gosec // ChaCha8 seeded from crypto/rand is cryptographically strong.
 }()
 
 // generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
@@ -91,19 +91,19 @@ func validRequestID(s string) bool {
 var injectionDenyHeaders = map[string]struct{}{
 	"Host":                {},
 	"Content-Length":      {},
-	"Transfer-Encoding":  {},
-	"Connection":         {},
-	"Te":                 {},
-	"Upgrade":            {},
+	"Transfer-Encoding":   {},
+	"Connection":          {},
+	"Te":                  {},
+	"Upgrade":             {},
 	"Proxy-Authorization": {},
-	"Proxy-Connection":   {},
-	"Keep-Alive":         {},
-	"Trailer":            {},
-	"X-Forwarded-For":    {},
-	"X-Forwarded-Host":   {},
-	"X-Forwarded-Proto":  {},
-	"X-Real-Ip":          {},
-	"X-Request-Id":       {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Trailer":             {},
+	"X-Forwarded-For":     {},
+	"X-Forwarded-Host":    {},
+	"X-Forwarded-Proto":   {},
+	"X-Real-Ip":           {},
+	"X-Request-Id":        {},
 }
 
 // jsonErrorResponse is the structured error body returned by EdgeQuota.
@@ -208,7 +208,7 @@ type Chain struct {
 
 	allowedInjectionHeaders map[string]struct{}
 
-	ctx context.Context
+	ctx          context.Context
 	cancel       context.CancelFunc
 	reconnectMu  sync.Mutex
 	reconnecting bool
@@ -544,6 +544,113 @@ var statusWriterPool = sync.Pool{
 	New: func() any { return &statusWriter{} },
 }
 
+// emitAccessLog writes a structured access log entry if access logging is enabled.
+func (c *Chain) emitAccessLog(r *http.Request, sw *statusWriter, originalHost, reqID, rlKey, tenantID string, elapsed time.Duration) {
+	if !c.accessLog.Load() {
+		return
+	}
+	resolvedBackendURL := c.cfg.Load().Backend.URL
+	resolvedBackendProto := c.cfg.Load().Backend.Transport.ResolvedBackendProtocol()
+	if u := proxy.BackendURLFromContext(r.Context()); u != nil {
+		resolvedBackendURL = u.String()
+	}
+	if p := proxy.BackendProtocolFromContext(r.Context()); p != "" {
+		resolvedBackendProto = p
+	}
+	c.logger.Info("access",
+		"method", r.Method,
+		"host", originalHost,
+		"path", r.URL.Path,
+		"status", sw.code,
+		"duration_ms", elapsed.Milliseconds(),
+		"bytes", sw.bytesWritten,
+		"remote_addr", r.RemoteAddr,
+		"request_id", reqID,
+		"user_agent", r.UserAgent(),
+		"proto", r.Proto,
+		"backend_url", resolvedBackendURL,
+		"backend_proto", resolvedBackendProto,
+		"rl_key", rlKey,
+		"tenant_id", tenantID,
+	)
+}
+
+// fetchExternalLimitsWithSpan wraps fetchExternalLimits with an OTel span
+// when an external rate-limit service is configured.
+func (c *Chain) fetchExternalLimitsWithSpan(r *http.Request, key string) (*ratelimit.ExternalLimits, string) {
+	if c.externalRL.Load() != nil {
+		_, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
+		extStart := time.Now()
+		limits, resolved := c.fetchExternalLimits(r, key)
+		c.metrics.PromExternalRLDuration.Observe(time.Since(extStart).Seconds())
+		extSpan.End()
+		return limits, resolved
+	}
+	return c.fetchExternalLimits(r, key)
+}
+
+// acquireConcurrency attempts to acquire the concurrency semaphore. Returns
+// true if the request may proceed, false if the server is at capacity (503
+// already written to sw).
+func (c *Chain) acquireConcurrency(sw *statusWriter) bool {
+	if c.concurrencySem == nil || c.concurrencySem.TryAcquire(1) {
+		return true
+	}
+	c.metrics.PromConcurrencyRejected.Inc()
+	sw.code = http.StatusServiceUnavailable
+	writeJSONError(sw, http.StatusServiceUnavailable, "overloaded", "server at capacity", 0)
+	return false
+}
+
+// extractTenantID returns the tenant portion of a resolved rate-limit key
+// that uses the "t:<tenant>" convention.
+func extractTenantID(resolvedKey string) string {
+	if len(resolvedKey) > 2 && resolvedKey[:2] == "t:" {
+		return resolvedKey[2:]
+	}
+	return ""
+}
+
+// externalLimitsFailClosed checks whether the external rate-limit service
+// returned a fail-closed signal (Average < 0) and writes the error response.
+func (c *Chain) externalLimitsFailClosed(sw *statusWriter, extLimits *ratelimit.ExternalLimits) bool {
+	if extLimits == nil || extLimits.Average >= 0 {
+		return false
+	}
+	code := c.failureCode
+	if code == 0 {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSONError(sw, code, "rate_limited", "service unavailable (external RL fail-closed)", 0)
+	return true
+}
+
+// runAuth executes the auth check with tracing if an auth client is
+// configured. Returns false if the request was denied (response already
+// written).
+func (c *Chain) runAuth(sw *statusWriter, r *http.Request) bool {
+	ac := c.authClient.Load()
+	if ac == nil {
+		return true
+	}
+	_, authSpan := tracer.Start(r.Context(), "edgequota.auth")
+	authStart := time.Now()
+	allowed := c.checkAuth(sw, r, ac)
+	c.metrics.PromAuthDuration.Observe(time.Since(authStart).Seconds())
+	authSpan.End()
+	return allowed
+}
+
+// ensureRequestID validates or generates an X-Request-Id for the request.
+func ensureRequestID(r *http.Request) string {
+	reqID := r.Header.Get(requestIDHeader)
+	if !validRequestID(reqID) {
+		reqID = generateRequestID()
+		r.Header.Set(requestIDHeader, reqID)
+	}
+	return reqID
+}
+
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -553,22 +660,13 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw.written = false
 	sw.bytesWritten = 0
 
-	// Propagate or generate X-Request-Id for request correlation.
-	// Validate client-supplied IDs to prevent CRLF injection and log pollution.
-	reqID := r.Header.Get(requestIDHeader)
-	if !validRequestID(reqID) {
-		reqID = generateRequestID()
-		r.Header.Set(requestIDHeader, reqID)
-	}
+	reqID := ensureRequestID(r)
 	sw.Header().Set(requestIDHeader, reqID)
 
 	originalHost := r.Host
 	var logRLKey, logTenantID string
 
-	if c.concurrencySem != nil && !c.concurrencySem.TryAcquire(1) {
-		c.metrics.PromConcurrencyRejected.Inc()
-		sw.code = http.StatusServiceUnavailable
-		writeJSONError(sw, http.StatusServiceUnavailable, "overloaded", "server at capacity", 0)
+	if !c.acquireConcurrency(sw) {
 		sw.ResponseWriter = nil
 		statusWriterPool.Put(sw)
 		return
@@ -583,45 +681,13 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Method,
 			strconv.Itoa(sw.code),
 		).Observe(elapsed.Seconds())
-		if c.accessLog.Load() {
-			resolvedBackendURL := c.cfg.Load().Backend.URL
-			resolvedBackendProto := c.cfg.Load().Backend.Transport.ResolvedBackendProtocol()
-			if u := proxy.BackendURLFromContext(r.Context()); u != nil {
-				resolvedBackendURL = u.String()
-			}
-			if p := proxy.BackendProtocolFromContext(r.Context()); p != "" {
-				resolvedBackendProto = p
-			}
-			c.logger.Info("access",
-				"method", r.Method,
-				"host", originalHost,
-				"path", r.URL.Path,
-				"status", sw.code,
-				"duration_ms", elapsed.Milliseconds(),
-				"bytes", sw.bytesWritten,
-				"remote_addr", r.RemoteAddr,
-				"request_id", reqID,
-				"user_agent", r.UserAgent(),
-				"proto", r.Proto,
-				"backend_url", resolvedBackendURL,
-				"backend_proto", resolvedBackendProto,
-				"rl_key", logRLKey,
-				"tenant_id", logTenantID,
-			)
-		}
-		sw.ResponseWriter = nil // prevent dangling reference
+		c.emitAccessLog(r, sw, originalHost, reqID, logRLKey, logTenantID, elapsed)
+		sw.ResponseWriter = nil
 		statusWriterPool.Put(sw)
 	}()
 
-	if ac := c.authClient.Load(); ac != nil {
-		_, authSpan := tracer.Start(r.Context(), "edgequota.auth")
-		authStart := time.Now()
-		allowed := c.checkAuth(sw, r, ac)
-		c.metrics.PromAuthDuration.Observe(time.Since(authStart).Seconds())
-		authSpan.End()
-		if !allowed {
-			return
-		}
+	if !c.runAuth(sw, r) {
+		return
 	}
 
 	if c.average == 0 && c.externalRL.Load() == nil {
@@ -640,27 +706,13 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store the rate-limit key in context for downstream handlers (e.g.
-	// the per-key WebSocket connection limiter in the proxy).
 	ctx := context.WithValue(r.Context(), ratelimit.KeyContextKey, key)
 	r = r.WithContext(ctx)
 
-	var extLimits *ratelimit.ExternalLimits
-	var resolvedKey string
-	if c.externalRL.Load() != nil {
-		_, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
-		extStart := time.Now()
-		extLimits, resolvedKey = c.fetchExternalLimits(r, key)
-		c.metrics.PromExternalRLDuration.Observe(time.Since(extStart).Seconds())
-		extSpan.End()
-	} else {
-		extLimits, resolvedKey = c.fetchExternalLimits(r, key)
-	}
+	extLimits, resolvedKey := c.fetchExternalLimitsWithSpan(r, key)
 
 	logRLKey = resolvedKey
-	if len(resolvedKey) > 2 && resolvedKey[:2] == "t:" {
-		logTenantID = resolvedKey[2:]
-	}
+	logTenantID = extractTenantID(resolvedKey)
 
 	ctx, cancel := c.applyRequestTimeout(ctx, extLimits)
 	if cancel != nil {
@@ -671,12 +723,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = c.injectBackendURL(r, extLimits)
 	r = c.injectBackendProtocol(r, extLimits)
 
-	if extLimits != nil && extLimits.Average < 0 {
-		code := c.failureCode
-		if code == 0 {
-			code = http.StatusServiceUnavailable
-		}
-		writeJSONError(sw, code, "rate_limited", "service unavailable (external RL fail-closed)", 0)
+	if c.externalLimitsFailClosed(sw, extLimits) {
 		return
 	}
 
@@ -1161,7 +1208,7 @@ func (c *Chain) startRecoveryIfNeeded() {
 func (c *Chain) recoveryLoop() {
 	backoff := c.recoveryBackoffBase
 	attempt := 0
-	maxAttempts := c.cfg.Load().RateLimit.MaxRecoveryAttempts
+	maxAttempts := c.cfg.Load().RateLimit.MaxRecoveryAttempts //nolint:staticcheck // Intentionally reading deprecated field for backward compatibility.
 
 	if maxAttempts > 0 {
 		c.logger.Warn("max_recovery_attempts is deprecated and will be removed; "+

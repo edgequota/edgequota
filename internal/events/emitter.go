@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	eventsv1http "github.com/edgequota/edgequota/api/gen/http/events/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
 )
@@ -225,9 +226,11 @@ func (e *Emitter) send(batch []UsageEvent) {
 }
 
 func (e *Emitter) sendHTTP(batch []UsageEvent) {
-	payload := struct {
-		Events []UsageEvent `json:"events"`
-	}{Events: batch}
+	wireEvents := make([]eventsv1http.UsageEvent, len(batch))
+	for i, ev := range batch {
+		wireEvents[i] = usageEventToHTTP(ev)
+	}
+	payload := eventsv1http.PublishEventsRequest{Events: wireEvents}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -293,4 +296,29 @@ func (e *Emitter) trySendHTTP(body []byte, count int) bool {
 func (e *Emitter) String() string {
 	return fmt.Sprintf("Emitter(http=%s, batch=%d, flush=%s, buf=%d)",
 		e.httpURL, e.batchSize, e.flushInterval, e.bufferSize)
+}
+
+// usageEventToHTTP converts the internal UsageEvent to the generated OpenAPI
+// wire type, promoting value-typed optional fields to pointers where needed.
+func usageEventToHTTP(ev UsageEvent) eventsv1http.UsageEvent {
+	wire := eventsv1http.UsageEvent{
+		Key:        ev.Key,
+		Method:     ev.Method,
+		Path:       ev.Path,
+		Allowed:    ev.Allowed,
+		Remaining:  ev.Remaining,
+		Limit:      ev.Limit,
+		Timestamp:  ev.Timestamp,
+		StatusCode: int32(min(ev.StatusCode, 599)), //nolint:gosec // HTTP status codes are bounded [0, 599].
+	}
+	if ev.TenantKey != "" {
+		wire.TenantKey = &ev.TenantKey
+	}
+	if ev.RequestID != "" {
+		wire.RequestId = &ev.RequestID
+	}
+	if ev.Reason != "" {
+		wire.Reason = &ev.Reason
+	}
+	return wire
 }

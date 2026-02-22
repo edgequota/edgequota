@@ -274,7 +274,8 @@ const file_edgequota_events_v1_events_proto_rawDesc = "" +
 	"\x15PublishEventsResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\x03R\baccepted2v\n" +
 	"\fEventService\x12f\n" +
-	"\rPublishEvents\x12).edgequota.events.v1.PublishEventsRequest\x1a*.edgequota.events.v1.PublishEventsResponseBEZCgithub.com/edgequota/edgequota/api/gen/edgequota/events/v1;eventsv1b\x06proto3"
+	"\rPublishEvents\x12).edgequota.events.v1.PublishEventsRequest\x1a*.edgequota.events.v1.PublishEventsResponseB\xde\x01\n" +
+	"\x17com.edgequota.events.v1B\vEventsProtoP\x01ZHgithub.com/edgequota/edgequota/api/gen/grpc/edgequota/events/v1;eventsv1\xa2\x02\x03EEX\xaa\x02\x13Edgequota.Events.V1\xca\x02\x13Edgequota\\Events\\V1\xe2\x02\x1fEdgequota\\Events\\V1\\GPBMetadata\xea\x02\x15Edgequota::Events::V1b\x06proto3"
 
 var (
 	file_edgequota_events_v1_events_proto_rawDescOnce sync.Once

@@ -11,8 +11,6 @@ syntax = "proto3";
 
 package edgequota.events.v1;
 
-option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/events/v1;eventsv1";
-
 // EventService receives batches of usage events from EdgeQuota.
 service EventService {
   // PublishEvents sends a batch of usage events.

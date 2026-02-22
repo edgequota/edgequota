@@ -1,0 +1,4 @@
+package: eventsv1http
+output: api/gen/http/events/v1/events.gen.go
+generate:
+  models: true

@@ -92,6 +92,64 @@ func (FailurePolicy) EnumDescriptor() ([]byte, []int) {
 	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP(), []int{0}
 }
 
+// BackendProtocol selects the outbound protocol EdgeQuota uses to reach the
+// backend for a given request.
+type BackendProtocol int32
+
+const (
+	// Use the static backend_protocol from config.
+	BackendProtocol_BACKEND_PROTOCOL_UNSPECIFIED BackendProtocol = 0
+	// Force HTTP/1.1.
+	BackendProtocol_BACKEND_PROTOCOL_H1 BackendProtocol = 1
+	// Force HTTP/2.
+	BackendProtocol_BACKEND_PROTOCOL_H2 BackendProtocol = 2
+	// Force HTTP/3 (QUIC); requires an HTTPS backend.
+	BackendProtocol_BACKEND_PROTOCOL_H3 BackendProtocol = 3
+)
+
+// Enum value maps for BackendProtocol.
+var (
+	BackendProtocol_name = map[int32]string{
+		0: "BACKEND_PROTOCOL_UNSPECIFIED",
+		1: "BACKEND_PROTOCOL_H1",
+		2: "BACKEND_PROTOCOL_H2",
+		3: "BACKEND_PROTOCOL_H3",
+	}
+	BackendProtocol_value = map[string]int32{
+		"BACKEND_PROTOCOL_UNSPECIFIED": 0,
+		"BACKEND_PROTOCOL_H1":          1,
+		"BACKEND_PROTOCOL_H2":          2,
+		"BACKEND_PROTOCOL_H3":          3,
+	}
+)
+
+func (x BackendProtocol) Enum() *BackendProtocol {
+	p := new(BackendProtocol)
+	*p = x
+	return p
+}
+
+func (x BackendProtocol) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BackendProtocol) Descriptor() protoreflect.EnumDescriptor {
+	return file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes[1].Descriptor()
+}
+
+func (BackendProtocol) Type() protoreflect.EnumType {
+	return &file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes[1]
+}
+
+func (x BackendProtocol) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BackendProtocol.Descriptor instead.
+func (BackendProtocol) EnumDescriptor() ([]byte, []int) {
+	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP(), []int{1}
+}
+
 // GetLimitsRequest identifies the client and context for limit lookup.
 type GetLimitsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -210,9 +268,8 @@ type GetLimitsResponse struct {
 	RequestTimeout *string `protobuf:"bytes,10,opt,name=request_timeout,json=requestTimeout,proto3,oneof" json:"request_timeout,omitempty"`
 	// Backend protocol override (optional). Controls the outbound protocol
 	// EdgeQuota uses to reach the backend for this request.
-	// Values: "" (use static config), "h1", "h2", "h3".
 	// gRPC traffic always uses h2 regardless of this setting.
-	BackendProtocol *string `protobuf:"bytes,11,opt,name=backend_protocol,json=backendProtocol,proto3,oneof" json:"backend_protocol,omitempty"`
+	BackendProtocol BackendProtocol `protobuf:"varint,11,opt,name=backend_protocol,json=backendProtocol,proto3,enum=edgequota.ratelimit.v1.BackendProtocol" json:"backend_protocol,omitempty"`
 	// Cache duration in seconds. When present and > 0, overrides the default
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
 	CacheMaxAgeSeconds *int64 `protobuf:"varint,4,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
@@ -308,11 +365,11 @@ func (x *GetLimitsResponse) GetRequestTimeout() string {
 	return ""
 }
 
-func (x *GetLimitsResponse) GetBackendProtocol() string {
-	if x != nil && x.BackendProtocol != nil {
-		return *x.BackendProtocol
+func (x *GetLimitsResponse) GetBackendProtocol() BackendProtocol {
+	if x != nil {
+		return x.BackendProtocol
 	}
-	return ""
+	return BackendProtocol_BACKEND_PROTOCOL_UNSPECIFIED
 }
 
 func (x *GetLimitsResponse) GetCacheMaxAgeSeconds() int64 {
@@ -341,7 +398,7 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x04\n" +
 	"\x11GetLimitsResponse\x12\x18\n" +
 	"\aaverage\x18\x01 \x01(\x03R\aaverage\x12\x14\n" +
 	"\x05burst\x18\x02 \x01(\x03R\x05burst\x12\x16\n" +
@@ -353,20 +410,25 @@ const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\vbackend_url\x18\t \x01(\tR\n" +
 	"backendUrl\x12,\n" +
 	"\x0frequest_timeout\x18\n" +
-	" \x01(\tH\x00R\x0erequestTimeout\x88\x01\x01\x12.\n" +
-	"\x10backend_protocol\x18\v \x01(\tH\x01R\x0fbackendProtocol\x88\x01\x01\x126\n" +
-	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x02R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
+	" \x01(\tH\x00R\x0erequestTimeout\x88\x01\x01\x12R\n" +
+	"\x10backend_protocol\x18\v \x01(\x0e2'.edgequota.ratelimit.v1.BackendProtocolR\x0fbackendProtocol\x126\n" +
+	"\x15cache_max_age_seconds\x18\x04 \x01(\x03H\x01R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
 	"\x0ecache_no_store\x18\x05 \x01(\bR\fcacheNoStoreB\x12\n" +
-	"\x10_request_timeoutB\x13\n" +
-	"\x11_backend_protocolB\x18\n" +
+	"\x10_request_timeoutB\x18\n" +
 	"\x16_cache_max_age_seconds*\x96\x01\n" +
 	"\rFailurePolicy\x12\x1e\n" +
 	"\x1aFAILURE_POLICY_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aFAILURE_POLICY_PASSTHROUGH\x10\x01\x12\x1e\n" +
 	"\x1aFAILURE_POLICY_FAIL_CLOSED\x10\x02\x12%\n" +
-	"!FAILURE_POLICY_IN_MEMORY_FALLBACK\x10\x032t\n" +
+	"!FAILURE_POLICY_IN_MEMORY_FALLBACK\x10\x03*~\n" +
+	"\x0fBackendProtocol\x12 \n" +
+	"\x1cBACKEND_PROTOCOL_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13BACKEND_PROTOCOL_H1\x10\x01\x12\x17\n" +
+	"\x13BACKEND_PROTOCOL_H2\x10\x02\x12\x17\n" +
+	"\x13BACKEND_PROTOCOL_H3\x10\x032t\n" +
 	"\x10RateLimitService\x12`\n" +
-	"\tGetLimits\x12(.edgequota.ratelimit.v1.GetLimitsRequest\x1a).edgequota.ratelimit.v1.GetLimitsResponseBKZIgithub.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1;ratelimitv1b\x06proto3"
+	"\tGetLimits\x12(.edgequota.ratelimit.v1.GetLimitsRequest\x1a).edgequota.ratelimit.v1.GetLimitsResponseB\xf6\x01\n" +
+	"\x1acom.edgequota.ratelimit.v1B\x0eRatelimitProtoP\x01ZNgithub.com/edgequota/edgequota/api/gen/grpc/edgequota/ratelimit/v1;ratelimitv1\xa2\x02\x03ERX\xaa\x02\x16Edgequota.Ratelimit.V1\xca\x02\x16Edgequota\\Ratelimit\\V1\xe2\x02\"Edgequota\\Ratelimit\\V1\\GPBMetadata\xea\x02\x18Edgequota::Ratelimit::V1b\x06proto3"
 
 var (
 	file_edgequota_ratelimit_v1_ratelimit_proto_rawDescOnce sync.Once
@@ -380,24 +442,26 @@ func file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP() []byte {
 	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescData
 }
 
-var file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_edgequota_ratelimit_v1_ratelimit_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_edgequota_ratelimit_v1_ratelimit_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_edgequota_ratelimit_v1_ratelimit_proto_goTypes = []any{
 	(FailurePolicy)(0),        // 0: edgequota.ratelimit.v1.FailurePolicy
-	(*GetLimitsRequest)(nil),  // 1: edgequota.ratelimit.v1.GetLimitsRequest
-	(*GetLimitsResponse)(nil), // 2: edgequota.ratelimit.v1.GetLimitsResponse
-	nil,                       // 3: edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
+	(BackendProtocol)(0),      // 1: edgequota.ratelimit.v1.BackendProtocol
+	(*GetLimitsRequest)(nil),  // 2: edgequota.ratelimit.v1.GetLimitsRequest
+	(*GetLimitsResponse)(nil), // 3: edgequota.ratelimit.v1.GetLimitsResponse
+	nil,                       // 4: edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
 }
 var file_edgequota_ratelimit_v1_ratelimit_proto_depIdxs = []int32{
-	3, // 0: edgequota.ratelimit.v1.GetLimitsRequest.headers:type_name -> edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
+	4, // 0: edgequota.ratelimit.v1.GetLimitsRequest.headers:type_name -> edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntry
 	0, // 1: edgequota.ratelimit.v1.GetLimitsResponse.failure_policy:type_name -> edgequota.ratelimit.v1.FailurePolicy
-	1, // 2: edgequota.ratelimit.v1.RateLimitService.GetLimits:input_type -> edgequota.ratelimit.v1.GetLimitsRequest
-	2, // 3: edgequota.ratelimit.v1.RateLimitService.GetLimits:output_type -> edgequota.ratelimit.v1.GetLimitsResponse
-	3, // [3:4] is the sub-list for method output_type
-	2, // [2:3] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	1, // 2: edgequota.ratelimit.v1.GetLimitsResponse.backend_protocol:type_name -> edgequota.ratelimit.v1.BackendProtocol
+	2, // 3: edgequota.ratelimit.v1.RateLimitService.GetLimits:input_type -> edgequota.ratelimit.v1.GetLimitsRequest
+	3, // 4: edgequota.ratelimit.v1.RateLimitService.GetLimits:output_type -> edgequota.ratelimit.v1.GetLimitsResponse
+	4, // [4:5] is the sub-list for method output_type
+	3, // [3:4] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_edgequota_ratelimit_v1_ratelimit_proto_init() }
@@ -411,7 +475,7 @@ func file_edgequota_ratelimit_v1_ratelimit_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc), len(file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,

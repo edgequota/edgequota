@@ -21,8 +21,11 @@ internal/
   redis/                Redis client (single, replication, sentinel, cluster)
   server/               Server orchestration, graceful shutdown
 api/
+  openapi/              OpenAPI 3.0 specs (auth, events, ratelimit HTTP APIs)
   proto/                Protobuf definitions (auth, events, ratelimit services)
-  gen/                  Generated Go code from protos (DO NOT edit manually)
+  gen/                  Generated Go code (DO NOT edit manually)
+    grpc/               Generated from proto (buf generate)
+    http/               Generated from OpenAPI (oapi-codegen)
 docs/                   Architecture, authentication, configuration, deployment, observability, rate-limiting, security
 e2e/                    End-to-end tests (minikube + Terraform + Go test orchestrator)
   terraform/            K8s infrastructure modules (Redis topologies, test backends, TLS certs)
@@ -31,9 +34,13 @@ e2e/                    End-to-end tests (minikube + Terraform + Go test orchest
   reports/              Test report output (JSON + Markdown)
 ```
 
-## Protobuf Workflow
+## Code Generation
 
-Proto definitions live in `api/proto/edgequota/`. Generated Go code goes to `api/gen/`.
+All generated Go code lives under `api/gen/` — never edit these files manually.
+
+### Protobuf (gRPC)
+
+Proto definitions live in `api/proto/edgequota/`. Generated Go code goes to `api/gen/grpc/`.
 
 **After any change to `.proto` files, always run:**
 
@@ -41,7 +48,7 @@ Proto definitions live in `api/proto/edgequota/`. Generated Go code goes to `api
 make proto
 ```
 
-This runs `buf lint`, `buf breaking` (against main branch), and `buf generate`. Never edit files under `api/gen/` manually — they are overwritten by code generation.
+This runs `buf lint`, `buf breaking` (against main branch), and `buf generate`.
 
 Proto services:
 - `auth/v1/auth.proto` — `AuthService.Check`
@@ -49,6 +56,26 @@ Proto services:
 - `ratelimit/v1/ratelimit.proto` — `RateLimitService.GetLimits`
 
 Buf configuration: `buf.yaml` (module + lint rules) and `buf.gen.yaml` (plugins + output paths).
+
+### OpenAPI (HTTP types)
+
+OpenAPI 3.0 specs live in `api/openapi/`. Generated Go types go to `api/gen/http/`.
+
+**After any change to OpenAPI specs, always run:**
+
+```sh
+make generate-http
+```
+
+This uses `oapi-codegen` to generate Go model types from each OpenAPI spec. The oapi-codegen config files are at the project root: `oapi-codegen-auth.yaml`, `oapi-codegen-ratelimit.yaml`, `oapi-codegen-events.yaml`.
+
+The generated types are the single source of truth for the HTTP wire format. Internal domain types (`ExternalLimits`, `CheckRequest`, `CheckResponse`, `UsageEvent`) remain hand-written but conversion functions bridge them to the generated types for HTTP serialization.
+
+**To regenerate all code (proto + OpenAPI) at once:**
+
+```sh
+make generate
+```
 
 ## Build & Development
 
@@ -61,6 +88,8 @@ Buf configuration: `buf.yaml` (module + lint rules) and `buf.gen.yaml` (plugins 
 | `make coverage` | Tests with race detector, enforces >= 80% total coverage |
 | `make coverage-per-package` | Enforces >= 70% on core packages (middleware, ratelimit, proxy, redis, auth) |
 | `make vulncheck` | govulncheck for known vulnerabilities |
+| `make generate` | Run all code generation (proto + OpenAPI) |
+| `make generate-http` | Generate Go types from OpenAPI specs (requires oapi-codegen) |
 | `make proto` | Regenerate Go code from proto definitions |
 | `make docker` | Build Docker image |
 | `make e2e` | Full E2E cycle (minikube + Terraform + tests + teardown) |
@@ -107,6 +136,7 @@ GitHub Actions workflow (`.github/workflows/ci.yml`):
 - **test** — Unit tests with race detector, 80% total / 70% per-package coverage enforcement
 - **build** — `make build` + `make docker`
 - **security** — govulncheck
+- **generate-http** — Verify OpenAPI-generated types are up to date
 - **buf-publish** — Push protos to Buf Schema Registry (on main/tags)
 - **publish** — Push Docker image to `ghcr.io` (on version tags)
 
@@ -127,6 +157,7 @@ GitHub Actions workflow (`.github/workflows/ci.yml`):
 | Any Go source (`internal/`, `cmd/`, `e2e/`) | `make lint && make test` |
 | Go source in core packages | Also check `make coverage` passes (80% total, 70% per-package) |
 | `.proto` files | `make proto` then `make lint && make test` |
+| OpenAPI specs (`api/openapi/`) | `make generate-http` then `make lint && make test` |
 | `e2e/terraform/*.tf` | `cd e2e && terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate` |
 | Helm chart (`edgequota-helm/`) | `helm lint . && helm lint . -f values-minimal.yaml && helm lint . -f values-production.yaml` and `helm template test . -s templates/configmap.yaml` to verify rendered output |
 | Multiple areas | Run ALL applicable checks |
@@ -136,7 +167,8 @@ GitHub Actions workflow (`.github/workflows/ci.yml`):
 ## Common Pitfalls
 
 - Forgetting `make proto` after editing `.proto` files — the build will use stale generated code.
-- Editing files in `api/gen/` directly — they will be overwritten on next `make proto`.
+- Forgetting `make generate-http` after editing OpenAPI specs — HTTP types will drift from the spec.
+- Editing files in `api/gen/` directly — they will be overwritten on next `make generate`.
 - Redis key prefix is `rl:edgequota:` — keep it simple to avoid Redis Cluster hash-tag collisions.
 - The in-memory fallback limiter has a 65,536-key cap with LRU eviction — it is not a replacement for Redis.
 - `failure_policy` values are camelCase: `passThrough`, `failClosed`, `inMemoryFallback`.

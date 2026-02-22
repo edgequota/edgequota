@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	ratelimitv1 "github.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1"
+	ratelimitv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/ratelimit/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

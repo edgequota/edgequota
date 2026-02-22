@@ -513,7 +513,7 @@ type AuthConfig struct {
 	// When enabled, the body is read up to MaxAuthBodySize bytes and included
 	// in the auth request. The original body is replaced so the proxy can
 	// still forward it to the backend.
-	PropagateRequestBody bool `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
+	PropagateRequestBody bool  `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
 	MaxAuthBodySize      int64 `yaml:"max_auth_body_size"     env:"MAX_AUTH_BODY_SIZE"` // bytes; 0 = use default (64 KiB)
 
 	// CircuitBreaker configures the auth service circuit breaker.
@@ -1126,15 +1126,15 @@ func validateLogging(cfg *Config) error {
 var eventsHeaderDenySet = map[string]struct{}{
 	"Host":                {},
 	"Content-Length":      {},
-	"Content-Type":       {},
-	"Transfer-Encoding":  {},
-	"Connection":         {},
-	"Te":                 {},
-	"Upgrade":            {},
+	"Content-Type":        {},
+	"Transfer-Encoding":   {},
+	"Connection":          {},
+	"Te":                  {},
+	"Upgrade":             {},
 	"Proxy-Authorization": {},
-	"Proxy-Connection":   {},
-	"Keep-Alive":         {},
-	"Trailer":            {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Trailer":             {},
 }
 
 func validateEvents(cfg *Config) error {
@@ -1198,13 +1198,13 @@ type SanitizedBackend struct {
 
 // SanitizedRL exposes rate-limit configuration without external service addresses.
 type SanitizedRL struct {
-	Average       int64           `json:"average"`
-	Burst         int64           `json:"burst"`
-	Period        string          `json:"period"`
-	FailurePolicy FailurePolicy   `json:"failure_policy"`
-	FailureCode   int             `json:"failure_code"`
-	KeyStrategy   KeyStrategyType `json:"key_strategy"`
-	ExternalEnabled bool          `json:"external_enabled"`
+	Average         int64           `json:"average"`
+	Burst           int64           `json:"burst"`
+	Period          string          `json:"period"`
+	FailurePolicy   FailurePolicy   `json:"failure_policy"`
+	FailureCode     int             `json:"failure_code"`
+	KeyStrategy     KeyStrategyType `json:"key_strategy"`
+	ExternalEnabled bool            `json:"external_enabled"`
 }
 
 // Sanitized returns a safe-to-expose view of the configuration, omitting

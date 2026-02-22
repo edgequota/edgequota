@@ -1,0 +1,4 @@
+package: authv1http
+output: api/gen/http/auth/v1/auth.gen.go
+generate:
+  models: true

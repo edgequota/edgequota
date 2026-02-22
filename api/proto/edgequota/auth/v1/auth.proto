@@ -13,8 +13,6 @@ syntax = "proto3";
 
 package edgequota.auth.v1;
 
-option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/auth/v1;authv1";
-
 // AuthService validates incoming requests against an external auth backend.
 service AuthService {
   // Check verifies whether a request should be allowed or denied.

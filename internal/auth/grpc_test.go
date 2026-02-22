@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	authv1 "github.com/edgequota/edgequota/api/gen/edgequota/auth/v1"
+	authv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/auth/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

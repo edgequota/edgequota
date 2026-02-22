@@ -1,0 +1,4 @@
+package: ratelimitv1http
+output: api/gen/http/ratelimit/v1/ratelimit.gen.go
+generate:
+  models: true

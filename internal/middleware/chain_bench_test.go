@@ -67,4 +67,3 @@ func BenchmarkServeHTTP(b *testing.B) {
 		chain.ServeHTTP(w, req)
 	}
 }
-

@@ -159,8 +159,8 @@ func TestEmitter_CustomHeaders(t *testing.T) {
 			HTTP: config.EventsHTTPConfig{
 				URL: srv.URL,
 				Headers: map[string]config.RedactedString{
-					"X-Api-Key":      "key-123",
-					"X-Destination":  "analytics",
+					"X-Api-Key":     "key-123",
+					"X-Destination": "analytics",
 				},
 			},
 			BatchSize: 1, FlushInterval: "50ms", BufferSize: 10,

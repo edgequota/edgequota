@@ -14,8 +14,6 @@ syntax = "proto3";
 
 package edgequota.ratelimit.v1;
 
-option go_package = "github.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1;ratelimitv1";
-
 // RateLimitService provides dynamic rate limit configuration.
 service RateLimitService {
   // GetLimits returns the rate limit parameters for a given key.

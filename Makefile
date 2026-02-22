@@ -1,4 +1,4 @@
-.PHONY: build lint fmt test bench coverage coverage-per-package vulncheck proto e2e e2e-setup e2e-test e2e-teardown docker clean help
+.PHONY: build lint fmt test bench coverage coverage-per-package vulncheck proto generate generate-http e2e e2e-setup e2e-test e2e-teardown docker clean help
 
 export GO111MODULE=on
 
@@ -19,6 +19,8 @@ help:
 	@echo "  coverage     Run tests with race detector and enforce >=80% coverage"
 	@echo "  coverage-per-package  Enforce 70% per-package coverage on core packages"
 	@echo "  vulncheck    Run govulncheck for known vulnerabilities"
+	@echo "  generate     Run all code generation (proto + OpenAPI)"
+	@echo "  generate-http Generate Go types from OpenAPI specs (requires oapi-codegen)"
 	@echo "  proto        Generate Go code from protobuf definitions (requires buf)"
 	@echo "  e2e          Run full E2E cycle (minikube + terraform + tests + teardown)"
 	@echo "  e2e-setup    Provision minikube + deploy infrastructure"
@@ -79,12 +81,22 @@ coverage-per-package:
 vulncheck:
 	govulncheck ./...
 
+## generate: Run all code generation (proto + OpenAPI)
+generate: proto generate-http
+
+## generate-http: Generate Go types from OpenAPI specs using oapi-codegen
+generate-http:
+	oapi-codegen --config oapi-codegen-auth.yaml api/openapi/auth/v1/auth.yaml
+	oapi-codegen --config oapi-codegen-ratelimit.yaml api/openapi/ratelimit/v1/ratelimit.yaml
+	oapi-codegen --config oapi-codegen-events.yaml api/openapi/events/v1/events.yaml
+	@echo "Generated HTTP types in api/gen/http/"
+
 ## proto: Generate Go code from protobuf definitions using buf
 proto:
 	buf lint
 	buf breaking --against '.git#branch=main' || echo "WARN: buf breaking check failed (expected for initial development)"
 	buf generate
-	@echo "Generated proto files in api/gen/"
+	@echo "Generated proto files in api/gen/grpc/"
 
 ## e2e: Run the full end-to-end test cycle (minikube + terraform + tests)
 e2e:

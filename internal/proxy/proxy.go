@@ -269,11 +269,11 @@ type Proxy struct {
 	backendTLSInsecure  bool
 	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
 	wsDialTimeout       time.Duration
-	wsLimiter           *WSLimiter    // nil when no per-key WS limit is configured.
-	maxRequestBodySize  int64                // 0 = unlimited
-	maxWSTransferBytes  int64                // 0 = unlimited per-direction
-	wsIdleTimeout       time.Duration        // 0 = no idle timeout
-	allowedWSOrigins    map[string]struct{}  // nil = allow all origins
+	wsLimiter           *WSLimiter          // nil when no per-key WS limit is configured.
+	maxRequestBodySize  int64               // 0 = unlimited
+	maxWSTransferBytes  int64               // 0 = unlimited per-direction
+	wsIdleTimeout       time.Duration       // 0 = no idle timeout
+	allowedWSOrigins    map[string]struct{} // nil = allow all origins
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.

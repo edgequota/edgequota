@@ -15,7 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	ratelimitv1 "github.com/edgequota/edgequota/api/gen/edgequota/ratelimit/v1"
+	ratelimitv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/ratelimit/v1"
+	ratelimitv1http "github.com/edgequota/edgequota/api/gen/http/ratelimit/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -579,10 +580,17 @@ func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *Ex
 	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, data, ttl).Err()
 }
 
-// getLimitsHTTP fetches limits via HTTP.
+// getLimitsHTTP fetches limits via HTTP using the generated OpenAPI types
+// for wire serialization and deserializing the response into ExternalLimits.
 // TTL priority: HTTP cache headers > body cache fields > default TTL.
 func (ec *ExternalClient) getLimitsHTTP(ctx context.Context, req *ExternalRequest) (*ExternalLimits, time.Duration, error) {
-	body, err := json.Marshal(req)
+	wireReq := ratelimitv1http.GetLimitsRequest{
+		Key:     req.Key,
+		Headers: req.Headers,
+		Method:  req.Method,
+		Path:    req.Path,
+	}
+	body, err := json.Marshal(wireReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal request: %w", err)
 	}
@@ -603,14 +611,52 @@ func (ec *ExternalClient) getLimitsHTTP(ctx context.Context, req *ExternalReques
 		return nil, 0, fmt.Errorf("external service returned status %d", resp.StatusCode)
 	}
 
-	var limits ExternalLimits
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&limits); err != nil {
+	var wireResp ratelimitv1http.GetLimitsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&wireResp); err != nil {
 		return nil, 0, fmt.Errorf("decode response: %w", err)
 	}
 
-	ttl := ec.resolveHTTPCacheTTL(resp.Header, &limits)
+	limits := limitsFromHTTPResponse(&wireResp)
+	ttl := ec.resolveHTTPCacheTTL(resp.Header, limits)
 
-	return &limits, ttl, nil
+	return limits, ttl, nil
+}
+
+// limitsFromHTTPResponse converts the generated OpenAPI response type to the
+// internal ExternalLimits domain type, dereferencing pointer-typed optional
+// fields into their value-typed equivalents.
+func limitsFromHTTPResponse(r *ratelimitv1http.GetLimitsResponse) *ExternalLimits {
+	limits := &ExternalLimits{
+		Average: r.Average,
+		Burst:   r.Burst,
+		Period:  r.Period,
+	}
+	if r.TenantKey != nil {
+		limits.TenantKey = *r.TenantKey
+	}
+	if r.FailurePolicy != nil {
+		limits.FailurePolicy = config.FailurePolicy(*r.FailurePolicy)
+	}
+	if r.FailureCode != nil {
+		limits.FailureCode = int(*r.FailureCode)
+	}
+	if r.BackendUrl != nil {
+		limits.BackendURL = *r.BackendUrl
+	}
+	if r.BackendProtocol != nil {
+		limits.BackendProtocol = string(*r.BackendProtocol)
+	}
+	if r.RequestTimeout != nil {
+		limits.RequestTimeout = *r.RequestTimeout
+	}
+	if r.CacheMaxAgeSeconds != nil {
+		v := *r.CacheMaxAgeSeconds
+		limits.CacheMaxAgeSec = &v
+	}
+	if r.CacheNoStore != nil {
+		limits.CacheNoStore = *r.CacheNoStore
+	}
+	return limits
 }
 
 // resolveHTTPCacheTTL determines the cache TTL for an HTTP response.
@@ -697,7 +743,7 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 		FailurePolicy:   failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
 		FailureCode:     int(pbResp.GetFailureCode()),
 		BackendURL:      pbResp.GetBackendUrl(),
-		BackendProtocol: backendProtocolFromProtoStr(pbResp.GetBackendProtocol()),
+		BackendProtocol: backendProtocolFromProto(pbResp.GetBackendProtocol()),
 		RequestTimeout:  pbResp.GetRequestTimeout(),
 	}
 
@@ -731,40 +777,16 @@ func failurePolicyFromProto(v int32) config.FailurePolicy {
 	}
 }
 
-// backendProtocolFromProto maps a proto BackendProtocol enum value (int32) to
-// the internal config.BackendProtocol string constant. Returns "" for
-// UNSPECIFIED (no override).
-//
-// Proto enum values:
-//
-//	0 = BACKEND_PROTOCOL_UNSPECIFIED → "" (use static config)
-//	1 = BACKEND_PROTOCOL_H1         → "h1"
-//	2 = BACKEND_PROTOCOL_H2         → "h2"
-//	3 = BACKEND_PROTOCOL_H3         → "h3"
-func backendProtocolFromProto(v int32) string {
+// backendProtocolFromProto maps a proto BackendProtocol enum value to the
+// internal config.BackendProtocol constant. Returns "" for UNSPECIFIED
+// (no override — use static config).
+func backendProtocolFromProto(v ratelimitv1.BackendProtocol) string {
 	switch v {
-	case 1:
+	case ratelimitv1.BackendProtocol_BACKEND_PROTOCOL_H1:
 		return config.BackendProtocolH1
-	case 2:
+	case ratelimitv1.BackendProtocol_BACKEND_PROTOCOL_H2:
 		return config.BackendProtocolH2
-	case 3:
-		return config.BackendProtocolH3
-	default:
-		return ""
-	}
-}
-
-// backendProtocolFromProtoStr maps a string backend_protocol value to the
-// internal constant. Used as a transitional bridge until the proto-generated
-// code is regenerated with the BackendProtocol enum (at which point callers
-// should switch to backendProtocolFromProto with the int32 enum value).
-func backendProtocolFromProtoStr(v string) string {
-	switch v {
-	case "h1":
-		return config.BackendProtocolH1
-	case "h2":
-		return config.BackendProtocolH2
-	case "h3":
+	case ratelimitv1.BackendProtocol_BACKEND_PROTOCOL_H3:
 		return config.BackendProtocolH3
 	default:
 		return ""

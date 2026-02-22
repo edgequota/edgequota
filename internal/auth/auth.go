@@ -22,7 +22,8 @@ import (
 	"sync"
 	"time"
 
-	authv1 "github.com/edgequota/edgequota/api/gen/edgequota/auth/v1"
+	authv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/auth/v1"
+	authv1http "github.com/edgequota/edgequota/api/gen/http/auth/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -231,7 +232,17 @@ func (c *Client) Check(ctx context.Context, req *CheckRequest) (*CheckResponse, 
 }
 
 func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckResponse, error) {
-	body, err := json.Marshal(req)
+	wireReq := authv1http.CheckRequest{
+		Method:     req.Method,
+		Path:       req.Path,
+		Headers:    req.Headers,
+		RemoteAddr: req.RemoteAddr,
+	}
+	if len(req.Body) > 0 {
+		wireReq.Body = &req.Body
+	}
+
+	body, err := json.Marshal(wireReq)
 	if err != nil {
 		return nil, fmt.Errorf("marshal auth request: %w", err)
 	}
@@ -243,9 +254,6 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Optionally forward original request headers as X-Original-* HTTP headers.
-	// Disabled by default to prevent credential leakage via a secondary channel;
-	// the request body already contains the filtered headers as JSON.
 	if c.forwardOriginalHeaders {
 		for k, v := range req.Headers {
 			httpReq.Header.Set("X-Original-"+k, v)
@@ -258,31 +266,49 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Read response body — used for deny message or allow metadata (request_headers).
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 
 	if resp.StatusCode == http.StatusOK {
 		result := &CheckResponse{Allowed: true, StatusCode: 200}
-		// Try to parse a structured response to extract request_headers.
-		var parsed CheckResponse
+		var parsed authv1http.CheckResponse
 		if len(respBody) > 0 && json.Unmarshal(respBody, &parsed) == nil {
-			result.RequestHeaders = parsed.RequestHeaders
+			result.RequestHeaders = derefStringMap(parsed.RequestHeaders)
 		}
 		return result, nil
 	}
 
-	// Try to parse structured response.
-	var checkResp CheckResponse
-	if err := json.Unmarshal(respBody, &checkResp); err == nil && checkResp.StatusCode != 0 {
-		return &checkResp, nil
+	var wireResp authv1http.CheckResponse
+	if err := json.Unmarshal(respBody, &wireResp); err == nil && wireResp.StatusCode != 0 {
+		return checkResponseFromHTTP(&wireResp), nil
 	}
 
-	// Fall back to status-code based response.
 	return &CheckResponse{
 		Allowed:    false,
 		StatusCode: resp.StatusCode,
 		DenyBody:   string(respBody),
 	}, nil
+}
+
+// checkResponseFromHTTP converts the generated OpenAPI response type to the
+// internal CheckResponse domain type.
+func checkResponseFromHTTP(r *authv1http.CheckResponse) *CheckResponse {
+	resp := &CheckResponse{
+		Allowed:    r.Allowed,
+		StatusCode: int(r.StatusCode),
+	}
+	if r.DenyBody != nil {
+		resp.DenyBody = *r.DenyBody
+	}
+	resp.ResponseHeaders = derefStringMap(r.ResponseHeaders)
+	resp.RequestHeaders = derefStringMap(r.RequestHeaders)
+	return resp
+}
+
+func derefStringMap(p *map[string]string) map[string]string {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckResponse, error) {
