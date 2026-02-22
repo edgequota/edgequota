@@ -629,7 +629,16 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 				rw.WriteHeader(http.StatusBadGateway)
 			}
 		},
-		ModifyResponse: func(_ *http.Response) error {
+		ModifyResponse: func(resp *http.Response) error {
+			// #region agent log
+			logger.Info("[DEBUG-H3] backend-response-headers",
+				"status", resp.StatusCode,
+				"alt_svc", resp.Header.Values("Alt-Svc"),
+				"x_request_id", resp.Header.Values("X-Request-Id"),
+				"x_ratelimit_limit", resp.Header.Values("X-RateLimit-Limit"),
+				"x_ratelimit_remaining", resp.Header.Values("X-RateLimit-Remaining"),
+				"path", resp.Request.URL.Path,
+				"hypothesis", "B")
 			return nil
 		},
 	}

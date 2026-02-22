@@ -160,9 +160,21 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 
 	var h3srv *http3.Server
 	if cfg.Server.TLS.HTTP3Enabled {
+		// #region agent log
+		h3Handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			logger.Info("[DEBUG-H3] h3-server-entry",
+				"proto", r.Proto,
+				"proto_major", r.ProtoMajor,
+				"remote_addr", r.RemoteAddr,
+				"path", r.URL.Path,
+				"request_id", r.Header.Get("X-Request-Id"),
+				"hypothesis", "A")
+			chain.ServeHTTP(w, r)
+		})
+		// #endregion
 		h3srv = &http3.Server{
 			Addr:           cfg.Server.Address,
-			Handler:        chain,
+			Handler:        h3Handler,
 			MaxHeaderBytes: 1 << 20, // 1 MiB — same as the TCP server.
 			IdleTimeout:    idleTimeout,
 			QUICConfig: &quic.Config{
@@ -175,6 +187,15 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		if port := cfg.Server.TLS.HTTP3AdvertisePort; port > 0 {
 			altSvc := fmt.Sprintf(`h3=":%d"; ma=2592000`, port)
 			mainHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// #region agent log
+				logger.Info("[DEBUG-H3] tcp-handler-entry",
+					"proto", r.Proto,
+					"proto_major", r.ProtoMajor,
+					"remote_addr", r.RemoteAddr,
+					"path", r.URL.Path,
+					"request_id", r.Header.Get("X-Request-Id"),
+					"hypothesis", "A,B")
+				// #endregion
 				if r.ProtoMajor < 3 {
 					w.Header().Set("Alt-Svc", altSvc)
 				}
@@ -182,6 +203,14 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 			})
 		} else {
 			mainHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// #region agent log
+				logger.Info("[DEBUG-H3] tcp-handler-entry-no-port",
+					"proto", r.Proto,
+					"proto_major", r.ProtoMajor,
+					"remote_addr", r.RemoteAddr,
+					"path", r.URL.Path,
+					"hypothesis", "A,B")
+				// #endregion
 				if r.ProtoMajor < 3 {
 					if setErr := h3srv.SetQUICHeaders(w.Header()); setErr != nil {
 						logger.Debug("failed to set Alt-Svc header", "error", setErr)
