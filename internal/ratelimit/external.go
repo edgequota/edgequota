@@ -520,10 +520,11 @@ func (ec *ExternalClient) getStaleFromCache(ctx context.Context, key string) *Ex
 		return nil
 	}
 	var limits ExternalLimits
-	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
+	if json.Unmarshal(data, &limits) == nil {
 		return &limits
 	}
-	if json.Unmarshal(data, &limits) == nil {
+	// Fallback: try gob for rolling-deploy compatibility with older versions.
+	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
 		return &limits
 	}
 	return nil
@@ -533,15 +534,16 @@ func (ec *ExternalClient) setStaleInCache(ctx context.Context, key string, limit
 	if ec.redisClient == nil {
 		return
 	}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(limits); err != nil {
+	data, err := json.Marshal(limits)
+	if err != nil {
 		return
 	}
-	_ = ec.redisClient.Set(ctx, staleCachePrefix+key, buf.Bytes(), staleCacheTTL).Err()
+	_ = ec.redisClient.Set(ctx, staleCachePrefix+key, data, staleCacheTTL).Err()
 }
 
 // getFromCache attempts to read cached limits from Redis.
-// Tries gob first (new format), falls back to JSON for backward compatibility.
+// Tries JSON first (current format), falls back to gob for rolling-deploy
+// compatibility with older versions that wrote gob.
 func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *ExternalLimits {
 	if ec.redisClient == nil {
 		return nil
@@ -549,31 +551,32 @@ func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *Externa
 
 	data, err := ec.redisClient.Get(ctx, cacheKeyPrefix+key).Bytes()
 	if err != nil {
-		return nil // cache miss or Redis error — not fatal
+		return nil
 	}
 
 	var limits ExternalLimits
-	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
-		return &limits
-	}
 	if json.Unmarshal(data, &limits) == nil {
 		return &limits
 	}
-	return nil // corrupt entry — treat as miss
+	// Fallback: try gob for rolling-deploy compatibility.
+	if gob.NewDecoder(bytes.NewReader(data)).Decode(&limits) == nil {
+		return &limits
+	}
+	return nil
 }
 
-// setInCache stores limits in Redis with the given TTL using gob encoding.
+// setInCache stores limits in Redis with the given TTL using JSON encoding.
 func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *ExternalLimits, ttl time.Duration) {
 	if ec.redisClient == nil || ttl <= 0 {
 		return
 	}
 
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(limits); err != nil {
+	data, err := json.Marshal(limits)
+	if err != nil {
 		return
 	}
 
-	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, buf.Bytes(), ttl).Err()
+	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, data, ttl).Err()
 }
 
 // getLimitsHTTP fetches limits via HTTP.
@@ -694,7 +697,7 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 		FailurePolicy:   failurePolicyFromProto(int32(pbResp.GetFailurePolicy())),
 		FailureCode:     int(pbResp.GetFailureCode()),
 		BackendURL:      pbResp.GetBackendUrl(),
-		BackendProtocol: pbResp.GetBackendProtocol(),
+		BackendProtocol: backendProtocolFromProtoStr(pbResp.GetBackendProtocol()),
 		RequestTimeout:  pbResp.GetRequestTimeout(),
 	}
 
@@ -725,6 +728,46 @@ func failurePolicyFromProto(v int32) config.FailurePolicy {
 		return config.FailurePolicyInMemoryFallback
 	default:
 		return "" // Unspecified or unknown → no override.
+	}
+}
+
+// backendProtocolFromProto maps a proto BackendProtocol enum value (int32) to
+// the internal config.BackendProtocol string constant. Returns "" for
+// UNSPECIFIED (no override).
+//
+// Proto enum values:
+//
+//	0 = BACKEND_PROTOCOL_UNSPECIFIED → "" (use static config)
+//	1 = BACKEND_PROTOCOL_H1         → "h1"
+//	2 = BACKEND_PROTOCOL_H2         → "h2"
+//	3 = BACKEND_PROTOCOL_H3         → "h3"
+func backendProtocolFromProto(v int32) string {
+	switch v {
+	case 1:
+		return config.BackendProtocolH1
+	case 2:
+		return config.BackendProtocolH2
+	case 3:
+		return config.BackendProtocolH3
+	default:
+		return ""
+	}
+}
+
+// backendProtocolFromProtoStr maps a string backend_protocol value to the
+// internal constant. Used as a transitional bridge until the proto-generated
+// code is regenerated with the BackendProtocol enum (at which point callers
+// should switch to backendProtocolFromProto with the int32 enum value).
+func backendProtocolFromProtoStr(v string) string {
+	switch v {
+	case "h1":
+		return config.BackendProtocolH1
+	case "h2":
+		return config.BackendProtocolH2
+	case "h3":
+		return config.BackendProtocolH3
+	default:
+		return ""
 	}
 }
 

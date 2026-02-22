@@ -617,4 +617,192 @@ func TestAccessLog(t *testing.T) {
 		assert.Nil(t, findAccessLog(t, buf.Bytes()),
 			"access log must be silent after disabling via reload")
 	})
+
+	t.Run("access log includes enriched fields", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, logger, testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		buf.Reset()
+		req := httptest.NewRequest(http.MethodGet, "http://api.example.com/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		entry := findAccessLog(t, buf.Bytes())
+		require.NotNil(t, entry, "expected an access log entry")
+
+		assert.Equal(t, "api.example.com", entry["host"],
+			"access log must include original host from r.Host")
+		assert.Equal(t, "http://backend:8080", entry["backend_url"],
+			"access log must include resolved backend URL")
+		assert.Contains(t, entry, "backend_proto",
+			"access log must include backend protocol")
+		assert.Contains(t, entry, "rl_key")
+		assert.Contains(t, entry, "tenant_id")
+	})
+}
+
+func TestConcurrencySemaphore(t *testing.T) {
+	t.Run("returns 503 when max concurrent requests exceeded", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Server.MaxConcurrentRequests = 1
+
+		blocked := make(chan struct{})
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-blocked
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		// First request holds the semaphore.
+		rr1 := httptest.NewRecorder()
+		go chain.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		// Give the first request time to acquire the semaphore.
+		time.Sleep(50 * time.Millisecond)
+
+		// Second request should be rejected immediately.
+		rr2 := httptest.NewRecorder()
+		chain.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		assert.Equal(t, http.StatusServiceUnavailable, rr2.Code,
+			"second request must be rejected with 503")
+
+		// Unblock the first request.
+		close(blocked)
+		time.Sleep(50 * time.Millisecond)
+	})
+
+	t.Run("allows request when under limit", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Server.MaxConcurrentRequests = 10
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+
+	t.Run("no limit when max_concurrent_requests is 0", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Server.MaxConcurrentRequests = 0
+
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+		assert.Equal(t, http.StatusOK, rr.Code)
+	})
+}
+
+func TestAllowedInjectionHeaders(t *testing.T) {
+	t.Run("auth can inject normally-denied header when in allowed list", func(t *testing.T) {
+		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{
+				"request_headers": map[string]string{
+					"X-Forwarded-For": "10.1.1.1",
+				},
+			})
+		}))
+		defer authServer.Close()
+
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Auth.Enabled = true
+		cfg.Auth.HTTP.URL = authServer.URL
+		cfg.Auth.AllowedInjectionHeaders = []string{"X-Forwarded-For"}
+
+		var capturedXFF string
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedXFF = r.Header.Get("X-Forwarded-For")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "10.1.1.1", capturedXFF,
+			"X-Forwarded-For should be injected when in allowed_injection_headers")
+	})
+
+	t.Run("auth cannot inject denied header when NOT in allowed list", func(t *testing.T) {
+		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{
+				"request_headers": map[string]string{
+					"X-Forwarded-For": "spoofed",
+				},
+			})
+		}))
+		defer authServer.Close()
+
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Auth.Enabled = true
+		cfg.Auth.HTTP.URL = authServer.URL
+		// AllowedInjectionHeaders is NOT set, so deny-list applies.
+
+		var capturedXFF string
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedXFF = r.Header.Get("X-Forwarded-For")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Empty(t, capturedXFF,
+			"X-Forwarded-For must NOT be injected when not in allowed_injection_headers")
+	})
 }

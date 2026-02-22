@@ -1,7 +1,9 @@
 package ratelimit
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -293,5 +295,100 @@ func TestCacheIsolationConformance(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "tenant:tenant-a", limitsA2.TenantKey)
 		assert.Equal(t, int32(2), calls.Load()) // No extra server call.
+	})
+}
+
+// ---------------------------------------------------------------------------
+// JSON/gob Cache Format Conformance Tests (P4)
+// ---------------------------------------------------------------------------
+
+func TestCacheGobFallback(t *testing.T) {
+	t.Run("reads gob-encoded primary cache from older version", func(t *testing.T) {
+		redisClient, _ := newTestCacheRedis(t)
+
+		limits := ExternalLimits{
+			Average: 200,
+			Burst:   100,
+			Period:  "1s",
+		}
+		var buf bytes.Buffer
+		require.NoError(t, gob.NewEncoder(&buf).Encode(limits))
+		require.NoError(t, redisClient.Set(context.Background(),
+			cacheKeyPrefix+"gob-key", buf.Bytes(), time.Minute).Err())
+
+		c := &ExternalClient{
+			redisClient:  redisClient,
+			headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{}),
+		}
+
+		got := c.getFromCache(context.Background(), "gob-key")
+		require.NotNil(t, got, "gob-encoded cache should be readable")
+		assert.Equal(t, int64(200), got.Average)
+		assert.Equal(t, int64(100), got.Burst)
+	})
+
+	t.Run("reads gob-encoded stale cache from older version", func(t *testing.T) {
+		redisClient, _ := newTestCacheRedis(t)
+
+		limits := ExternalLimits{
+			Average: 300,
+			Burst:   150,
+			Period:  "10s",
+		}
+		var buf bytes.Buffer
+		require.NoError(t, gob.NewEncoder(&buf).Encode(limits))
+		require.NoError(t, redisClient.Set(context.Background(),
+			staleCachePrefix+"stale-gob-key", buf.Bytes(), time.Minute).Err())
+
+		c := &ExternalClient{
+			redisClient:  redisClient,
+			headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{}),
+		}
+
+		got := c.getStaleFromCache(context.Background(), "stale-gob-key")
+		require.NotNil(t, got, "gob-encoded stale cache should be readable")
+		assert.Equal(t, int64(300), got.Average)
+	})
+
+	t.Run("writes JSON and reads it back", func(t *testing.T) {
+		redisClient, _ := newTestCacheRedis(t)
+
+		c := &ExternalClient{
+			redisClient:  redisClient,
+			headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{}),
+		}
+
+		limits := &ExternalLimits{Average: 400, Burst: 200, Period: "5s"}
+		c.setInCache(context.Background(), "json-key", limits, time.Minute)
+
+		got := c.getFromCache(context.Background(), "json-key")
+		require.NotNil(t, got)
+		assert.Equal(t, int64(400), got.Average)
+		assert.Equal(t, int64(200), got.Burst)
+
+		// Verify the stored data is valid JSON (not gob).
+		data, err := redisClient.Get(context.Background(), cacheKeyPrefix+"json-key").Bytes()
+		require.NoError(t, err)
+		var parsed ExternalLimits
+		assert.NoError(t, json.Unmarshal(data, &parsed), "cache should store JSON")
+	})
+
+	t.Run("JSON takes priority over gob on ambiguous data", func(t *testing.T) {
+		redisClient, _ := newTestCacheRedis(t)
+
+		limits := &ExternalLimits{Average: 999, Burst: 500, Period: "1s"}
+		data, err := json.Marshal(limits)
+		require.NoError(t, err)
+		require.NoError(t, redisClient.Set(context.Background(),
+			cacheKeyPrefix+"json-prio", data, time.Minute).Err())
+
+		c := &ExternalClient{
+			redisClient:  redisClient,
+			headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{}),
+		}
+
+		got := c.getFromCache(context.Background(), "json-prio")
+		require.NotNil(t, got)
+		assert.Equal(t, int64(999), got.Average)
 	})
 }

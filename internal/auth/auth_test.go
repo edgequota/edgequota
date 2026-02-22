@@ -284,6 +284,43 @@ func TestBuildCheckRequest(t *testing.T) {
 		assert.Equal(t, "/", cr.Path)
 		assert.Empty(t, cr.Headers)
 	})
+
+	t.Run("injects Host from r.Host into headers", func(t *testing.T) {
+		r, _ := http.NewRequest(http.MethodGet, "/api/v1/resource", nil)
+		r.Host = "api.example.com"
+		r.Header.Set("X-Tenant-Id", "tenant-1")
+		r.RemoteAddr = "192.168.1.1:5000"
+
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
+		cr := c.BuildCheckRequest(r, nil)
+
+		assert.Equal(t, "api.example.com", cr.Headers["Host"],
+			"Host must be injected from r.Host since Go removes it from r.Header")
+		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
+	})
+
+	t.Run("Host header absent when r.Host is empty", func(t *testing.T) {
+		r, _ := http.NewRequest(http.MethodGet, "/", nil)
+		r.Host = ""
+		r.Header = http.Header{}
+		r.RemoteAddr = "127.0.0.1:1234"
+
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
+		cr := c.BuildCheckRequest(r, nil)
+
+		assert.NotContains(t, cr.Headers, "Host")
+	})
+
+	t.Run("Host header present with httptest.NewRequest", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "http://admin.example.com/check", nil)
+		r.RemoteAddr = "10.0.0.1:4000"
+
+		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
+		cr := c.BuildCheckRequest(r, nil)
+
+		assert.Equal(t, "admin.example.com", cr.Headers["Host"],
+			"httptest.NewRequest sets r.Host which must appear in headers")
+	})
 }
 
 func TestClientClose(t *testing.T) {

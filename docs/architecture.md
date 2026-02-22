@@ -95,30 +95,39 @@ Shutdown sequence:
 
 ### Middleware Chain (`internal/middleware`)
 
-The chain executes three stages in sequence. Each stage can short-circuit:
+The chain executes several stages in sequence. Each stage can short-circuit:
 
 ```
-Request ──► Auth Check ──► Rate Limit ──► Proxy ──► Backend
-               │                │
-               ▼                ▼
-           Deny (4xx)       429 Too Many Requests
+Request ──► Concurrency ──► Auth Check ──► Rate Limit ──► Proxy ──► Backend
+            Gate              │                │              │
+            │                 ▼                ▼              └──► Events (async)
+            ▼             Deny (4xx)       429 Too Many
+        503 (at capacity)    Requests
 ```
+
+**Stage 0: Concurrency Gate** (if `max_concurrent_requests > 0`)
+
+A semaphore limits the number of in-flight requests. When the limit is reached, new requests immediately receive `503 Service Unavailable` without entering the chain. This prevents resource exhaustion under load spikes.
 
 **Stage 1: Auth Check** (if `auth.enabled`)
 
-Calls the external auth service with the full request metadata. If the auth service returns anything other than 200, the response is forwarded to the client and the chain stops.
+Calls the external auth service with the full request metadata (method, path, headers including `Host`, remote address, and optionally the request body). If the auth service returns anything other than 200, the response is forwarded to the client and the chain stops. A circuit breaker prevents cascading timeouts when the auth service is down.
 
 **Stage 2: Rate Limit**
 
 1. If `average == 0` and no external rate limit service: skip (no limits).
 2. Extract rate limit key using the configured strategy.
-3. If external rate limit service is enabled: fetch dynamic limits (cached with TTL).
+3. If external rate limit service is enabled: fetch dynamic limits (cached with TTL, deduplicated with singleflight).
 4. Execute the Redis Lua script for atomic token-bucket check.
 5. If Redis is unreachable: apply the configured failure policy.
 
 **Stage 3: Proxy**
 
-Forward the request to the backend via the protocol-aware reverse proxy.
+Forward the request to the backend via the protocol-aware reverse proxy. Protocol selection (HTTP/1.1, HTTP/2, HTTP/3, WebSocket) is automatic.
+
+**Async: Events**
+
+After each request, a `UsageEvent` is written to an in-memory ring buffer. Events are batched and flushed asynchronously to an external HTTP or gRPC service. Events never block the request hot path.
 
 ### Proxy (`internal/proxy`)
 
@@ -235,12 +244,13 @@ Client ──► EdgeQuota
 
 ### Recovery Loop
 
-When Redis becomes unreachable, EdgeQuota starts a background goroutine that attempts reconnection with exponential backoff:
+When Redis becomes unreachable, EdgeQuota starts a background goroutine that attempts reconnection with capped exponential backoff. The loop retries indefinitely until Redis is reachable again:
 
 - Initial delay: 1 second
-- Maximum delay: 30 seconds
-- Jitter: random up to current delay
+- Maximum delay: 60 seconds (cap)
+- Jitter: random up to current delay (prevents thundering herd)
 - On success: recreate the Redis limiter and resume normal operation
+- On config change: if the `RedisConfig` has changed (hot-reload), the Redis client is recreated with the new parameters before the next ping attempt
 
 ---
 
@@ -333,3 +343,16 @@ A single `httputil.ReverseProxy` with a `protocolAwareTransport` that inspects `
 ### Why Distroless
 
 The container image is based on `gcr.io/distroless/static-debian12:nonroot`. It contains no shell, no package manager, and runs as a non-root user. This minimizes the attack surface for a network-facing component at the edge.
+
+---
+
+## See Also
+
+- [Configuration Reference](configuration.md) -- Every configuration field and default.
+- [Rate Limiting](rate-limiting.md) -- Algorithm details, Lua script, and distributed correctness.
+- [Authentication](authentication.md) -- Auth flow and security model.
+- [Multi-Protocol Proxy](proxy.md) -- Protocol detection and transport selection.
+- [Events](events.md) -- Async usage event emission.
+- [Observability](observability.md) -- Metrics, probes, logging, and tracing.
+- [Deployment](deployment.md) -- Kubernetes deployment and scaling.
+- [Security](security.md) -- Threat model and hardening.

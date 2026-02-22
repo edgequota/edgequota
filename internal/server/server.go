@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -124,6 +123,9 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	}
 	if cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled() && cfg.RateLimit.External.Enabled {
 		proxyOpts = append(proxyOpts, proxy.WithDenyPrivateNetworks())
+	}
+	if len(cfg.Server.AllowedWebSocketOrigins) > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithAllowedWSOrigins(cfg.Server.AllowedWebSocketOrigins))
 	}
 
 	rp, err := proxy.New(
@@ -287,20 +289,20 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 	adminMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
 	}))
-	adminMux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+	configHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		data, err := json.MarshalIndent(cfg, "", "  ")
+		data, err := json.MarshalIndent(cfg.Sanitized(), "", "  ")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		_, _ = w.Write(data)
 	})
-	adminMux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+	statsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
@@ -314,6 +316,9 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 		}
 		_, _ = w.Write(data)
 	})
+
+	adminMux.Handle("/v1/config", configHandler)
+	adminMux.Handle("/v1/stats", statsHandler)
 
 	// Wrap the admin mux in a rate limiter (100 req/s burst).
 	rl := newAdminRateLimiter(adminMux, 100)
@@ -527,7 +532,7 @@ func (s *Server) Reload(newCfg *config.Config) error {
 }
 
 func backendChanged(old, new_ *config.Config) bool {
-	return !reflect.DeepEqual(old.Backend, new_.Backend)
+	return !old.Backend.Equal(new_.Backend)
 }
 
 // ReloadCerts hot-swaps TLS certificates from the given files without

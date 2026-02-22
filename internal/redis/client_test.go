@@ -187,15 +187,15 @@ func TestIsConnectivityErr(t *testing.T) {
 	})
 }
 
-func TestMakeTLSConfig(t *testing.T) {
+func TestTLSConfig(t *testing.T) {
 	t.Run("returns nil when TLS disabled", func(t *testing.T) {
 		opts := &options{tlsEnabled: false}
-		assert.Nil(t, makeTLSConfig(opts))
+		assert.Nil(t, opts.tlsConfig())
 	})
 
 	t.Run("returns config when TLS enabled", func(t *testing.T) {
 		opts := &options{tlsEnabled: true, tlsSkipVerify: true}
-		cfg := makeTLSConfig(opts)
+		cfg := opts.tlsConfig()
 		require.NotNil(t, cfg)
 		assert.True(t, cfg.InsecureSkipVerify)
 	})

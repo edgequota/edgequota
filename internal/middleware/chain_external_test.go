@@ -14,6 +14,91 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestChainExternalRLReceivesHostHeader(t *testing.T) {
+	t.Run("Host header from r.Host is forwarded to external RL service", func(t *testing.T) {
+		var receivedHeaders map[string]string
+		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Headers map[string]string `json:"headers"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			receivedHeaders = req.Headers
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"average": 100,
+				"burst":   50,
+				"period":  "1s",
+			})
+		}))
+		defer externalRL.Close()
+
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = externalRL.URL
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "http://api.example.com/api/resource", nil)
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		require.NotNil(t, receivedHeaders, "external RL service should have been called")
+		assert.Equal(t, "api.example.com", receivedHeaders["Host"],
+			"Host header must be forwarded from r.Host")
+	})
+
+	t.Run("Host header absent when r.Host is empty", func(t *testing.T) {
+		var receivedHeaders map[string]string
+		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Headers map[string]string `json:"headers"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			receivedHeaders = req.Headers
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"average": 100,
+				"burst":   50,
+				"period":  "1s",
+			})
+		}))
+		defer externalRL.Close()
+
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = externalRL.URL
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+		req.Host = ""
+		req.RemoteAddr = "1.2.3.4:5555"
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		require.NotNil(t, receivedHeaders)
+		assert.NotContains(t, receivedHeaders, "Host",
+			"Host should not be present when r.Host is empty")
+	})
+}
+
 func TestChainServeHTTPWithExternalRateLimit(t *testing.T) {
 	t.Run("uses external rate limit service", func(t *testing.T) {
 		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

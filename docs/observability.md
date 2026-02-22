@@ -19,12 +19,31 @@ Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exp
 | `edgequota_auth_errors_total` | Auth service call errors | Auth service timeout, connection error, or non-HTTP error |
 | `edgequota_auth_denied_total` | Requests denied by auth service | Auth service returns non-200 status |
 | `edgequota_key_extract_errors_total` | Key extraction failures | Missing required header, malformed remote address |
+| `edgequota_tenant_requests_allowed_total` | Per-tenant allowed requests | Label: `tenant`. Capped at `max_tenant_labels`; excess tenants aggregated under `__overflow__`. |
+| `edgequota_tenant_requests_limited_total` | Per-tenant rate-limited requests | Label: `tenant`. Same cardinality cap as above. |
+| `edgequota_tenant_label_overflow_total` | Tenant label cap exceeded | A request's tenant was bucketed under `__overflow__` |
+| `edgequota_tenant_key_rejected_total` | Tenant key validation failures | External RL service returned an invalid `tenant_key` (length > 256 or invalid characters) |
+| `edgequota_events_dropped_total` | Events dropped from ring buffer | Ring buffer overflow; oldest events overwritten |
+| `edgequota_events_send_failures_total` | Event batch send failures | Batch failed to send after all retries |
+| `edgequota_concurrent_requests_rejected_total` | Concurrency limit rejections | `max_concurrent_requests` exceeded; request received 503 |
+| `edgequota_external_rl_semaphore_rejected_total` | External RL semaphore rejections | `max_concurrent_requests` for external RL calls exceeded |
+| `edgequota_external_rl_singleflight_shared_total` | Singleflight shared results | A concurrent cache miss shared the result of another in-flight external call |
+
+### Gauges
+
+| Metric | Description |
+|--------|-------------|
+| `edgequota_redis_healthy` | Whether Redis is reachable: `1` = healthy, `0` = unhealthy. Updated by the recovery loop. |
 
 ### Histograms
 
 | Metric | Labels | Buckets | Description |
 |--------|--------|---------|-------------|
-| `edgequota_request_duration_seconds` | `method`, `status_code` | Default Prometheus buckets (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10) | End-to-end request latency including auth, rate limit check, and proxy time |
+| `edgequota_request_duration_seconds` | `method`, `status_code` | 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10 | End-to-end request latency including auth, rate limit check, and proxy time |
+| `edgequota_auth_duration_seconds` | — | 0.0005–5s | Latency of external auth checks |
+| `edgequota_external_rl_duration_seconds` | — | 0.0005–5s | Latency of external rate limit service calls |
+| `edgequota_backend_duration_seconds` | — | 0.001–30s | Latency of backend proxy calls |
+| `edgequota_ratelimit_remaining_tokens` | — | 0–1000 | Distribution of remaining tokens across rate-limit checks |
 
 ### Go Runtime Metrics
 
@@ -101,6 +120,67 @@ Always returns 200 while the process is running. If this probe fails, Kubernetes
 | Draining | 503 | `{"status":"not_ready"}` |
 
 Returns 200 when the instance is accepting traffic. During graceful shutdown, it transitions to 503, which causes Kubernetes to remove the pod from Service endpoints.
+
+#### Deep Health Check: `GET /readyz?deep=true`
+
+When `?deep=true` is passed, the readiness probe actively pings Redis before responding. This verifies end-to-end connectivity to the rate-limit backing store, not just process liveness.
+
+| State | Status | Body |
+|-------|--------|------|
+| Redis reachable | 200 | `{"status":"ready"}` |
+| Redis unreachable | 503 | `{"status":"not_ready","redis":"unreachable"}` |
+
+Use `?deep=true` for external health checks (load balancer, monitoring) but **not** for the Kubernetes readiness probe — frequent deep checks under load can cause unnecessary probe failures during Redis latency spikes.
+
+---
+
+## Access Logs
+
+When `logging.access_log_enabled` is `true` (the default), EdgeQuota emits a structured log line for every proxied request at `INFO` level.
+
+### Access Log Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `msg` | string | Always `"access"` |
+| `method` | string | HTTP method |
+| `path` | string | Request path |
+| `status` | int | HTTP status code returned to the client |
+| `duration_ms` | float64 | Request duration in milliseconds |
+| `bytes` | int64 | Response body bytes written |
+| `remote_addr` | string | Client remote address (IP:port) |
+| `request_id` | string | `X-Request-Id` (generated or client-supplied) |
+| `user_agent` | string | Client User-Agent header |
+| `proto` | string | HTTP protocol version (e.g., `HTTP/1.1`, `HTTP/2.0`, `HTTP/3.0`) |
+| `originalHost` | string | Original `Host` header from the client request |
+| `backend_url` | string | Backend URL the request was forwarded to |
+| `backend_protocol` | string | Protocol used for the backend connection (`h1`, `h2`, `h3`) |
+| `rl_key` | string | Rate-limit key used for this request |
+| `tenant_id` | string | Tenant key (when set by the external rate limit service) |
+
+### Example Access Log (JSON)
+
+```json
+{
+  "time": "2026-02-20T18:28:06.115Z",
+  "level": "INFO",
+  "msg": "access",
+  "method": "GET",
+  "path": "/v1/menus/test-menu-sushi/published",
+  "status": 200,
+  "duration_ms": 3109,
+  "bytes": 23055,
+  "remote_addr": "2.36.228.80:61362",
+  "request_id": "301fd0b3012663ed731769bdb07e4535",
+  "user_agent": "curl/8.18.0",
+  "proto": "HTTP/3.0",
+  "originalHost": "api.example.com",
+  "backend_url": "http://backend:8080",
+  "backend_protocol": "h1",
+  "rl_key": "acme-corp",
+  "tenant_id": "acme-corp"
+}
+```
 
 ---
 
@@ -287,4 +367,59 @@ groups:
           severity: warning
         annotations:
           summary: "EdgeQuota P99 latency exceeds 1 second"
+
+      - alert: EdgeQuotaEventsDropped
+        expr: rate(edgequota_events_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota is dropping usage events (buffer overflow)"
+
+      - alert: EdgeQuotaConcurrencyRejections
+        expr: rate(edgequota_concurrent_requests_rejected_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota is rejecting requests due to concurrency limit"
 ```
+
+---
+
+## Admin API
+
+The admin server exposes operational endpoints alongside health probes and metrics:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/config` | GET | Current sanitized configuration. Secrets (`RedactedString` fields) are masked. |
+| `/v1/stats` | GET | Runtime statistics: atomic counter snapshot (allowed, limited, redis errors, etc.). |
+
+### Example: Query Stats
+
+```bash
+curl http://localhost:9090/v1/stats | jq .
+```
+
+```json
+{
+  "allowed": 15234,
+  "limited": 42,
+  "redis_errors": 0,
+  "fallback_used": 0,
+  "readonly_retries": 0,
+  "key_extract_errors": 0,
+  "auth_errors": 0,
+  "auth_denied": 3
+}
+```
+
+---
+
+## See Also
+
+- [Configuration Reference](configuration.md) -- Logging and tracing config fields.
+- [Deployment](deployment.md) -- Probe configuration and Kubernetes setup.
+- [Events](events.md) -- Events-related metrics.
+- [Troubleshooting](troubleshooting.md) -- Debugging with metrics and probes.

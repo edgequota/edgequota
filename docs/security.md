@@ -400,3 +400,15 @@ Production deployment checklist:
 - [ ] Container image scanned for vulnerabilities
 - [ ] Secrets stored in Kubernetes Secrets, not ConfigMaps
 - [ ] Admin port (`:9090`) not exposed outside the cluster
+- [ ] Backend URL policy configured when using external RL backend_url overrides
+- [ ] WebSocket origin allowlist configured if serving WebSocket traffic
+
+---
+
+## See Also
+
+- [Configuration Reference](configuration.md) -- Full `url_policy`, TLS, and auth config.
+- [Multi-Protocol Proxy](proxy.md) -- SSRF protection and WebSocket origin validation.
+- [Deployment](deployment.md) -- Network policies and container security contexts.
+- [Architecture](architecture.md) -- Trust boundaries and failure modes.
+- [Troubleshooting](troubleshooting.md) -- Common security-related issues.

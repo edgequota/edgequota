@@ -40,12 +40,15 @@ type Emitter struct {
 	logger  *slog.Logger
 	metrics *observability.Metrics
 
-	httpURL    string
-	httpClient *http.Client
+	httpURL     string
+	httpHeaders http.Header
+	httpClient  *http.Client
 
 	batchSize     int
 	flushInterval time.Duration
 	bufferSize    int
+	maxRetries    int
+	retryBackoff  time.Duration
 
 	ring     []UsageEvent
 	ringMu   sync.Mutex
@@ -84,14 +87,35 @@ func NewEmitter(cfg config.EventsConfig, logger *slog.Logger, metrics *observabi
 		}
 	}
 
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	retryBackoff := 100 * time.Millisecond
+	if cfg.RetryBackoff != "" {
+		if d, err := time.ParseDuration(cfg.RetryBackoff); err == nil && d > 0 {
+			retryBackoff = d
+		}
+	}
+
+	// Build the pre-validated header set from config. Validation already
+	// happened in config.Validate, so we trust the names here.
+	headers := make(http.Header, len(cfg.HTTP.Headers))
+	for k, v := range cfg.HTTP.Headers {
+		headers.Set(k, v.Value())
+	}
+
 	e := &Emitter{
 		logger:        logger.With("component", "events"),
 		metrics:       metrics,
 		httpURL:       cfg.HTTP.URL,
+		httpHeaders:   headers,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		bufferSize:    bufferSize,
+		maxRetries:    maxRetries,
+		retryBackoff:  retryBackoff,
 		ring:          make([]UsageEvent, bufferSize),
 		flushCh:       make(chan struct{}, 1),
 		done:          make(chan struct{}),
@@ -211,30 +235,58 @@ func (e *Emitter) sendHTTP(batch []UsageEvent) {
 		return
 	}
 
+	backoff := e.retryBackoff
+	for attempt := 1; attempt <= e.maxRetries; attempt++ {
+		if e.trySendHTTP(body, len(batch)) {
+			return
+		}
+		if attempt < e.maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+
+	e.logger.Error("events batch send failed after all retries",
+		"attempts", e.maxRetries, "count", len(batch))
+	e.metrics.PromEventsSendFailures.Inc()
+}
+
+func (e *Emitter) trySendHTTP(body []byte, count int) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.httpURL, bytes.NewReader(body))
 	if err != nil {
 		e.logger.Error("failed to create events HTTP request", "error", err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, vals := range e.httpHeaders {
+		for _, v := range vals {
+			req.Header.Set(k, v)
+		}
+	}
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		e.logger.Warn("failed to send events batch", "error", err, "count", len(batch))
-		return
+		e.logger.Warn("failed to send events batch", "error", err, "count", count)
+		return false
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 400 {
-		e.logger.Warn("events receiver returned error",
-			"status", resp.StatusCode, "count", len(batch))
+	if resp.StatusCode >= 500 {
+		e.logger.Warn("events receiver returned server error",
+			"status", resp.StatusCode, "count", count)
+		return false
 	}
+	if resp.StatusCode >= 400 {
+		e.logger.Warn("events receiver returned client error",
+			"status", resp.StatusCode, "count", count)
+	}
+	return true
 }
 
 // String implements fmt.Stringer for debug logging.

@@ -58,6 +58,12 @@ func backendURLFromContext(ctx context.Context) *url.URL {
 	return u
 }
 
+// BackendURLFromContext returns the per-request backend URL override, or nil.
+// Exported for use by the access logger in the middleware chain.
+func BackendURLFromContext(ctx context.Context) *url.URL {
+	return backendURLFromContext(ctx)
+}
+
 // backendProtocolKey is the context key for per-request backend protocol overrides.
 type backendProtocolKey struct{}
 
@@ -76,6 +82,12 @@ func WithBackendProtocol(r *http.Request, proto string) *http.Request {
 func backendProtocolFromContext(ctx context.Context) string {
 	s, _ := ctx.Value(BackendProtocolContextKey).(string)
 	return s
+}
+
+// BackendProtocolFromContext returns the per-request backend protocol override, or "".
+// Exported for use by the access logger in the middleware chain.
+func BackendProtocolFromContext(ctx context.Context) string {
+	return backendProtocolFromContext(ctx)
 }
 
 // Option configures optional proxy behavior.
@@ -126,6 +138,21 @@ func WithWSIdleTimeout(d time.Duration) Option {
 // URL validation but switches to a private IP before the TCP connection.
 func WithDenyPrivateNetworks() Option {
 	return func(p *Proxy) { p.denyPrivateNetworks = true }
+}
+
+// WithAllowedWSOrigins configures the set of allowed Origin header values
+// for WebSocket upgrade requests. When non-empty, the proxy rejects upgrades
+// whose Origin does not match any entry (case-insensitive scheme+host
+// comparison). An empty list allows all origins (backward compatible).
+func WithAllowedWSOrigins(origins []string) Option {
+	return func(p *Proxy) {
+		if len(origins) > 0 {
+			p.allowedWSOrigins = make(map[string]struct{}, len(origins))
+			for _, o := range origins {
+				p.allowedWSOrigins[strings.ToLower(strings.TrimRight(o, "/"))] = struct{}{}
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -243,9 +270,10 @@ type Proxy struct {
 	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
 	wsDialTimeout       time.Duration
 	wsLimiter           *WSLimiter    // nil when no per-key WS limit is configured.
-	maxRequestBodySize  int64         // 0 = unlimited
-	maxWSTransferBytes  int64         // 0 = unlimited per-direction
-	wsIdleTimeout       time.Duration // 0 = no idle timeout
+	maxRequestBodySize  int64                // 0 = unlimited
+	maxWSTransferBytes  int64                // 0 = unlimited per-direction
+	wsIdleTimeout       time.Duration        // 0 = no idle timeout
+	allowedWSOrigins    map[string]struct{}  // nil = allow all origins
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -627,6 +655,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleWebSocket performs a WebSocket upgrade and bidirectional relay.
 func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if len(p.allowedWSOrigins) > 0 {
+		origin := strings.ToLower(strings.TrimRight(r.Header.Get("Origin"), "/"))
+		if _, ok := p.allowedWSOrigins[origin]; !ok {
+			p.logger.Warn("websocket: origin not allowed", "origin", r.Header.Get("Origin"))
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Enforce per-key WebSocket connection limit when configured.
 	if p.wsLimiter != nil {
 		wsKey, _ := r.Context().Value(ratelimit.KeyContextKey).(string)

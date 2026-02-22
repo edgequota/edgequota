@@ -47,7 +47,12 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `write_timeout` | duration | `"30s"` | `EDGEQUOTA_SERVER_WRITE_TIMEOUT` | Maximum time to write the response |
 | `idle_timeout` | duration | `"120s"` | `EDGEQUOTA_SERVER_IDLE_TIMEOUT` | Maximum time to wait for the next request on keep-alive connections |
 | `drain_timeout` | duration | `"30s"` | `EDGEQUOTA_SERVER_DRAIN_TIMEOUT` | Grace period during shutdown for in-flight requests to complete |
-| `max_websocket_conns_per_key` | int64 | `0` | `EDGEQUOTA_SERVER_MAX_WEBSOCKET_CONNS_PER_KEY` | Max concurrent WebSocket connections per rate-limit key. 0 = unlimited |
+| `request_timeout` | duration | `""` | `EDGEQUOTA_SERVER_REQUEST_TIMEOUT` | Per-request timeout applied to the entire middleware chain. Empty = no timeout (backend timeout still applies). |
+| `max_concurrent_requests` | int64 | `0` | `EDGEQUOTA_SERVER_MAX_CONCURRENT_REQUESTS` | Cap on in-flight requests. Excess requests receive 503. 0 = unlimited. |
+| `allowed_websocket_origins` | []string | `[]` | `EDGEQUOTA_SERVER_ALLOWED_WEBSOCKET_ORIGINS` | WebSocket Origin header allowlist. Empty = allow all origins. |
+| `max_websocket_conns_per_key` | int64 | `0` | `EDGEQUOTA_SERVER_MAX_WEBSOCKET_CONNS_PER_KEY` | Max concurrent WebSocket connections per rate-limit key. 0 = unlimited. |
+| `max_websocket_transfer_bytes` | int64 | `0` | `EDGEQUOTA_SERVER_MAX_WEBSOCKET_TRANSFER_BYTES` | Max bytes per direction on a single WebSocket connection. 0 = unlimited. |
+| `websocket_idle_timeout` | duration | `"5m"` | `EDGEQUOTA_SERVER_WEBSOCKET_IDLE_TIMEOUT` | Close WebSocket connections with no data transfer for this duration. 0 = unlimited. |
 
 ### `server.tls` — TLS Termination
 
@@ -57,6 +62,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `cert_file` | string | `""` | `EDGEQUOTA_SERVER_TLS_CERT_FILE` | Path to TLS certificate file (PEM) |
 | `key_file` | string | `""` | `EDGEQUOTA_SERVER_TLS_KEY_FILE` | Path to TLS private key file (PEM) |
 | `http3_enabled` | bool | `false` | `EDGEQUOTA_SERVER_TLS_HTTP3_ENABLED` | Enable HTTP/3 (QUIC) on the same address over UDP. Requires TLS. |
+| `http3_advertise_port` | int | `0` | `EDGEQUOTA_SERVER_TLS_HTTP3_ADVERTISE_PORT` | External port for the `Alt-Svc` header. 0 = use the listen port. |
 | `min_version` | string | `""` | `EDGEQUOTA_SERVER_TLS_MIN_VERSION` | Minimum TLS version: `"1.2"` or `"1.3"`. Defaults to Go's default (TLS 1.2). |
 
 ### `admin` — Admin/Observability Server
@@ -77,11 +83,34 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `max_idle_conns` | int | `100` | `EDGEQUOTA_BACKEND_MAX_IDLE_CONNS` | Maximum idle connections to the backend |
 | `idle_conn_timeout` | duration | `"90s"` | `EDGEQUOTA_BACKEND_IDLE_CONN_TIMEOUT` | Idle connection timeout |
 | `tls_insecure_skip_verify` | bool | `false` | `EDGEQUOTA_BACKEND_TLS_INSECURE_SKIP_VERIFY` | Skip TLS certificate verification for backend connections |
+| `max_request_body_size` | int64 | `0` | `EDGEQUOTA_BACKEND_MAX_REQUEST_BODY_SIZE` | Maximum request body size in bytes. 0 = unlimited. |
+
+### `backend.url_policy` — Dynamic Backend URL Policy (SSRF Protection)
+
+Controls which dynamic `backend_url` values (from the external rate limit service) are allowed. Prevents SSRF via backend URL injection.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `allowed_schemes` | []string | `["http", "https"]` | `EDGEQUOTA_BACKEND_URL_POLICY_ALLOWED_SCHEMES` | Reject URLs with other schemes |
+| `deny_private_networks` | bool | `true` | `EDGEQUOTA_BACKEND_URL_POLICY_DENY_PRIVATE_NETWORKS` | Block RFC 1918, loopback, link-local, and cloud metadata IPs |
+| `allowed_hosts` | []string | `[]` | `EDGEQUOTA_BACKEND_URL_POLICY_ALLOWED_HOSTS` | When non-empty, only these hostnames are permitted (exact match, case-insensitive) |
+
+When the external rate limit service returns a `backend_url`, EdgeQuota validates it against this policy before connecting. Additionally, DNS resolution results are re-validated at TCP dial time (`SafeDialer`) to prevent DNS rebinding attacks. See [Security](security.md) for the full threat model.
+
+```yaml
+backend:
+  url_policy:
+    deny_private_networks: true
+    allowed_hosts:
+      - "backend-a.internal"
+      - "backend-b.internal"
+```
 
 ### `backend.transport` — HTTP Transport Tuning
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
+| `backend_protocol` | string | `"auto"` | `EDGEQUOTA_BACKEND_TRANSPORT_BACKEND_PROTOCOL` | Protocol: `auto`, `h1`, `h2`, `h3`. See [Multi-Protocol Proxy](proxy.md). |
 | `dial_timeout` | duration | `"30s"` | `EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT` | TCP dial timeout for backend connections |
 | `dial_keep_alive` | duration | `"30s"` | `EDGEQUOTA_BACKEND_TRANSPORT_DIAL_KEEP_ALIVE` | TCP keep-alive interval |
 | `tls_handshake_timeout` | duration | `"10s"` | `EDGEQUOTA_BACKEND_TRANSPORT_TLS_HANDSHAKE_TIMEOUT` | TLS handshake timeout |
@@ -89,6 +118,8 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `h2_read_idle_timeout` | duration | `"30s"` | `EDGEQUOTA_BACKEND_TRANSPORT_H2_READ_IDLE_TIMEOUT` | HTTP/2 read idle timeout (health check for gRPC streams) |
 | `h2_ping_timeout` | duration | `"15s"` | `EDGEQUOTA_BACKEND_TRANSPORT_H2_PING_TIMEOUT` | HTTP/2 ping timeout |
 | `websocket_dial_timeout` | duration | `"10s"` | `EDGEQUOTA_BACKEND_TRANSPORT_WEBSOCKET_DIAL_TIMEOUT` | WebSocket backend dial timeout |
+| `h3_udp_receive_buffer_size` | int | `0` | `EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_RECEIVE_BUFFER_SIZE` | QUIC UDP receive buffer (bytes). 0 = let quic-go manage. Recommended: 7500000. |
+| `h3_udp_send_buffer_size` | int | `0` | `EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_SEND_BUFFER_SIZE` | QUIC UDP send buffer (bytes). 0 = let quic-go manage. Recommended: 7500000. |
 
 ### `auth` — External Authentication
 
@@ -97,6 +128,16 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `enabled` | bool | `false` | `EDGEQUOTA_AUTH_ENABLED` | Enable external authentication |
 | `timeout` | duration | `"5s"` | `EDGEQUOTA_AUTH_TIMEOUT` | Timeout for auth service calls |
 | `failure_policy` | string | `"failclosed"` | `EDGEQUOTA_AUTH_FAILURE_POLICY` | Behavior when auth is unreachable: `failclosed`, `failopen` |
+| `propagate_request_body` | bool | `false` | `EDGEQUOTA_AUTH_PROPAGATE_REQUEST_BODY` | Include the request body in the auth check (increases latency) |
+| `max_auth_body_size` | int64 | `65536` | `EDGEQUOTA_AUTH_MAX_AUTH_BODY_SIZE` | Maximum body bytes sent to the auth service (default: 64 KiB) |
+| `allowed_injection_headers` | []string | `[]` | `EDGEQUOTA_AUTH_ALLOWED_INJECTION_HEADERS` | Headers the auth service is permitted to inject even if in the deny list |
+
+### `auth.circuit_breaker` — Auth Circuit Breaker
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `threshold` | int | `5` | `EDGEQUOTA_AUTH_CIRCUIT_BREAKER_THRESHOLD` | Consecutive failures before opening |
+| `reset_timeout` | duration | `"30s"` | `EDGEQUOTA_AUTH_CIRCUIT_BREAKER_RESET_TIMEOUT` | Time the breaker stays open before half-open probe |
 
 ### `auth.http` — HTTP Auth Backend
 
@@ -117,6 +158,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_AUTH_GRPC_TLS_ENABLED` | Enable TLS for gRPC auth |
 | `ca_file` | string | `""` | `EDGEQUOTA_AUTH_GRPC_TLS_CA_FILE` | CA certificate file for verification |
+| `server_name` | string | `""` | `EDGEQUOTA_AUTH_GRPC_TLS_SERVER_NAME` | Override TLS server name verification. Empty = use hostname from address. |
 
 ### `auth.header_filter` — Auth Header Filtering
 
@@ -135,6 +177,9 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `failure_policy` | string | `"passThrough"` | `EDGEQUOTA_RATE_LIMIT_FAILURE_POLICY` | Behavior when Redis is down: `passThrough`, `failClosed`, `inMemoryFallback` |
 | `failure_code` | int | `429` | `EDGEQUOTA_RATE_LIMIT_FAILURE_CODE` | HTTP status code for `failClosed` rejections. Must be 4xx or 5xx. |
 | `min_ttl` | duration | `""` (auto) | `EDGEQUOTA_RATE_LIMIT_MIN_TTL` | Floor for Redis key TTL. Reduces EXPIRE churn for high-cardinality keys. |
+| `key_prefix` | string | `""` | `EDGEQUOTA_RATE_LIMIT_KEY_PREFIX` | Optional prefix prepended to all rate-limit keys. |
+| `max_tenant_labels` | int | `1000` | `EDGEQUOTA_RATE_LIMIT_MAX_TENANT_LABELS` | Max distinct tenant labels in per-tenant Prometheus metrics. Prevents cardinality explosion. |
+| `global_passthrough_rps` | float64 | `0` | `EDGEQUOTA_RATE_LIMIT_GLOBAL_PASSTHROUGH_RPS` | Safety valve: max global RPS when in passthrough mode (Redis down). 0 = unlimited. |
 
 ### `rate_limit.key_strategy` — Key Extraction
 
@@ -154,6 +199,14 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `timeout` | duration | `"5s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_TIMEOUT` | Timeout for external rate limit calls |
 | `cache_ttl` | duration | `"60s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CACHE_TTL` | Default cache TTL when response has no cache hints |
 | `max_concurrent_requests` | int | `50` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_MAX_CONCURRENT_REQUESTS` | Semaphore cap on concurrent external calls |
+| `failure_policy` | string | `"static_fallback"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FAILURE_POLICY` | Behavior when external service is down: `static_fallback`, `failclosed` |
+
+### `rate_limit.external.circuit_breaker` — External RL Circuit Breaker
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `threshold` | int | `5` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CIRCUIT_BREAKER_THRESHOLD` | Consecutive failures per key before opening |
+| `reset_timeout` | duration | `"30s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CIRCUIT_BREAKER_RESET_TIMEOUT` | Time the breaker stays open before half-open probe |
 
 ### `rate_limit.external.http` — External HTTP Backend
 
@@ -173,6 +226,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_GRPC_TLS_ENABLED` | Enable TLS for external gRPC |
 | `ca_file` | string | `""` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_GRPC_TLS_CA_FILE` | CA file for external gRPC TLS |
+| `server_name` | string | `""` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_GRPC_TLS_SERVER_NAME` | Override TLS server name verification. Empty = use hostname from address. |
 
 ### `rate_limit.external.header_filter` — External Rate Limit Header Filtering
 
@@ -246,12 +300,93 @@ cache_redis:
   pool_size: 20
 ```
 
+### `events` — Usage Event Emission
+
+EdgeQuota can emit rate-limit decisions as usage events to an external HTTP or gRPC service (webhook pattern). Events are batched, buffered, and sent asynchronously — they never block the request hot path.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `enabled` | bool | `false` | `EDGEQUOTA_EVENTS_ENABLED` | Enable usage event emission |
+| `batch_size` | int | `100` | `EDGEQUOTA_EVENTS_BATCH_SIZE` | Number of events per batch |
+| `flush_interval` | duration | `"5s"` | `EDGEQUOTA_EVENTS_FLUSH_INTERVAL` | Maximum time between flushes |
+| `buffer_size` | int | `10000` | `EDGEQUOTA_EVENTS_BUFFER_SIZE` | Ring buffer capacity. Oldest events are dropped on overflow. |
+| `max_retries` | int | `3` | `EDGEQUOTA_EVENTS_MAX_RETRIES` | Number of send attempts per batch before giving up |
+| `retry_backoff` | duration | `"100ms"` | `EDGEQUOTA_EVENTS_RETRY_BACKOFF` | Initial retry backoff (doubles on each attempt) |
+
+### `events.http` — HTTP Event Receiver
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `url` | string | `""` | `EDGEQUOTA_EVENTS_HTTP_URL` | URL of the HTTP events receiver (receives POST with JSON) |
+| `headers` | map[string]string | `{}` | — | Custom headers attached to every events HTTP request. Values are treated as secrets (redacted in logs and `/config`). See below for details. |
+
+#### Custom Headers
+
+The `headers` map allows you to attach arbitrary headers to every events HTTP request. Common use cases:
+
+- **Authentication**: `Authorization: Bearer <token>`, `X-Api-Key: <key>`
+- **Routing**: `X-Destination: analytics`, `X-Environment: production`
+- **Correlation**: `X-Source: edgequota`
+
+```yaml
+events:
+  enabled: true
+  http:
+    url: "https://events-receiver.internal/ingest"
+    headers:
+      Authorization: "Bearer eyJhbGciOi..."
+      X-Source: "edgequota"
+      X-Environment: "production"
+```
+
+**Security restrictions**: The following headers are rejected at startup to prevent breaking HTTP transport semantics:
+
+`Host`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Te`, `Upgrade`, `Proxy-Authorization`, `Proxy-Connection`, `Keep-Alive`, `Trailer`
+
+`Content-Type` is always set to `application/json` by EdgeQuota and cannot be overridden.
+
+Header values are stored using `RedactedString`, so they are masked in logs, debug output, and the `/v1/config` admin endpoint — safe for tokens and API keys.
+
+#### Deprecated Fields
+
+The following fields are deprecated and will be removed in a future release. Use `headers` instead.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `auth_token` | string | `""` | `EDGEQUOTA_EVENTS_HTTP_AUTH_TOKEN` | **Deprecated.** Migrated to `headers[auth_header]` with `Bearer ` prefix. |
+| `auth_header` | string | `"Authorization"` | `EDGEQUOTA_EVENTS_HTTP_AUTH_HEADER` | **Deprecated.** Header name for `auth_token`. Defaults to `Authorization`. |
+
+When `auth_token` is set and the equivalent header is not already present in `headers`, EdgeQuota automatically migrates it at startup:
+
+```yaml
+# Deprecated:
+events:
+  http:
+    auth_token: "my-secret"
+    auth_header: "X-Api-Key"
+
+# Equivalent (preferred):
+events:
+  http:
+    headers:
+      X-Api-Key: "Bearer my-secret"
+```
+
+If both `auth_token` and an explicit `headers` entry for the same header name exist, the explicit `headers` entry takes precedence.
+
+### `events.grpc` — gRPC Event Receiver
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `address` | string | `""` | `EDGEQUOTA_EVENTS_GRPC_ADDRESS` | Address of the gRPC events service |
+
 ### `logging` — Structured Logging
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
 | `level` | string | `"info"` | `EDGEQUOTA_LOGGING_LEVEL` | Log level: `debug`, `info`, `warn`, `error` |
 | `format` | string | `"json"` | `EDGEQUOTA_LOGGING_FORMAT` | Output format: `json`, `text` |
+| `access_log_enabled` | bool | `true` | `EDGEQUOTA_LOGGING_ACCESS_LOG_ENABLED` | Emit a structured access log line for every proxied request. See [Observability](observability.md). |
 
 ### `tracing` — OpenTelemetry Tracing
 
@@ -332,3 +467,15 @@ EdgeQuota watches the config file for changes using `fsnotify`. When the file is
 Rapid file writes are debounced (300ms) to handle editors that use atomic rename-on-save.
 
 **Note:** Redis connection parameters and server listen addresses are NOT hot-reloaded; they require a restart.
+
+---
+
+## See Also
+
+- [Getting Started](getting-started.md) -- Quick start guide with minimal configs.
+- [Multi-Protocol Proxy](proxy.md) -- Backend protocol selection and transport tuning.
+- [Rate Limiting](rate-limiting.md) -- Algorithm details and external rate limit service.
+- [Authentication](authentication.md) -- Auth flow and security model.
+- [Events](events.md) -- Usage event emission.
+- [Security](security.md) -- Backend URL policy and SSRF protection.
+- [Deployment](deployment.md) -- Production deployment and hot-reload behavior.

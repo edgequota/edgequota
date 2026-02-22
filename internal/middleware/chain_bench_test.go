@@ -68,19 +68,3 @@ func BenchmarkServeHTTP(b *testing.B) {
 	}
 }
 
-// BenchmarkGetHeaderMap validates that plain map allocation performs well for
-// the external RL header extraction path.
-func BenchmarkGetHeaderMap(b *testing.B) {
-	req := httptest.NewRequest(http.MethodGet, "/bench", nil)
-	req.Header.Set("Authorization", "Bearer token")
-	req.Header.Set("X-Tenant-Id", "tenant-1")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "bench/1.0")
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = getHeaderMap(req)
-	}
-}

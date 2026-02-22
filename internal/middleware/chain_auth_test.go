@@ -326,6 +326,45 @@ func TestChainAuthInjectsRequestHeaders(t *testing.T) {
 	})
 }
 
+func TestChainAuthReceivesHostHeader(t *testing.T) {
+	t.Run("Host header from r.Host is forwarded to auth service", func(t *testing.T) {
+		var receivedHost string
+		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Headers map[string]string `json:"headers"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			receivedHost = req.Headers["Host"]
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"allowed": true})
+		}))
+		defer authServer.Close()
+
+		cfg := config.Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 0
+		cfg.Auth.Enabled = true
+		cfg.Auth.HTTP.URL = authServer.URL
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "http://admin.example.com/api/check", nil)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "admin.example.com", receivedHost,
+			"Host header must be forwarded from r.Host to auth service")
+	})
+}
+
 func TestChainServeHTTPFailClosed(t *testing.T) {
 	t.Run("returns configured failure code when Redis is down", func(t *testing.T) {
 		cfg := testConfig("127.0.0.1:1")

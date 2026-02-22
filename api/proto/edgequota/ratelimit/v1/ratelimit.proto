@@ -48,6 +48,19 @@ enum FailurePolicy {
   FAILURE_POLICY_IN_MEMORY_FALLBACK = 3;
 }
 
+// BackendProtocol selects the outbound protocol EdgeQuota uses to reach the
+// backend for a given request.
+enum BackendProtocol {
+  // Use the static backend_protocol from config.
+  BACKEND_PROTOCOL_UNSPECIFIED = 0;
+  // Force HTTP/1.1.
+  BACKEND_PROTOCOL_H1 = 1;
+  // Force HTTP/2.
+  BACKEND_PROTOCOL_H2 = 2;
+  // Force HTTP/3 (QUIC); requires an HTTPS backend.
+  BACKEND_PROTOCOL_H3 = 3;
+}
+
 // GetLimitsResponse contains the rate limit parameters and optional cache
 // control directives. These fields allow the external service to control how
 // long EdgeQuota caches this response — consistent across HTTP and gRPC.
@@ -105,9 +118,8 @@ message GetLimitsResponse {
 
   // Backend protocol override (optional). Controls the outbound protocol
   // EdgeQuota uses to reach the backend for this request.
-  // Values: "" (use static config), "h1", "h2", "h3".
   // gRPC traffic always uses h2 regardless of this setting.
-  optional string backend_protocol = 11;
+  BackendProtocol backend_protocol = 11;
 
   // Cache control (optional). When omitted, the configured default TTL is used.
 

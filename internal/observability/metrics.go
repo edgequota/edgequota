@@ -66,6 +66,12 @@ type Metrics struct {
 	// External RL concurrency metrics.
 	PromExtRLSemaphoreRejected  prometheus.Counter
 	PromExtRLSingleflightShared prometheus.Counter
+
+	// Global concurrency limiter.
+	PromConcurrencyRejected prometheus.Counter
+
+	// Events emitter failures.
+	PromEventsSendFailures prometheus.Counter
 }
 
 // NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
@@ -188,6 +194,16 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Namespace: "edgequota",
 			Name:      "external_rl_singleflight_shared_total",
 			Help:      "Number of external RL requests that shared a singleflight result.",
+		}),
+		PromConcurrencyRejected: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "concurrent_requests_rejected_total",
+			Help:      "Number of requests rejected because max_concurrent_requests was reached.",
+		}),
+		PromEventsSendFailures: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "events_send_failures_total",
+			Help:      "Number of event batches that failed to send after all retries.",
 		}),
 	}
 

@@ -342,3 +342,13 @@ func validateToken(token string) bool {
     return token != ""
 }
 ```
+
+---
+
+## See Also
+
+- [Configuration Reference](configuration.md) -- Full `auth` config section.
+- [API Reference](api-reference.md) -- Proto and OpenAPI definitions for the auth service.
+- [Go SDK](go-sdk.md) -- Server-side helpers for building auth services.
+- [Security](security.md) -- Trust boundaries and header security.
+- [Troubleshooting](troubleshooting.md) -- Common auth issues.

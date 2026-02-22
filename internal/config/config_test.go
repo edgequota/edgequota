@@ -1104,3 +1104,256 @@ backend:
 		assert.Equal(t, tc.H3UDPSendBufferSize, decoded.H3UDPSendBufferSize)
 	})
 }
+
+func TestSanitizedConfig(t *testing.T) {
+	t.Run("omits Redis endpoints and auth URLs", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.Backend.URL = "https://api.backend.internal:443/v1"
+		cfg.Redis.Endpoints = []string{"redis-0:6379", "redis-1:6379"}
+		cfg.Redis.Password = RedactedString("s3cret")
+		cfg.Auth.Enabled = true
+		cfg.Auth.HTTP.URL = "https://auth.internal/check"
+		cfg.RateLimit.Average = 500
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "https://rl.internal/limits"
+
+		s := cfg.Sanitized()
+
+		assert.Equal(t, "https://api.backend.internal:443", s.Backend.URL,
+			"backend URL path should be stripped")
+		assert.Equal(t, int64(500), s.RateLimit.Average)
+		assert.True(t, s.RateLimit.ExternalEnabled)
+
+		data, err := json.Marshal(s)
+		require.NoError(t, err)
+		raw := string(data)
+		assert.NotContains(t, raw, "redis-0")
+		assert.NotContains(t, raw, "s3cret")
+		assert.NotContains(t, raw, "auth.internal")
+		assert.NotContains(t, raw, "rl.internal")
+	})
+
+	t.Run("strips backend URL to scheme://host", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.Backend.URL = "https://my-api.example.com:8443/api/v2"
+
+		s := cfg.Sanitized()
+		assert.Equal(t, "https://my-api.example.com:8443", s.Backend.URL)
+	})
+
+	t.Run("preserves operational fields", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Average = 100
+		cfg.RateLimit.Burst = 50
+		cfg.RateLimit.Period = "1s"
+		cfg.RateLimit.FailurePolicy = FailurePolicyInMemoryFallback
+		cfg.Logging.Level = "debug"
+
+		s := cfg.Sanitized()
+		assert.Equal(t, int64(100), s.RateLimit.Average)
+		assert.Equal(t, int64(50), s.RateLimit.Burst)
+		assert.Equal(t, "1s", s.RateLimit.Period)
+		assert.Equal(t, FailurePolicyInMemoryFallback, s.RateLimit.FailurePolicy)
+		assert.Equal(t, LogLevel("debug"), s.Logging.Level)
+	})
+}
+
+func TestBackendConfigEqual(t *testing.T) {
+	base := func() BackendConfig {
+		return BackendConfig{
+			URL:                "http://backend:8080",
+			Timeout:            "30s",
+			MaxIdleConns:       100,
+			IdleConnTimeout:    "90s",
+			MaxRequestBodySize: 1 << 20,
+			Transport:          TransportConfig{BackendProtocol: "auto"},
+		}
+	}
+
+	t.Run("identical configs are equal", func(t *testing.T) {
+		a, b := base(), base()
+		assert.True(t, a.Equal(b))
+	})
+
+	t.Run("URL difference", func(t *testing.T) {
+		a, b := base(), base()
+		b.URL = "https://other:443"
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("timeout difference", func(t *testing.T) {
+		a, b := base(), base()
+		b.Timeout = "60s"
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("max_idle_conns difference", func(t *testing.T) {
+		a, b := base(), base()
+		b.MaxIdleConns = 200
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("tls_insecure_verify difference", func(t *testing.T) {
+		a, b := base(), base()
+		b.TLSInsecureVerify = true
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("transport backend_protocol difference", func(t *testing.T) {
+		a, b := base(), base()
+		b.Transport.BackendProtocol = "h2"
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("URLPolicy deny_private_networks difference", func(t *testing.T) {
+		a, b := base(), base()
+		deny := false
+		b.URLPolicy.DenyPrivateNetworks = &deny
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("URLPolicy allowed_schemes difference", func(t *testing.T) {
+		a, b := base(), base()
+		a.URLPolicy.AllowedSchemes = []string{"http"}
+		b.URLPolicy.AllowedSchemes = []string{"http", "https"}
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("URLPolicy allowed_hosts difference", func(t *testing.T) {
+		a, b := base(), base()
+		a.URLPolicy.AllowedHosts = []string{"a.com"}
+		b.URLPolicy.AllowedHosts = []string{"b.com"}
+		assert.False(t, a.Equal(b))
+	})
+
+	t.Run("same allowed_hosts are equal", func(t *testing.T) {
+		a, b := base(), base()
+		a.URLPolicy.AllowedHosts = []string{"a.com", "b.com"}
+		b.URLPolicy.AllowedHosts = []string{"a.com", "b.com"}
+		assert.True(t, a.Equal(b))
+	})
+}
+
+func TestValidateEventsHeaders(t *testing.T) {
+	base := func() *Config {
+		c := Defaults()
+		c.Backend.URL = "http://backend:8080"
+		c.Events.Enabled = true
+		c.Events.HTTP.URL = "http://events-receiver:9000"
+		return c
+	}
+
+	t.Run("accepts valid custom headers", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Authorization": "Bearer tok",
+			"X-Api-Key":     "key-123",
+			"X-Destination": "analytics",
+		}
+		assert.NoError(t, Validate(cfg))
+	})
+
+	t.Run("rejects Host header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Host": "evil.com",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Host")
+		assert.Contains(t, err.Error(), "restricted")
+	})
+
+	t.Run("rejects Content-Length header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Content-Length": "999",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Content-Length")
+	})
+
+	t.Run("rejects Content-Type header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Content-Type": "text/xml",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Content-Type")
+	})
+
+	t.Run("rejects Connection header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Connection": "close",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Connection")
+	})
+
+	t.Run("rejects Transfer-Encoding header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Transfer-Encoding": "chunked",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Transfer-Encoding")
+	})
+
+	t.Run("rejects empty header name", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"": "value",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty header name")
+	})
+
+	t.Run("accepts empty headers map", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = nil
+		assert.NoError(t, Validate(cfg))
+	})
+
+	t.Run("migrates deprecated auth_token to headers", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.AuthToken = "old-tok"
+		assert.NoError(t, Validate(cfg))
+		assert.Equal(t, "Bearer old-tok", cfg.Events.HTTP.Headers["Authorization"].Value())
+	})
+
+	t.Run("migrates deprecated auth_token with custom auth_header", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.AuthToken = "key-val"
+		cfg.Events.HTTP.AuthHeader = "X-Api-Key"
+		assert.NoError(t, Validate(cfg))
+		assert.Equal(t, "Bearer key-val", cfg.Events.HTTP.Headers["X-Api-Key"].Value())
+	})
+
+	t.Run("explicit headers take precedence over deprecated auth_token", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.AuthToken = "old-tok"
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"Authorization": "Bearer new-tok",
+		}
+		assert.NoError(t, Validate(cfg))
+		assert.Equal(t, "Bearer new-tok", cfg.Events.HTTP.Headers["Authorization"].Value(),
+			"explicit headers must take precedence over deprecated auth_token")
+	})
+
+	t.Run("case-insensitive deny-list check", func(t *testing.T) {
+		cfg := base()
+		cfg.Events.HTTP.Headers = map[string]RedactedString{
+			"connection": "keep-alive",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "restricted")
+	})
+}

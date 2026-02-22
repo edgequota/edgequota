@@ -19,6 +19,7 @@ import (
 
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
+	iredis "github.com/edgequota/edgequota/internal/redis"
 	"github.com/edgequota/edgequota/internal/server"
 )
 
@@ -41,6 +42,9 @@ func main() {
 	// Initialize structured logger.
 	logger := observability.NewLogger(cfg.Logging.Level, cfg.Logging.Format)
 	logger.Info("starting edgequota", "version", version)
+
+	// Redirect go-redis internal logs to slog before any client is created.
+	iredis.InitLogger(logger)
 
 	// Create root context with signal handling for graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

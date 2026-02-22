@@ -7,6 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alicebob/miniredis/v2/server"
+	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -459,14 +460,13 @@ func TestDiscoverMaster(t *testing.T) {
 
 func TestNewSentinel(t *testing.T) {
 	t.Run("returns error for unreachable sentinels", func(t *testing.T) {
-		opts := &options{
-			endpoints:    []string{"127.0.0.1:1"},
-			masterName:   "mymaster",
-			dialTimeout:  100 * time.Millisecond,
-			readTimeout:  100 * time.Millisecond,
-			writeTimeout: 100 * time.Millisecond,
+		cfg := config.RedisConfig{
+			Endpoints:   []string{"127.0.0.1:1"},
+			Mode:        config.RedisModeSentinel,
+			MasterName:  "mymaster",
+			DialTimeout: "100ms",
 		}
-		_, err := newSentinel(opts)
+		_, err := NewClient(cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "sentinel")
 	})

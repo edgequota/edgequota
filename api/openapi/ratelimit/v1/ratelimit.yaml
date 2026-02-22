@@ -68,6 +68,18 @@ components:
         - failclosed
         - inmemory_fallback
 
+    BackendProtocol:
+      type: string
+      description: |
+        Selects the outbound protocol EdgeQuota uses to reach the backend.
+        An empty string means "use the static config".
+        gRPC traffic always uses h2 regardless of this setting.
+      enum:
+        - ""
+        - h1
+        - h2
+        - h3
+
     GetLimitsResponse:
       type: object
       description: Rate limit parameters and optional cache/override directives.
@@ -111,17 +123,7 @@ components:
             Per-request timeout override (optional). Duration string (e.g. "10s").
             When non-empty, overrides the global server.request_timeout.
         backend_protocol:
-          type: string
-          description: |
-            Backend protocol override (optional). Controls the outbound protocol
-            EdgeQuota uses to reach the backend for this request.
-            Values: "" (use static config), "h1", "h2", "h3".
-            gRPC traffic always uses h2 regardless of this setting.
-          enum:
-            - ""
-            - h1
-            - h2
-            - h3
+          $ref: "#/components/schemas/BackendProtocol"
         cache_max_age_seconds:
           type: integer
           format: int64

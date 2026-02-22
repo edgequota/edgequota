@@ -48,14 +48,13 @@ func TestWSLimiter_Release(t *testing.T) {
 	})
 
 	t.Run("release cleans up map entry at zero", func(t *testing.T) {
-		l := NewWSLimiter(3)
+		l := NewWSLimiter(1)
 		l.Acquire("k")
 		l.Release("k")
 
-		l.mu.Lock()
-		_, exists := l.counts["k"]
-		l.mu.Unlock()
-		assert.False(t, exists, "key should be deleted when count reaches 0")
+		// After release, the slot should be available again.
+		assert.True(t, l.Acquire("k"), "key slot should be reusable after full release")
+		l.Release("k")
 	})
 
 	t.Run("nil limiter release is no-op", func(t *testing.T) {

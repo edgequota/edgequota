@@ -201,6 +201,111 @@ func TestServerProxiesTraffic(t *testing.T) {
 	})
 }
 
+func TestAdminEndpointVersioning(t *testing.T) {
+	mr := miniredis.RunT(t)
+	adminAddr := freeAddr(t)
+	proxyAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.Backend.URL = "http://127.0.0.1:1"
+	cfg.Server.Address = proxyAddr
+	cfg.Admin.Address = adminAddr
+	cfg.RateLimit.Average = 0
+	cfg.Redis.Endpoints = []string{mr.Addr()}
+
+	srv, err := New(cfg, testLogger(), "test")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Run(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		resp, httpErr := http.Get("http://" + adminAddr + "/healthz")
+		if httpErr != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	t.Run("/v1/config returns valid JSON", func(t *testing.T) {
+		resp, err := client.Get("http://" + adminAddr + "/v1/config")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Contains(t, body, "server")
+		assert.Contains(t, body, "rate_limit")
+	})
+
+	t.Run("/v1/stats returns valid JSON", func(t *testing.T) {
+		resp, err := client.Get("http://" + adminAddr + "/v1/stats")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	cancel()
+	<-done
+}
+
+func TestAdminConfigOmitsSensitiveData(t *testing.T) {
+	mr := miniredis.RunT(t)
+	adminAddr := freeAddr(t)
+	proxyAddr := freeAddr(t)
+
+	cfg := config.Defaults()
+	cfg.Backend.URL = "https://api.backend.internal:443/v1"
+	cfg.Server.Address = proxyAddr
+	cfg.Admin.Address = adminAddr
+	cfg.RateLimit.Average = 100
+	cfg.Redis.Endpoints = []string{mr.Addr()}
+	cfg.Redis.Password = "s3cret"
+
+	srv, err := New(cfg, testLogger(), "test")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Run(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		resp, httpErr := http.Get("http://" + adminAddr + "/healthz")
+		if httpErr != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + adminAddr + "/v1/config")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	raw := string(body)
+	assert.NotContains(t, raw, "s3cret", "Redis password must not appear in /v1/config")
+	assert.NotContains(t, raw, mr.Addr(), "Redis endpoints must not appear in /v1/config")
+	assert.Contains(t, raw, "api.backend.internal", "backend host should be visible")
+
+	cancel()
+	<-done
+}
+
 func TestServerTLSHTTP2(t *testing.T) {
 	t.Run("negotiates HTTP/2 over TLS without h2c conflict", func(t *testing.T) {
 		// The backend must support h2c (HTTP/2 over cleartext) because the proxy's

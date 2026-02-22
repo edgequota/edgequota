@@ -31,6 +31,7 @@ import (
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/semaphore"
 )
 
 var tracer = otel.Tracer("edgequota.middleware")
@@ -41,15 +42,15 @@ const requestIDHeader = "X-Request-Id"
 // maxRequestIDLen is the maximum allowed length for a client-supplied X-Request-Id.
 const maxRequestIDLen = 128
 
-// requestIDRng is a per-goroutine-safe CSPRNG seeded from crypto/rand.
-// ChaCha8 is cryptographically strong and avoids a syscall per ID
-// (unlike crypto/rand.Read), which reduces latency under high concurrency.
-var requestIDRng = func() *rand.ChaCha8 {
+// requestIDRng is a goroutine-safe CSPRNG seeded from crypto/rand.
+// rand.New wraps ChaCha8 with internal synchronization so concurrent
+// calls to Uint64 are safe without external locking.
+var requestIDRng = func() *rand.Rand {
 	var seed [32]byte
 	if _, err := cryptorand.Read(seed[:]); err != nil {
 		panic("failed to seed ChaCha8: " + err.Error())
 	}
-	return rand.NewChaCha8(seed)
+	return rand.New(rand.NewChaCha8(seed))
 }()
 
 // generateRequestID creates a 16-byte hex-encoded random ID (128 bits).
@@ -83,20 +84,26 @@ func validRequestID(s string) bool {
 	return true
 }
 
-// injectionDenyHeaders is the set of hop-by-hop and security-sensitive headers
-// that the auth service is NOT allowed to inject into upstream requests. This
-// prevents request smuggling via a compromised or misconfigured auth service.
+// injectionDenyHeaders is the set of hop-by-hop, forwarding, and security-
+// sensitive headers that the auth service is NOT allowed to inject into
+// upstream requests. This prevents request smuggling and IP/identity
+// spoofing via a compromised or misconfigured auth service.
 var injectionDenyHeaders = map[string]struct{}{
 	"Host":                {},
 	"Content-Length":      {},
-	"Transfer-Encoding":   {},
-	"Connection":          {},
-	"Te":                  {},
-	"Upgrade":             {},
+	"Transfer-Encoding":  {},
+	"Connection":         {},
+	"Te":                 {},
+	"Upgrade":            {},
 	"Proxy-Authorization": {},
-	"Proxy-Connection":    {},
-	"Keep-Alive":          {},
-	"Trailer":             {},
+	"Proxy-Connection":   {},
+	"Keep-Alive":         {},
+	"Trailer":            {},
+	"X-Forwarded-For":    {},
+	"X-Forwarded-Host":   {},
+	"X-Forwarded-Proto":  {},
+	"X-Real-Ip":          {},
+	"X-Request-Id":       {},
 }
 
 // jsonErrorResponse is the structured error body returned by EdgeQuota.
@@ -134,7 +141,7 @@ func cryptoRandFloat64() float64 {
 // Default recovery backoff configuration.
 var (
 	defaultRecoveryBackoffBase = time.Second
-	defaultRecoveryBackoffMax  = 30 * time.Second
+	defaultRecoveryBackoffMax  = 60 * time.Second
 
 	defaultBackoffJitter = func(d time.Duration) time.Duration {
 		factor := 0.8 + cryptoRandFloat64()*0.4
@@ -144,20 +151,6 @@ var (
 
 // maxTTL caps Redis key TTL to 7 days.
 const maxTTL = 7 * 24 * 3600
-
-// getHeaderMap returns a fresh map populated with the first value of each header.
-// Uses plain allocation instead of sync.Pool — Go 1.26's GC handles short-lived
-// maps efficiently, and the pool adds contention under high concurrency with no
-// measurable benefit (validated by BenchmarkGetHeaderMap in chain_bench_test.go).
-func getHeaderMap(r *http.Request) map[string]string {
-	m := make(map[string]string, len(r.Header))
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			m[k] = v[0]
-		}
-	}
-	return m
-}
 
 // Failure policy constants — re-exported from config for local readability.
 const (
@@ -210,9 +203,12 @@ type Chain struct {
 	urlPolicy      atomic.Value // proxy.BackendURLPolicy
 	accessLog      atomic.Bool
 
-	emitter *events.Emitter
+	emitter        *events.Emitter
+	concurrencySem *semaphore.Weighted
 
-	ctx          context.Context
+	allowedInjectionHeaders map[string]struct{}
+
+	ctx context.Context
 	cancel       context.CancelFunc
 	reconnectMu  sync.Mutex
 	reconnecting bool
@@ -362,6 +358,15 @@ func NewChain(
 			time.Minute,
 		)
 	}
+	if cfg.Server.MaxConcurrentRequests > 0 {
+		chain.concurrencySem = semaphore.NewWeighted(cfg.Server.MaxConcurrentRequests)
+	}
+	if len(cfg.Auth.AllowedInjectionHeaders) > 0 {
+		chain.allowedInjectionHeaders = make(map[string]struct{}, len(cfg.Auth.AllowedInjectionHeaders))
+		for _, h := range cfg.Auth.AllowedInjectionHeaders {
+			chain.allowedInjectionHeaders[http.CanonicalHeaderKey(h)] = struct{}{}
+		}
+	}
 	chain.emitter = events.NewEmitter(cfg.Events, logger, metrics)
 
 	if err := chain.initRedis(cfg, logger, p); err != nil {
@@ -377,6 +382,12 @@ func NewChain(
 	logger.Info("middleware chain ready",
 		"average", cfg.RateLimit.Average, "burst", p.burst,
 		"period", p.period, "policy", p.failurePolicy)
+
+	if p.failurePolicy == policyInMemoryFallback {
+		logger.Warn("failure_policy is inmemoryfallback: rate limits are per-instance, "+
+			"not globally consistent. With N replicas, effective burst is N * configured_burst",
+			"burst", p.burst)
+	}
 
 	return chain, nil
 }
@@ -551,15 +562,39 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sw.Header().Set(requestIDHeader, reqID)
 
+	originalHost := r.Host
+	var logRLKey, logTenantID string
+
+	if c.concurrencySem != nil && !c.concurrencySem.TryAcquire(1) {
+		c.metrics.PromConcurrencyRejected.Inc()
+		sw.code = http.StatusServiceUnavailable
+		writeJSONError(sw, http.StatusServiceUnavailable, "overloaded", "server at capacity", 0)
+		sw.ResponseWriter = nil
+		statusWriterPool.Put(sw)
+		return
+	}
+
 	defer func() {
+		if c.concurrencySem != nil {
+			c.concurrencySem.Release(1)
+		}
 		elapsed := time.Since(start)
 		c.metrics.PromRequestDuration.WithLabelValues(
 			r.Method,
 			strconv.Itoa(sw.code),
 		).Observe(elapsed.Seconds())
 		if c.accessLog.Load() {
+			resolvedBackendURL := c.cfg.Load().Backend.URL
+			resolvedBackendProto := c.cfg.Load().Backend.Transport.ResolvedBackendProtocol()
+			if u := proxy.BackendURLFromContext(r.Context()); u != nil {
+				resolvedBackendURL = u.String()
+			}
+			if p := proxy.BackendProtocolFromContext(r.Context()); p != "" {
+				resolvedBackendProto = p
+			}
 			c.logger.Info("access",
 				"method", r.Method,
+				"host", originalHost,
 				"path", r.URL.Path,
 				"status", sw.code,
 				"duration_ms", elapsed.Milliseconds(),
@@ -568,6 +603,10 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"request_id", reqID,
 				"user_agent", r.UserAgent(),
 				"proto", r.Proto,
+				"backend_url", resolvedBackendURL,
+				"backend_proto", resolvedBackendProto,
+				"rl_key", logRLKey,
+				"tenant_id", logTenantID,
 			)
 		}
 		sw.ResponseWriter = nil // prevent dangling reference
@@ -618,6 +657,11 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		extLimits, resolvedKey = c.fetchExternalLimits(r, key)
 	}
 
+	logRLKey = resolvedKey
+	if len(resolvedKey) > 2 && resolvedKey[:2] == "t:" {
+		logTenantID = resolvedKey[2:]
+	}
+
 	ctx, cancel := c.applyRequestTimeout(ctx, extLimits)
 	if cancel != nil {
 		defer cancel()
@@ -626,6 +670,15 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	r = c.injectBackendURL(r, extLimits)
 	r = c.injectBackendProtocol(r, extLimits)
+
+	if extLimits != nil && extLimits.Average < 0 {
+		code := c.failureCode
+		if code == 0 {
+			code = http.StatusServiceUnavailable
+		}
+		writeJSONError(sw, code, "rate_limited", "service unavailable (external RL fail-closed)", 0)
+		return
+	}
 
 	if c.tryRedisLimit(sw, r, resolvedKey, extLimits) {
 		return
@@ -752,10 +805,13 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 	// Hop-by-hop and security-sensitive headers are blocked to prevent
 	// request smuggling via a compromised or misconfigured auth service.
 	for k, v := range resp.RequestHeaders {
-		if _, denied := injectionDenyHeaders[http.CanonicalHeaderKey(k)]; denied {
-			c.logger.Warn("auth service tried to inject denied header, skipping",
-				"header", k)
-			continue
+		canonical := http.CanonicalHeaderKey(k)
+		if _, denied := injectionDenyHeaders[canonical]; denied {
+			if _, allowed := c.allowedInjectionHeaders[canonical]; !allowed {
+				c.logger.Warn("auth service tried to inject denied header, skipping",
+					"header", k)
+				continue
+			}
 		}
 		r.Header.Set(k, v)
 	}
@@ -804,6 +860,12 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 	}
 
 	headers := ext.BuildFilteredHeaders(r.Header)
+	// Go promotes the Host header (and HTTP/2 :authority) to r.Host and
+	// removes it from r.Header. Re-inject it so external rate-limit
+	// services can make per-host decisions.
+	if r.Host != "" {
+		headers["Host"] = r.Host
+	}
 
 	extReq := &ratelimit.ExternalRequest{
 		Key:     key,
@@ -814,6 +876,11 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 
 	extLimits, extErr := ext.GetLimits(r.Context(), extReq)
 	if extErr != nil {
+		cfg := c.cfg.Load()
+		if cfg.RateLimit.External.FailurePolicy == config.ExternalRLFailurePolicyFailClosed {
+			c.logger.Error("external rate limit service error, fail-closed", "error", extErr)
+			return &ratelimit.ExternalLimits{Average: -1}, resolvedKey
+		}
 		c.logger.Warn("external rate limit service error, using static config", "error", extErr)
 		return nil, resolvedKey
 	}
@@ -1096,28 +1163,66 @@ func (c *Chain) recoveryLoop() {
 	attempt := 0
 	maxAttempts := c.cfg.Load().RateLimit.MaxRecoveryAttempts
 
+	if maxAttempts > 0 {
+		c.logger.Warn("max_recovery_attempts is deprecated and will be removed; "+
+			"Redis recovery now retries indefinitely with capped exponential backoff",
+			"max_recovery_attempts", maxAttempts)
+	}
+
+	lastCfg := c.cfg.Load().Redis
+	client, err := redis.NewClientWithoutPing(lastCfg)
+	if err != nil {
+		c.logger.Error("redis recovery: failed to create client", "error", err)
+		return
+	}
+
 	for {
-		if c.ctx.Err() != nil {
-			return
-		}
-
-		client, err := redis.NewClient(c.cfg.Load().Redis)
-		if err != nil {
-			attempt++
-			if done := c.recoveryRetry(&backoff, attempt, maxAttempts, err); done {
-				return
-			}
-			continue
-		}
-
 		if c.ctx.Err() != nil {
 			_ = client.Close()
 			return
 		}
 
-		c.recoveryInstall(client)
-		return
+		// If Redis config changed (e.g. endpoints swapped during hot-reload),
+		// recreate the client so it targets the new address.
+		curCfg := c.cfg.Load().Redis
+		if !sameRedisEndpoints(lastCfg, curCfg) {
+			_ = client.Close()
+			lastCfg = curCfg
+			client, err = redis.NewClientWithoutPing(lastCfg)
+			if err != nil {
+				c.logger.Error("redis recovery: failed to recreate client after config change", "error", err)
+				return
+			}
+			backoff = c.recoveryBackoffBase
+		}
+
+		pingCtx, pingCancel := context.WithTimeout(c.ctx, 5*time.Second)
+		err := client.Ping(pingCtx).Err()
+		pingCancel()
+
+		if err == nil {
+			c.recoveryInstall(client)
+			return
+		}
+
+		attempt++
+		if done := c.recoveryRetry(&backoff, attempt, maxAttempts, err); done {
+			_ = client.Close()
+			return
+		}
 	}
+}
+
+func sameRedisEndpoints(a, b config.RedisConfig) bool {
+	if len(a.Endpoints) != len(b.Endpoints) {
+		return false
+	}
+	for i, e := range a.Endpoints {
+		if e != b.Endpoints[i] {
+			return false
+		}
+	}
+	return a.Mode == b.Mode && a.MasterName == b.MasterName
 }
 
 func (c *Chain) recoveryRetry(backoff *time.Duration, attempt, maxAttempts int, err error) (done bool) {

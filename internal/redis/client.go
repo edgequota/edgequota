@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -17,6 +18,23 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	goredis "github.com/redis/go-redis/v9"
 )
+
+// slogRedisLogger adapts slog.Logger to the go-redis internal.Logging interface.
+// go-redis logs connection pool errors, retry attempts, and failover events
+// through this adapter instead of the default log.Printf.
+type slogRedisLogger struct {
+	logger *slog.Logger
+}
+
+func (l *slogRedisLogger) Printf(ctx context.Context, format string, v ...interface{}) {
+	l.logger.WarnContext(ctx, fmt.Sprintf(format, v...), "component", "go-redis")
+}
+
+// InitLogger redirects go-redis internal logs to the given slog.Logger.
+// Call once at startup before any Redis client is created.
+func InitLogger(logger *slog.Logger) {
+	goredis.SetLogger(&slogRedisLogger{logger: logger})
+}
 
 // Client is the interface EdgeQuota needs from Redis.
 // go-redis *redis.Client and *redis.ClusterClient both satisfy this.
@@ -29,25 +47,53 @@ type Client interface {
 	Close() error
 }
 
-// NewClient creates the appropriate go-redis client for the configured topology.
+// NewClient creates the appropriate go-redis client for the configured topology
+// and verifies connectivity with an initial Ping.
 func NewClient(cfg config.RedisConfig) (Client, error) {
+	return newClient(cfg, true)
+}
+
+// NewClientWithoutPing creates a Redis client without an initial health check.
+// The client is ready to use but may not be connected yet. Used by the
+// recovery loop to create a long-lived client that auto-reconnects via
+// go-redis internal retries (MaxRetries=-1).
+func NewClientWithoutPing(cfg config.RedisConfig) (Client, error) {
+	return newClient(cfg, false)
+}
+
+func newClient(cfg config.RedisConfig, ping bool) (Client, error) {
 	opts, err := parseOptions(cfg)
 	if err != nil {
 		return nil, err
 	}
 
+	var c Client
+	var label string
+
 	switch opts.mode {
 	case config.RedisModeSingle:
-		return newSingle(opts)
+		c = goredis.NewClient(opts.singleOptions())
+		label = fmt.Sprintf("single: connect to %s", opts.endpoints[0])
 	case config.RedisModeReplication:
 		return newReplication(opts)
 	case config.RedisModeSentinel:
-		return newSentinel(opts)
+		c = goredis.NewFailoverClient(opts.failoverOptions())
+		label = fmt.Sprintf("sentinel: connect via %v for master %q", opts.endpoints, opts.masterName)
 	case config.RedisModeCluster:
-		return newCluster(opts)
+		c = goredis.NewClusterClient(opts.clusterOptions())
+		label = fmt.Sprintf("cluster: connect to seeds %v", opts.endpoints)
 	default:
 		return nil, fmt.Errorf("unknown redis mode: %s", opts.mode)
 	}
+
+	if ping {
+		if err := c.Ping(context.Background()).Err(); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("%s: %w", label, err)
+		}
+	}
+
+	return c, nil
 }
 
 // IsNoScriptErr reports whether the error is a NOSCRIPT error from Redis.
@@ -99,8 +145,17 @@ func IsConnectivityErr(err error) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Internal options parsing
+// Internal options parsing and go-redis option builders
 // ---------------------------------------------------------------------------
+
+// Retry constants shared by all topologies. go-redis retries transparently
+// within each command; -1 means unlimited retries (bounded by the context
+// deadline or server timeout).
+const (
+	defaultMaxRetries      = -1
+	defaultMinRetryBackoff = 100 * time.Millisecond
+	defaultMaxRetryBackoff = 5 * time.Second
+)
 
 type options struct {
 	endpoints        []string
@@ -117,6 +172,84 @@ type options struct {
 	tlsSkipVerify    bool
 	sentinelUsername string
 	sentinelPassword string
+}
+
+// singleOptions builds goredis.Options for a single-instance or discovery client.
+func (o *options) singleOptions() *goredis.Options {
+	return &goredis.Options{
+		Addr:            o.endpoints[0],
+		Username:        o.username,
+		Password:        o.password,
+		DB:              o.db,
+		PoolSize:        o.poolSize,
+		DialTimeout:     o.dialTimeout,
+		ReadTimeout:     o.readTimeout,
+		WriteTimeout:    o.writeTimeout,
+		MaxRetries:      defaultMaxRetries,
+		MinRetryBackoff: defaultMinRetryBackoff,
+		MaxRetryBackoff: defaultMaxRetryBackoff,
+		TLSConfig:       o.tlsConfig(),
+	}
+}
+
+// singleOptionsForAddr builds goredis.Options for an arbitrary address,
+// used by the replication client for master discovery and connection.
+func (o *options) singleOptionsForAddr(addr string) *goredis.Options {
+	opts := o.singleOptions()
+	opts.Addr = addr
+	return opts
+}
+
+// failoverOptions builds goredis.FailoverOptions for sentinel mode.
+func (o *options) failoverOptions() *goredis.FailoverOptions {
+	return &goredis.FailoverOptions{
+		MasterName:       o.masterName,
+		SentinelAddrs:    o.endpoints,
+		SentinelUsername: o.sentinelUsername,
+		SentinelPassword: o.sentinelPassword,
+		Username:         o.username,
+		Password:         o.password,
+		DB:               o.db,
+		PoolSize:         o.poolSize,
+		DialTimeout:      o.dialTimeout,
+		ReadTimeout:      o.readTimeout,
+		WriteTimeout:     o.writeTimeout,
+		MaxRetries:       defaultMaxRetries,
+		MinRetryBackoff:  defaultMinRetryBackoff,
+		MaxRetryBackoff:  defaultMaxRetryBackoff,
+		TLSConfig:        o.tlsConfig(),
+	}
+}
+
+// clusterOptions builds goredis.ClusterOptions for cluster mode.
+func (o *options) clusterOptions() *goredis.ClusterOptions {
+	return &goredis.ClusterOptions{
+		Addrs:           o.endpoints,
+		Username:        o.username,
+		Password:        o.password,
+		PoolSize:        o.poolSize,
+		DialTimeout:     o.dialTimeout,
+		ReadTimeout:     o.readTimeout,
+		WriteTimeout:    o.writeTimeout,
+		MaxRetries:      defaultMaxRetries,
+		MinRetryBackoff: defaultMinRetryBackoff,
+		MaxRetryBackoff: defaultMaxRetryBackoff,
+		TLSConfig:       o.tlsConfig(),
+	}
+}
+
+// tlsConfig returns the TLS configuration, or nil when TLS is disabled.
+func (o *options) tlsConfig() *tls.Config {
+	if !o.tlsEnabled {
+		return nil
+	}
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	if o.tlsSkipVerify {
+		cfg.InsecureSkipVerify = true
+	}
+	return cfg
 }
 
 func parseOptions(cfg config.RedisConfig) (*options, error) {
@@ -170,19 +303,6 @@ func parseDur(s string, def time.Duration) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-func makeTLSConfig(opts *options) *tls.Config {
-	if !opts.tlsEnabled {
-		return nil
-	}
-	cfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	}
-	if opts.tlsSkipVerify {
-		cfg.InsecureSkipVerify = true
-	}
-	return cfg
-}
-
 // WarnInsecureRedis logs a prominent warning if Redis TLS skip verify is enabled.
 // Called at startup from the server package.
 func WarnInsecureRedis(cfgTLS config.RedisTLSConfig, logger interface{ Warn(string, ...any) }) {
@@ -190,83 +310,6 @@ func WarnInsecureRedis(cfgTLS config.RedisTLSConfig, logger interface{ Warn(stri
 		logger.Warn("SECURITY WARNING: Redis TLS certificate verification is DISABLED (insecure_skip_verify=true). " +
 			"This should NEVER be used in production — it exposes Redis traffic to man-in-the-middle attacks.")
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Single
-// ---------------------------------------------------------------------------
-
-func newSingle(opts *options) (Client, error) {
-	c := goredis.NewClient(&goredis.Options{
-		Addr:         opts.endpoints[0],
-		Username:     opts.username,
-		Password:     opts.password,
-		DB:           opts.db,
-		PoolSize:     opts.poolSize,
-		DialTimeout:  opts.dialTimeout,
-		ReadTimeout:  opts.readTimeout,
-		WriteTimeout: opts.writeTimeout,
-		TLSConfig:    makeTLSConfig(opts),
-	})
-
-	if err := c.Ping(context.Background()).Err(); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("single: connect to %s: %w", opts.endpoints[0], err)
-	}
-
-	return c, nil
-}
-
-// ---------------------------------------------------------------------------
-// Sentinel
-// ---------------------------------------------------------------------------
-
-func newSentinel(opts *options) (Client, error) {
-	c := goredis.NewFailoverClient(&goredis.FailoverOptions{
-		MasterName:       opts.masterName,
-		SentinelAddrs:    opts.endpoints,
-		SentinelUsername: opts.sentinelUsername,
-		SentinelPassword: opts.sentinelPassword,
-		Username:         opts.username,
-		Password:         opts.password,
-		DB:               opts.db,
-		PoolSize:         opts.poolSize,
-		DialTimeout:      opts.dialTimeout,
-		ReadTimeout:      opts.readTimeout,
-		WriteTimeout:     opts.writeTimeout,
-		TLSConfig:        makeTLSConfig(opts),
-	})
-
-	if err := c.Ping(context.Background()).Err(); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("sentinel: connect via %v for master %q: %w", opts.endpoints, opts.masterName, err)
-	}
-
-	return c, nil
-}
-
-// ---------------------------------------------------------------------------
-// Cluster
-// ---------------------------------------------------------------------------
-
-func newCluster(opts *options) (Client, error) {
-	c := goredis.NewClusterClient(&goredis.ClusterOptions{
-		Addrs:        opts.endpoints,
-		Username:     opts.username,
-		Password:     opts.password,
-		PoolSize:     opts.poolSize,
-		DialTimeout:  opts.dialTimeout,
-		ReadTimeout:  opts.readTimeout,
-		WriteTimeout: opts.writeTimeout,
-		TLSConfig:    makeTLSConfig(opts),
-	})
-
-	if err := c.Ping(context.Background()).Err(); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("cluster: connect to seeds %v: %w", opts.endpoints, err)
-	}
-
-	return c, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -304,17 +347,11 @@ func (r *ReplicationClient) discoverMaster() (string, error) {
 	defer cancel()
 
 	for _, addr := range r.opts.endpoints {
-		c := goredis.NewClient(&goredis.Options{
-			Addr:         addr,
-			Username:     r.opts.username,
-			Password:     r.opts.password,
-			DB:           r.opts.db,
-			DialTimeout:  r.opts.dialTimeout,
-			ReadTimeout:  r.opts.readTimeout,
-			WriteTimeout: r.opts.writeTimeout,
-			TLSConfig:    makeTLSConfig(r.opts),
-		})
+		discoveryOpts := r.opts.singleOptionsForAddr(addr)
+		discoveryOpts.PoolSize = 1
+		discoveryOpts.MaxRetries = 0
 
+		c := goredis.NewClient(discoveryOpts)
 		result, err := c.Do(ctx, "ROLE").Slice()
 		_ = c.Close()
 
@@ -351,8 +388,6 @@ func (r *ReplicationClient) getMaster() (*goredis.Client, error) {
 }
 
 func (r *ReplicationClient) refreshMaster() error {
-	// Discover master outside the lock to avoid blocking all requests during
-	// N network round-trips. Only take the lock to swap the client.
 	addr, err := r.discoverMaster()
 	if err != nil {
 		return err
@@ -365,18 +400,7 @@ func (r *ReplicationClient) refreshMaster() error {
 		if r.master != nil {
 			_ = r.master.Close()
 		}
-
-		r.master = goredis.NewClient(&goredis.Options{
-			Addr:         addr,
-			Username:     r.opts.username,
-			Password:     r.opts.password,
-			DB:           r.opts.db,
-			PoolSize:     r.opts.poolSize,
-			DialTimeout:  r.opts.dialTimeout,
-			ReadTimeout:  r.opts.readTimeout,
-			WriteTimeout: r.opts.writeTimeout,
-			TLSConfig:    makeTLSConfig(r.opts),
-		})
+		r.master = goredis.NewClient(r.opts.singleOptionsForAddr(addr))
 		r.masterAddr = addr
 	}
 
@@ -390,50 +414,49 @@ func (r *ReplicationClient) invalidateMaster() {
 	r.lastCheck = time.Time{}
 }
 
-// Eval implements Client; retries once on READONLY after re-discovering master.
-func (r *ReplicationClient) Eval(ctx context.Context, script string, keys []string, args ...any) *goredis.Cmd {
+// withReadOnlyRetry executes fn up to twice, invalidating the master cache and
+// retrying once if the first attempt returns a READONLY error.
+func (r *ReplicationClient) withReadOnlyRetry(fn func(*goredis.Client) error) error {
 	for attempt := 0; attempt < 2; attempt++ {
 		master, err := r.getMaster()
 		if err != nil {
-			cmd := goredis.NewCmd(ctx)
-			cmd.SetErr(err)
-			return cmd
+			return err
 		}
-
-		cmd := master.Eval(ctx, script, keys, args...)
-		if cmd.Err() != nil && IsReadOnlyErr(cmd.Err()) && attempt == 0 {
+		if err = fn(master); err != nil && IsReadOnlyErr(err) && attempt == 0 {
 			r.invalidateMaster()
 			continue
 		}
-		return cmd
+		return err
 	}
+	return fmt.Errorf("replication: READONLY retry exhausted")
+}
 
-	cmd := goredis.NewCmd(ctx)
-	cmd.SetErr(fmt.Errorf("replication: READONLY retry exhausted"))
-	return cmd
+// Eval implements Client; retries once on READONLY after re-discovering master.
+func (r *ReplicationClient) Eval(ctx context.Context, script string, keys []string, args ...any) *goredis.Cmd {
+	var result *goredis.Cmd
+	err := r.withReadOnlyRetry(func(master *goredis.Client) error {
+		result = master.Eval(ctx, script, keys, args...)
+		return result.Err()
+	})
+	if result == nil {
+		result = goredis.NewCmd(ctx)
+		result.SetErr(err)
+	}
+	return result
 }
 
 // EvalSha implements Client; retries once on READONLY after re-discovering master.
 func (r *ReplicationClient) EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *goredis.Cmd {
-	for attempt := 0; attempt < 2; attempt++ {
-		master, err := r.getMaster()
-		if err != nil {
-			cmd := goredis.NewCmd(ctx)
-			cmd.SetErr(err)
-			return cmd
-		}
-
-		cmd := master.EvalSha(ctx, sha1, keys, args...)
-		if cmd.Err() != nil && IsReadOnlyErr(cmd.Err()) && attempt == 0 {
-			r.invalidateMaster()
-			continue
-		}
-		return cmd
+	var result *goredis.Cmd
+	err := r.withReadOnlyRetry(func(master *goredis.Client) error {
+		result = master.EvalSha(ctx, sha1, keys, args...)
+		return result.Err()
+	})
+	if result == nil {
+		result = goredis.NewCmd(ctx)
+		result.SetErr(err)
 	}
-
-	cmd := goredis.NewCmd(ctx)
-	cmd.SetErr(fmt.Errorf("replication: READONLY retry exhausted"))
-	return cmd
+	return result
 }
 
 // Get implements Client.
@@ -449,25 +472,16 @@ func (r *ReplicationClient) Get(ctx context.Context, key string) *goredis.String
 
 // Set implements Client.
 func (r *ReplicationClient) Set(ctx context.Context, key string, value any, expiration time.Duration) *goredis.StatusCmd {
-	for attempt := 0; attempt < 2; attempt++ {
-		master, err := r.getMaster()
-		if err != nil {
-			cmd := goredis.NewStatusCmd(ctx)
-			cmd.SetErr(err)
-			return cmd
-		}
-
-		cmd := master.Set(ctx, key, value, expiration)
-		if cmd.Err() != nil && IsReadOnlyErr(cmd.Err()) && attempt == 0 {
-			r.invalidateMaster()
-			continue
-		}
-		return cmd
+	var result *goredis.StatusCmd
+	err := r.withReadOnlyRetry(func(master *goredis.Client) error {
+		result = master.Set(ctx, key, value, expiration)
+		return result.Err()
+	})
+	if result == nil {
+		result = goredis.NewStatusCmd(ctx)
+		result.SetErr(err)
 	}
-
-	cmd := goredis.NewStatusCmd(ctx)
-	cmd.SetErr(fmt.Errorf("replication: READONLY retry exhausted"))
-	return cmd
+	return result
 }
 
 // Ping implements Client.

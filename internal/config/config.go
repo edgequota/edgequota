@@ -172,12 +172,27 @@ type EventsConfig struct {
 	BatchSize     int                `yaml:"batch_size"     env:"BATCH_SIZE"`
 	FlushInterval string             `yaml:"flush_interval" env:"FLUSH_INTERVAL"`
 	BufferSize    int                `yaml:"buffer_size"    env:"BUFFER_SIZE"`
+	MaxRetries    int                `yaml:"max_retries"    env:"MAX_RETRIES"`
+	RetryBackoff  string             `yaml:"retry_backoff"  env:"RETRY_BACKOFF"`
 	HeaderFilter  HeaderFilterConfig `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
 }
 
 // EventsHTTPConfig holds HTTP event receiver settings.
 type EventsHTTPConfig struct {
 	URL string `yaml:"url" env:"URL"`
+
+	// Headers are custom headers attached to every events HTTP request.
+	// Use this for authentication (e.g. Authorization, X-Api-Key) or for
+	// routing (e.g. X-Destination). Values are redacted in logs and JSON.
+	// Header names are validated at startup; hop-by-hop and protocol
+	// headers (Host, Content-Length, Connection, etc.) are rejected.
+	Headers map[string]RedactedString `yaml:"headers"`
+
+	// Deprecated: use headers instead. Kept for backward compatibility.
+	// When set, auth_token is mapped to headers[auth_header] (default
+	// "Authorization") with a "Bearer " prefix.
+	AuthToken  RedactedString `yaml:"auth_token"  env:"AUTH_TOKEN"`
+	AuthHeader string         `yaml:"auth_header" env:"AUTH_HEADER"`
 }
 
 // EventsGRPCConfig holds gRPC event receiver settings.
@@ -195,6 +210,17 @@ type ServerConfig struct {
 	DrainTimeout   string          `yaml:"drain_timeout"   env:"DRAIN_TIMEOUT"`
 	RequestTimeout string          `yaml:"request_timeout" env:"REQUEST_TIMEOUT"`
 	TLS            ServerTLSConfig `yaml:"tls"             envPrefix:"TLS_"`
+
+	// MaxConcurrentRequests caps the number of in-flight requests the proxy
+	// handles simultaneously. When exceeded, new requests receive 503. 0
+	// means unlimited (default).
+	MaxConcurrentRequests int64 `yaml:"max_concurrent_requests" env:"MAX_CONCURRENT_REQUESTS"`
+
+	// AllowedWebSocketOrigins restricts which Origin header values are
+	// accepted for WebSocket upgrade requests. When non-empty, upgrade
+	// requests whose Origin does not match any entry are rejected with
+	// 403. An empty list allows all origins (backward compatible).
+	AllowedWebSocketOrigins []string `yaml:"allowed_websocket_origins" env:"ALLOWED_WEBSOCKET_ORIGINS" envSeparator:","`
 
 	// MaxWebSocketConnsPerKey limits the number of concurrent WebSocket
 	// connections per rate-limit key (client/tenant). 0 means unlimited.
@@ -238,6 +264,42 @@ type BackendConfig struct {
 	MaxRequestBodySize int64            `yaml:"max_request_body_size"    env:"MAX_REQUEST_BODY_SIZE"` // bytes; 0=unlimited
 	Transport          TransportConfig  `yaml:"transport"                envPrefix:"TRANSPORT_"`
 	URLPolicy          BackendURLPolicy `yaml:"url_policy"               envPrefix:"URL_POLICY_"`
+}
+
+// Equal returns true if both BackendConfigs are equivalent. This replaces
+// reflect.DeepEqual for a faster, explicit comparison.
+func (b BackendConfig) Equal(other BackendConfig) bool {
+	if b.URL != other.URL ||
+		b.Timeout != other.Timeout ||
+		b.MaxIdleConns != other.MaxIdleConns ||
+		b.IdleConnTimeout != other.IdleConnTimeout ||
+		b.TLSInsecureVerify != other.TLSInsecureVerify ||
+		b.MaxRequestBodySize != other.MaxRequestBodySize {
+		return false
+	}
+	if b.Transport != other.Transport {
+		return false
+	}
+	if b.URLPolicy.DenyPrivateNetworksEnabled() != other.URLPolicy.DenyPrivateNetworksEnabled() {
+		return false
+	}
+	if len(b.URLPolicy.AllowedSchemes) != len(other.URLPolicy.AllowedSchemes) {
+		return false
+	}
+	for i, s := range b.URLPolicy.AllowedSchemes {
+		if s != other.URLPolicy.AllowedSchemes[i] {
+			return false
+		}
+	}
+	if len(b.URLPolicy.AllowedHosts) != len(other.URLPolicy.AllowedHosts) {
+		return false
+	}
+	for i, h := range b.URLPolicy.AllowedHosts {
+		if h != other.URLPolicy.AllowedHosts[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // BackendURLPolicy controls which dynamic backend URLs (from the external
@@ -440,12 +502,18 @@ type AuthConfig struct {
 	GRPC          AuthGRPCConfig     `yaml:"grpc"           envPrefix:"GRPC_"`
 	HeaderFilter  HeaderFilterConfig `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
 
+	// AllowedInjectionHeaders is an optional allow-list of header names that
+	// the auth service IS permitted to inject, even if they appear in the
+	// default deny list. Use this to explicitly opt-in to forwarding headers
+	// like X-Forwarded-For when the auth service is trusted to set them.
+	AllowedInjectionHeaders []string `yaml:"allowed_injection_headers" env:"ALLOWED_INJECTION_HEADERS" envSeparator:","`
+
 	// PropagateRequestBody controls whether the request body is included in
 	// the auth check request. Off by default to avoid buffering overhead.
 	// When enabled, the body is read up to MaxAuthBodySize bytes and included
 	// in the auth request. The original body is replaced so the proxy can
 	// still forward it to the backend.
-	PropagateRequestBody bool  `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
+	PropagateRequestBody bool `yaml:"propagate_request_body" env:"PROPAGATE_REQUEST_BODY"`
 	MaxAuthBodySize      int64 `yaml:"max_auth_body_size"     env:"MAX_AUTH_BODY_SIZE"` // bytes; 0 = use default (64 KiB)
 
 	// CircuitBreaker configures the auth service circuit breaker.
@@ -514,8 +582,10 @@ type RateLimitConfig struct {
 	// 0 uses the default of 1000.
 	MaxTenantLabels int `yaml:"max_tenant_labels" env:"MAX_TENANT_LABELS"`
 
-	// MaxRecoveryAttempts limits the number of Redis recovery attempts
-	// before giving up. 0 means unlimited (retry forever, the default).
+	// Deprecated: MaxRecoveryAttempts is deprecated and will be removed in
+	// a future release. Redis recovery now retries indefinitely with capped
+	// exponential backoff (1 minute cap). Setting a non-zero value logs a
+	// deprecation warning but is still honored for backward compatibility.
 	MaxRecoveryAttempts int `yaml:"max_recovery_attempts" env:"MAX_RECOVERY_ATTEMPTS"`
 
 	// GlobalPassthroughRPS is an optional global in-memory rate limit
@@ -545,14 +615,32 @@ type KeyStrategyConfig struct {
 	TrustedIPDepth int `yaml:"trusted_ip_depth" env:"TRUSTED_IP_DEPTH"`
 }
 
+// ExternalRLFailurePolicy controls behavior when the external RL service is
+// unreachable and no cache is available.
+type ExternalRLFailurePolicy string
+
+const (
+	ExternalRLFailurePolicyStaticFallback ExternalRLFailurePolicy = "static_fallback"
+	ExternalRLFailurePolicyFailClosed     ExternalRLFailurePolicy = "failclosed"
+)
+
+func (p ExternalRLFailurePolicy) Valid() bool {
+	switch p {
+	case ExternalRLFailurePolicyStaticFallback, ExternalRLFailurePolicyFailClosed, "":
+		return true
+	}
+	return false
+}
+
 // ExternalRLConfig holds optional external rate limit service settings.
 type ExternalRLConfig struct {
-	Enabled      bool               `yaml:"enabled"       env:"ENABLED"`
-	Timeout      string             `yaml:"timeout"       env:"TIMEOUT"`
-	CacheTTL     string             `yaml:"cache_ttl"     env:"CACHE_TTL"`
-	HTTP         ExternalHTTPConfig `yaml:"http"          envPrefix:"HTTP_"`
-	GRPC         ExternalGRPCConfig `yaml:"grpc"          envPrefix:"GRPC_"`
-	HeaderFilter HeaderFilterConfig `yaml:"header_filter" envPrefix:"HEADER_FILTER_"`
+	Enabled       bool                    `yaml:"enabled"        env:"ENABLED"`
+	Timeout       string                  `yaml:"timeout"        env:"TIMEOUT"`
+	CacheTTL      string                  `yaml:"cache_ttl"      env:"CACHE_TTL"`
+	FailurePolicy ExternalRLFailurePolicy `yaml:"failure_policy" env:"FAILURE_POLICY"`
+	HTTP          ExternalHTTPConfig      `yaml:"http"           envPrefix:"HTTP_"`
+	GRPC          ExternalGRPCConfig      `yaml:"grpc"           envPrefix:"GRPC_"`
+	HeaderFilter  HeaderFilterConfig      `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
 
 	// MaxConcurrentRequests caps the number of simultaneous in-flight
 	// requests to the external rate limit service. This protects the
@@ -795,6 +883,7 @@ func (cfg *Config) normalize() {
 		cfg.CacheRedis.Mode = RedisMode(strings.ToLower(string(cfg.CacheRedis.Mode)))
 	}
 	cfg.Auth.FailurePolicy = AuthFailurePolicy(strings.ToLower(string(cfg.Auth.FailurePolicy)))
+	cfg.RateLimit.External.FailurePolicy = ExternalRLFailurePolicy(strings.ToLower(string(cfg.RateLimit.External.FailurePolicy)))
 	cfg.Logging.Level = LogLevel(strings.ToLower(string(cfg.Logging.Level)))
 	cfg.Logging.Format = LogFormat(strings.ToLower(string(cfg.Logging.Format)))
 	cfg.Server.TLS.MinVersion = TLSVersion(normalizeTLSVersion(string(cfg.Server.TLS.MinVersion)))
@@ -833,6 +922,9 @@ func Validate(cfg *Config) error {
 		return err
 	}
 	if err := validateCacheRedis(cfg); err != nil {
+		return err
+	}
+	if err := validateEvents(cfg); err != nil {
 		return err
 	}
 	if err := validateLogging(cfg); err != nil {
@@ -1027,11 +1119,126 @@ func validateLogging(cfg *Config) error {
 	return nil
 }
 
+// eventsHeaderDenySet contains header names that must not be set as custom
+// event headers. These are hop-by-hop headers (RFC 7230 §6.1), content
+// framing headers, and pseudo-headers that the HTTP client manages
+// automatically. Allowing them would break transport semantics.
+var eventsHeaderDenySet = map[string]struct{}{
+	"Host":                {},
+	"Content-Length":      {},
+	"Content-Type":       {},
+	"Transfer-Encoding":  {},
+	"Connection":         {},
+	"Te":                 {},
+	"Upgrade":            {},
+	"Proxy-Authorization": {},
+	"Proxy-Connection":   {},
+	"Keep-Alive":         {},
+	"Trailer":            {},
+}
+
+func validateEvents(cfg *Config) error {
+	httpCfg := &cfg.Events.HTTP
+
+	// Migrate deprecated auth_token/auth_header to headers.
+	if httpCfg.AuthToken != "" {
+		if httpCfg.Headers == nil {
+			httpCfg.Headers = make(map[string]RedactedString)
+		}
+		headerName := httpCfg.AuthHeader
+		if headerName == "" {
+			headerName = "Authorization"
+		}
+		// Only migrate if the same header is not already set explicitly.
+		if _, exists := httpCfg.Headers[headerName]; !exists {
+			httpCfg.Headers[headerName] = RedactedString("Bearer " + httpCfg.AuthToken.Value())
+		}
+	}
+
+	for name := range httpCfg.Headers {
+		canonical := http.CanonicalHeaderKey(name)
+		if _, denied := eventsHeaderDenySet[canonical]; denied {
+			return fmt.Errorf("events.http.headers: %q is a restricted header and cannot be set", name)
+		}
+		if name == "" {
+			return fmt.Errorf("events.http.headers: empty header name")
+		}
+	}
+	return nil
+}
+
 func validateTracing(cfg *Config) error {
 	if cfg.Tracing.Enabled && cfg.Tracing.Endpoint == "" {
 		return fmt.Errorf("tracing.endpoint is required when tracing is enabled")
 	}
 	return nil
+}
+
+// SanitizedConfig exposes only operationally safe fields for the /config
+// admin endpoint. Secrets, infrastructure topology (Redis endpoints, auth
+// URLs), and events receiver addresses are omitted.
+type SanitizedConfig struct {
+	Server    ServerConfig     `json:"server"`
+	Admin     AdminConfig      `json:"admin"`
+	Backend   SanitizedBackend `json:"backend"`
+	RateLimit SanitizedRL      `json:"rate_limit"`
+	Logging   LoggingConfig    `json:"logging"`
+	Tracing   TracingConfig    `json:"tracing"`
+}
+
+// SanitizedBackend exposes backend tuning without the full URL.
+type SanitizedBackend struct {
+	URL                string          `json:"url"`
+	Timeout            string          `json:"timeout"`
+	MaxIdleConns       int             `json:"max_idle_conns"`
+	IdleConnTimeout    string          `json:"idle_conn_timeout"`
+	MaxRequestBodySize int64           `json:"max_request_body_size"`
+	Transport          TransportConfig `json:"transport"`
+}
+
+// SanitizedRL exposes rate-limit configuration without external service addresses.
+type SanitizedRL struct {
+	Average       int64           `json:"average"`
+	Burst         int64           `json:"burst"`
+	Period        string          `json:"period"`
+	FailurePolicy FailurePolicy   `json:"failure_policy"`
+	FailureCode   int             `json:"failure_code"`
+	KeyStrategy   KeyStrategyType `json:"key_strategy"`
+	ExternalEnabled bool          `json:"external_enabled"`
+}
+
+// Sanitized returns a safe-to-expose view of the configuration, omitting
+// Redis endpoints, auth URLs, external RL service addresses, events receiver
+// addresses, and all secrets.
+func (c *Config) Sanitized() SanitizedConfig {
+	backendURL := c.Backend.URL
+	if u, err := url.Parse(backendURL); err == nil && u.Host != "" {
+		backendURL = u.Scheme + "://" + u.Host
+	}
+
+	return SanitizedConfig{
+		Server: c.Server,
+		Admin:  c.Admin,
+		Backend: SanitizedBackend{
+			URL:                backendURL,
+			Timeout:            c.Backend.Timeout,
+			MaxIdleConns:       c.Backend.MaxIdleConns,
+			IdleConnTimeout:    c.Backend.IdleConnTimeout,
+			MaxRequestBodySize: c.Backend.MaxRequestBodySize,
+			Transport:          c.Backend.Transport,
+		},
+		RateLimit: SanitizedRL{
+			Average:         c.RateLimit.Average,
+			Burst:           c.RateLimit.Burst,
+			Period:          c.RateLimit.Period,
+			FailurePolicy:   c.RateLimit.FailurePolicy,
+			FailureCode:     c.RateLimit.FailureCode,
+			KeyStrategy:     c.RateLimit.KeyStrategy.Type,
+			ExternalEnabled: c.RateLimit.External.Enabled,
+		},
+		Logging: c.Logging,
+		Tracing: c.Tracing,
+	}
 }
 
 // CacheRedisConfig returns the Redis configuration to use for caching.

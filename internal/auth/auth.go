@@ -345,6 +345,12 @@ func (c *Client) BuildCheckRequest(r *http.Request, body []byte) *CheckRequest {
 			headers[k] = v[0]
 		}
 	}
+	// Go promotes the Host header (and HTTP/2 :authority) to r.Host and
+	// removes it from r.Header. Re-inject it so auth services can make
+	// per-host decisions.
+	if r.Host != "" {
+		headers["Host"] = r.Host
+	}
 
 	return &CheckRequest{
 		Method:     r.Method,

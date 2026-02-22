@@ -481,3 +481,14 @@ The circuit breaker is **per-tenant** (one breaker per extracted key), preventin
 1. **Closed** (normal) — requests are forwarded to the external service.
 2. **Open** — after 5 consecutive failures for a key, the breaker opens. Requests immediately try stale cache, then fall back to static config.
 3. **Half-open** — after 30 s, one probe request is forwarded. Success closes the breaker; failure re-opens it.
+
+---
+
+## See Also
+
+- [Configuration Reference](configuration.md) -- Full `rate_limit` config section.
+- [API Reference](api-reference.md) -- Proto and OpenAPI definitions for the external rate limit service.
+- [Go SDK](go-sdk.md) -- Server-side helpers for building rate limit services.
+- [Architecture](architecture.md) -- Data flow and failure modes.
+- [Security](security.md) -- Tenant key validation and backend URL override security.
+- [Troubleshooting](troubleshooting.md) -- Common rate limiting issues.

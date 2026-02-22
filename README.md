@@ -490,15 +490,25 @@ See [docs/deployment.md](docs/deployment.md) for production topology, autoscalin
 
 ## Documentation
 
+Browse the full documentation at [docs/index.md](docs/index.md) or use the table below:
+
 | Document | Description |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | System design, data flow, failure modes, scaling model |
+| [docs/index.md](docs/index.md) | Documentation home and navigation |
+| [docs/getting-started.md](docs/getting-started.md) | Quick start guide for binary, Docker, and Kubernetes |
+| [docs/configuration.md](docs/configuration.md) | Full configuration reference with every field documented |
 | [docs/rate-limiting.md](docs/rate-limiting.md) | Algorithm, distributed correctness, Redis atomicity, key naming |
 | [docs/authentication.md](docs/authentication.md) | Auth flow, security model, timeout and retry strategy |
-| [docs/configuration.md](docs/configuration.md) | Full configuration reference with every field documented |
+| [docs/proxy.md](docs/proxy.md) | Multi-protocol proxy: HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, WebSocket |
+| [docs/events.md](docs/events.md) | Async usage event emission via HTTP/gRPC webhooks |
 | [docs/deployment.md](docs/deployment.md) | Kubernetes deployment, HA, sizing, autoscaling |
-| [docs/observability.md](docs/observability.md) | Metrics, logging, tracing, Grafana dashboards |
-| [docs/security.md](docs/security.md) | Threat model, header trust, Redis security, mTLS |
+| [docs/observability.md](docs/observability.md) | Metrics, access logs, health probes, tracing, Grafana dashboards |
+| [docs/security.md](docs/security.md) | Threat model, SSRF protection, header trust, Redis security, mTLS |
+| [docs/go-sdk.md](docs/go-sdk.md) | Go SDK for building external rate limit, auth, and events services |
+| [docs/helm-chart.md](docs/helm-chart.md) | Helm chart deployment guide |
+| [docs/api-reference.md](docs/api-reference.md) | Protocol Buffer and OpenAPI API definitions |
+| [docs/architecture.md](docs/architecture.md) | System design, data flow, failure modes, scaling model |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues, debugging techniques, FAQ |
 
 ---
 
