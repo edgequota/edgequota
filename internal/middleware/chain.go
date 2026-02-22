@@ -709,20 +709,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), ratelimit.KeyContextKey, key)
 	r = r.WithContext(ctx)
 
-	// #region agent log
-	extRLStart := time.Now()
-	// #endregion
 	extLimits, resolvedKey := c.fetchExternalLimitsWithSpan(r, key)
-	// #region agent log
-	c.logger.Info("[DEBUG-H3] ext-rl-result",
-		"request_id", reqID,
-		"proto", r.Proto,
-		"proto_major", r.ProtoMajor,
-		"ext_rl_duration_ms", time.Since(extRLStart).Milliseconds(),
-		"cache_hit", extLimits != nil,
-		"resolved_key", resolvedKey,
-		"hypothesis", "A,D")
-	// #endregion
 
 	logRLKey = resolvedKey
 	logTenantID = extractTenantID(resolvedKey)
@@ -1076,26 +1063,8 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 		attribute.Bool("rate_limit.allowed", result.Allowed),
 		attribute.Int64("rate_limit.remaining", result.Remaining),
 	)
-	// #region agent log
-	c.logger.Info("[DEBUG-H3] pre-proxy-headers",
-		"request_id", r.Header.Get(requestIDHeader),
-		"proto", r.Proto,
-		"alt_svc_before", w.Header().Values("Alt-Svc"),
-		"x_request_id_before", w.Header().Values("X-Request-Id"),
-		"x_rl_limit_before", w.Header().Values("X-RateLimit-Limit"),
-		"hypothesis", "B")
-	// #endregion
 	backendStart := time.Now()
 	(*c.next.Load()).ServeHTTP(w, r.WithContext(ctx))
-	// #region agent log
-	c.logger.Info("[DEBUG-H3] post-proxy-headers",
-		"request_id", r.Header.Get(requestIDHeader),
-		"proto", r.Proto,
-		"alt_svc_after", w.Header().Values("Alt-Svc"),
-		"x_request_id_after", w.Header().Values("X-Request-Id"),
-		"x_rl_limit_after", w.Header().Values("X-RateLimit-Limit"),
-		"hypothesis", "B")
-	// #endregion
 	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 	proxySpan.End()
 }
