@@ -406,7 +406,7 @@ auth:
       ca_file: "/etc/edgequota/tls/auth-ca.pem"
 ```
 
-Uses `edgequota.auth.v1.AuthService/Check` with a JSON codec — the auth service can be implemented without protobuf code generation. See `api/proto/auth/v1/auth.proto` for the formal definition.
+Uses `edgequota.auth.v1.AuthService/Check` with a JSON codec — the auth service can be implemented without protobuf code generation. See `api/proto/edgequota/auth/v1/auth.proto` for the formal definition.
 
 ### Failure Policy
 
@@ -519,6 +519,8 @@ Browse the full documentation at [docs/index.md](docs/index.md) or use the table
 - Go 1.26+
 - Docker (for container builds)
 - golangci-lint v2+ (for linting)
+- [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen) v2.5+ (for OpenAPI type generation)
+- [buf](https://buf.build) (for protobuf generation)
 - Minikube + Terraform (for E2E tests)
 
 ### Build and Test
@@ -532,6 +534,21 @@ make docker          # Build Docker image
 make e2e             # Full E2E cycle: minikube + terraform + tests + teardown
 ```
 
+### Code Generation
+
+EdgeQuota defines its external service APIs (auth, rate limit, events) as both Protocol Buffer and OpenAPI 3.0 specs. Go types are generated from both:
+
+```bash
+make generate        # Run all code generation (proto + OpenAPI)
+make proto           # Generate gRPC stubs from .proto files (requires buf)
+make generate-http   # Generate HTTP model types from OpenAPI specs (requires oapi-codegen)
+```
+
+Generated code lives under `api/gen/` and must not be edited manually:
+
+- `api/gen/grpc/` — gRPC client/server stubs from Protocol Buffers
+- `api/gen/http/` — HTTP request/response types from OpenAPI specs
+
 ### Project Structure
 
 ```
@@ -541,11 +558,17 @@ internal/
   redis/                 Redis client factory (single, replication, sentinel, cluster)
   ratelimit/             Token-bucket limiter, in-memory fallback, key strategies, external service
   auth/                  External authentication client (HTTP + gRPC)
+  events/                Async usage event emitter
   proxy/                 Multi-protocol reverse proxy (HTTP, gRPC, SSE, WebSocket)
   middleware/            Request processing pipeline (auth → rate limit → proxy)
   observability/         Metrics, health probes, structured logging, tracing
   server/                Server orchestration and lifecycle management
-api/proto/               gRPC service definitions (.proto files)
+api/
+  proto/                 gRPC service definitions (.proto files)
+  openapi/               OpenAPI 3.0 specs (HTTP wire format)
+  gen/                   Generated code (DO NOT edit)
+    grpc/                Generated from proto (buf generate)
+    http/                Generated from OpenAPI (oapi-codegen)
 e2e/                     End-to-end tests (minikube + terraform)
 docs/                    Project documentation
 ```
