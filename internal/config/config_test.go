@@ -1015,3 +1015,92 @@ func TestBackendProtocol(t *testing.T) {
 		assert.Equal(t, "h2", TransportConfig{BackendProtocol: "h2"}.ResolvedBackendProtocol())
 	})
 }
+
+func TestH3UDPBufferConfig(t *testing.T) {
+	t.Run("defaults to zero", func(t *testing.T) {
+		tc := TransportConfig{}
+		assert.Equal(t, 0, tc.H3UDPReceiveBufferSize)
+		assert.Equal(t, 0, tc.H3UDPSendBufferSize)
+	})
+
+	t.Run("parses from YAML", func(t *testing.T) {
+		yamlContent := `
+backend:
+  url: "https://backend:443"
+  transport:
+    backend_protocol: "h3"
+    h3_udp_receive_buffer_size: 7500000
+    h3_udp_send_buffer_size: 7500000
+`
+		tmpDir := t.TempDir()
+		cfgFile := filepath.Join(tmpDir, "config.yaml")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(yamlContent), 0o644))
+
+		t.Setenv("EDGEQUOTA_CONFIG_FILE", cfgFile)
+		cfg, err := Load()
+		require.NoError(t, err)
+
+		assert.Equal(t, "h3", cfg.Backend.Transport.BackendProtocol)
+		assert.Equal(t, 7500000, cfg.Backend.Transport.H3UDPReceiveBufferSize)
+		assert.Equal(t, 7500000, cfg.Backend.Transport.H3UDPSendBufferSize)
+	})
+
+	t.Run("env overrides YAML", func(t *testing.T) {
+		yamlContent := `
+backend:
+  url: "https://backend:443"
+  transport:
+    h3_udp_receive_buffer_size: 1000
+    h3_udp_send_buffer_size: 2000
+`
+		tmpDir := t.TempDir()
+		cfgFile := filepath.Join(tmpDir, "config.yaml")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(yamlContent), 0o644))
+
+		t.Setenv("EDGEQUOTA_CONFIG_FILE", cfgFile)
+		t.Setenv("EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_RECEIVE_BUFFER_SIZE", "8000000")
+		t.Setenv("EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_SEND_BUFFER_SIZE", "9000000")
+
+		cfg, err := Load()
+		require.NoError(t, err)
+
+		assert.Equal(t, 8000000, cfg.Backend.Transport.H3UDPReceiveBufferSize)
+		assert.Equal(t, 9000000, cfg.Backend.Transport.H3UDPSendBufferSize)
+	})
+
+	t.Run("env sets buffer sizes without YAML", func(t *testing.T) {
+		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent/config.yaml")
+		t.Setenv("EDGEQUOTA_BACKEND_URL", "https://backend:443")
+		t.Setenv("EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_RECEIVE_BUFFER_SIZE", "7340032")
+
+		cfg, err := Load()
+		require.NoError(t, err)
+
+		assert.Equal(t, 7340032, cfg.Backend.Transport.H3UDPReceiveBufferSize)
+		assert.Equal(t, 0, cfg.Backend.Transport.H3UDPSendBufferSize)
+	})
+
+	t.Run("zero values are valid and mean use quic-go defaults", func(t *testing.T) {
+		tc := TransportConfig{
+			BackendProtocol:        "h3",
+			H3UDPReceiveBufferSize: 0,
+			H3UDPSendBufferSize:    0,
+		}
+		assert.NoError(t, tc.ValidateBackendProtocol())
+	})
+
+	t.Run("round-trips through JSON for API serialization", func(t *testing.T) {
+		tc := TransportConfig{
+			BackendProtocol:        "h3",
+			H3UDPReceiveBufferSize: 7500000,
+			H3UDPSendBufferSize:    7500000,
+		}
+		data, err := json.Marshal(tc)
+		require.NoError(t, err)
+
+		var decoded TransportConfig
+		require.NoError(t, json.Unmarshal(data, &decoded))
+		assert.Equal(t, tc.H3UDPReceiveBufferSize, decoded.H3UDPReceiveBufferSize)
+		assert.Equal(t, tc.H3UDPSendBufferSize, decoded.H3UDPSendBufferSize)
+	})
+}

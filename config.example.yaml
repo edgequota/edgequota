@@ -66,6 +66,39 @@ backend:
     #   "h2"  — force HTTP/2 (h2c for http://, h2 over TLS for https://)
     #   "h3"  — force HTTP/3 (QUIC); requires an https:// backend
     #
+    # ⚠ HTTP/3 backend prerequisite — UDP buffer sizes
+    #
+    #   quic-go (the QUIC library) requires the kernel UDP receive buffer
+    #   (net.core.rmem_max) to be at least 7168 KiB (7340032 bytes). When
+    #   this limit is too low, QUIC connections time out with:
+    #
+    #     "failed to sufficiently increase receive buffer size
+    #      (was: 208 kiB, wanted: 7168 kiB, got: 416 kiB)"
+    #
+    #   This happens because containers running with restricted security
+    #   contexts (readOnlyRootFilesystem, drop ALL capabilities) can only
+    #   double the default buffer — well below the 7 MiB quic-go needs.
+    #   The result is packet loss and 5-second connection timeouts on every
+    #   request to the HTTPS backend, producing 502 errors.
+    #
+    #   To fix this, BOTH of the following must be configured:
+    #
+    #   1. Raise the kernel limit — so the setsockopt(SO_RCVBUF) call
+    #      succeeds. In Kubernetes, the recommended approach is a
+    #      privileged init container that runs sysctl before EdgeQuota
+    #      starts (see the Helm chart initContainers example). Alternative
+    #      approaches: pod-level securityContext.sysctls (requires kubelet
+    #      --allowed-unsafe-sysctls), or node-level tuning via DaemonSet
+    #      / cloud-init.
+    #
+    #   2. Set the buffer size config below — so EdgeQuota creates the
+    #      QUIC UDP socket with the desired buffer sizes explicitly,
+    #      rather than relying on quic-go's internal attempt.
+    #
+    #   On a plain Linux host, you can set the kernel limit directly:
+    #     sysctl -w net.core.rmem_max=7500000
+    #     sysctl -w net.core.wmem_max=7500000
+    #
     # This value can be overridden per-request by the external rate-limit
     # service. When the GetLimitsResponse includes a non-empty
     # "backend_protocol" field ("h1", "h2", or "h3"), it takes precedence
@@ -79,6 +112,27 @@ backend:
     h2_read_idle_timeout: "30s"     # HTTP/2 read idle timeout (gRPC)
     h2_ping_timeout: "15s"          # HTTP/2 ping timeout (gRPC)
     websocket_dial_timeout: "10s"   # WebSocket backend dial timeout
+
+    # ── HTTP/3 (QUIC) UDP buffer sizes ────────────────────────────────
+    # These settings control the SO_RCVBUF and SO_SNDBUF sizes on the
+    # UDP socket used for HTTP/3 backend connections. They only take
+    # effect when backend_protocol is "h3" (or when a per-request
+    # override selects h3) and the backend is HTTPS.
+    #
+    # quic-go requires a receive buffer of at least ~7 MiB (7340032
+    # bytes) for reliable QUIC operation. The kernel must also allow
+    # this size — the setsockopt(SO_RCVBUF) call is capped by
+    # net.core.rmem_max (and SO_SNDBUF by net.core.wmem_max). If the
+    # kernel limit is lower than the value configured here, the actual
+    # buffer will be silently capped at the kernel limit.
+    #
+    # The recommended value is 7500000 (~7.15 MiB), matching the
+    # quic-go wiki recommendation. Set to 0 to let quic-go manage
+    # buffers internally (it will attempt 7 MiB and log a warning if
+    # the kernel caps it lower).
+    #
+    # h3_udp_receive_buffer_size: 7500000
+    # h3_udp_send_buffer_size: 7500000
 
 # ─── External Authentication ──────────────────────────────────────────
 # Forwards every incoming request to an external auth service BEFORE rate

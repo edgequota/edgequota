@@ -24,6 +24,7 @@ import (
 
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/ratelimit"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
@@ -501,9 +502,29 @@ func buildTransports(
 
 	var h3 http.RoundTripper
 	if !backendIsCleartext {
-		h3 = &http3.Transport{
+		h3t := &http3.Transport{
 			TLSClientConfig: backendTLS,
 		}
+		if cfg.H3UDPReceiveBufferSize > 0 || cfg.H3UDPSendBufferSize > 0 {
+			udpConn, err := net.ListenUDP("udp", nil)
+			if err == nil {
+				if cfg.H3UDPReceiveBufferSize > 0 {
+					_ = udpConn.SetReadBuffer(cfg.H3UDPReceiveBufferSize)
+				}
+				if cfg.H3UDPSendBufferSize > 0 {
+					_ = udpConn.SetWriteBuffer(cfg.H3UDPSendBufferSize)
+				}
+				qt := &quic.Transport{Conn: udpConn}
+				h3t.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qCfg *quic.Config) (*quic.Conn, error) {
+					udpAddr, err := net.ResolveUDPAddr("udp", addr)
+					if err != nil {
+						return nil, err
+					}
+					return qt.DialEarly(ctx, udpAddr, tlsCfg, qCfg)
+				}
+			}
+		}
+		h3 = h3t
 	}
 
 	return h1, h2, h3

@@ -276,7 +276,9 @@ type TransportConfig struct {
 	//   "" / "auto" — probe the backend at startup and pick the best (default)
 	//   "h1"        — force HTTP/1.1
 	//   "h2"        — force HTTP/2
-	//   "h3"        — force HTTP/3 (QUIC); requires an HTTPS backend
+	//   "h3"        — force HTTP/3 (QUIC); requires an HTTPS backend.
+	//                  The kernel must have net.core.rmem_max >= 7340032 or
+	//                  QUIC connections will time out. See H3UDPReceiveBufferSize.
 	// gRPC traffic always uses HTTP/2 regardless of this setting.
 	BackendProtocol       string `yaml:"backend_protocol"        env:"BACKEND_PROTOCOL"`
 	DialTimeout           string `yaml:"dial_timeout"            env:"DIAL_TIMEOUT"`
@@ -286,6 +288,22 @@ type TransportConfig struct {
 	H2ReadIdleTimeout     string `yaml:"h2_read_idle_timeout"    env:"H2_READ_IDLE_TIMEOUT"`
 	H2PingTimeout         string `yaml:"h2_ping_timeout"         env:"H2_PING_TIMEOUT"`
 	WebSocketDialTimeout  string `yaml:"websocket_dial_timeout"  env:"WEBSOCKET_DIAL_TIMEOUT"`
+
+	// H3UDPReceiveBufferSize is the size in bytes for the QUIC UDP socket
+	// receive buffer (SO_RCVBUF). quic-go requires at least 7340032 bytes
+	// (~7 MiB) for reliable QUIC operation; the recommended value is
+	// 7500000. The kernel caps the actual buffer at net.core.rmem_max, so
+	// that sysctl must be raised first (via a privileged init container,
+	// pod-level sysctls, or node tuning). Without sufficient buffers,
+	// HTTP/3 backend connections time out with packet loss.
+	// 0 = let quic-go manage buffers (it attempts ~7 MiB internally and
+	// logs a warning if the kernel caps it lower).
+	H3UDPReceiveBufferSize int `yaml:"h3_udp_receive_buffer_size" env:"H3_UDP_RECEIVE_BUFFER_SIZE"`
+	// H3UDPSendBufferSize is the size in bytes for the QUIC UDP socket
+	// send buffer (SO_SNDBUF). Same considerations as
+	// H3UDPReceiveBufferSize; the kernel caps this at net.core.wmem_max.
+	// 0 = let quic-go manage buffers internally.
+	H3UDPSendBufferSize int `yaml:"h3_udp_send_buffer_size" env:"H3_UDP_SEND_BUFFER_SIZE"`
 }
 
 // ValidateBackendProtocol returns an error if BackendProtocol is not a
