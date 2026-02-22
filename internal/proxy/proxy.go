@@ -558,6 +558,15 @@ func buildTransports(
 	return h1, h2, h3
 }
 
+// stripBackendHopHeaders removes response headers from the backend that are
+// managed by EdgeQuota's middleware or server layer. Without this, headers like
+// Alt-Svc and X-Request-Id would be duplicated: once from the middleware and
+// once copied from the backend by httputil.ReverseProxy.
+func stripBackendHopHeaders(resp *http.Response) {
+	resp.Header.Del("Alt-Svc")
+	resp.Header.Del("X-Request-Id")
+}
+
 // setForwardingHeaders adds standard proxy forwarding headers (Host, Proto)
 // to the request. These headers enable the upstream (e.g. Traefik) to route
 // correctly based on the original client host and detect the original protocol.
@@ -639,6 +648,8 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 				"x_ratelimit_remaining", resp.Header.Values("X-RateLimit-Remaining"),
 				"path", resp.Request.URL.Path,
 				"hypothesis", "B")
+			// #endregion
+			stripBackendHopHeaders(resp)
 			return nil
 		},
 	}
