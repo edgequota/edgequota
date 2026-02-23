@@ -34,6 +34,7 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 				"average":        100,
 				"burst":          50,
 				"period":         "1s",
+				"backend_url":    "http://backend:8080",
 				"failure_policy": "passthrough",
 			})
 		}))
@@ -77,6 +78,7 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 				"average":        100,
 				"burst":          50,
 				"period":         "1s",
+				"backend_url":    "http://backend:8080",
 				"failure_policy": "failclosed",
 				"failure_code":   429,
 			})
@@ -122,6 +124,7 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 				"average":      100,
 				"burst":        50,
 				"period":       "1s",
+				"backend_url":  "http://backend:8080",
 				"failure_code": 503,
 			})
 		}))
@@ -162,6 +165,7 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 				"average":        100,
 				"burst":          50,
 				"period":         "1s",
+				"backend_url":    "http://backend:8080",
 				"failure_policy": "totally_invalid_policy",
 			})
 		}))
@@ -199,9 +203,10 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 		extRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			// No failure_policy or failure_code — static config should apply.
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer extRL.Close()
@@ -234,8 +239,8 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 		cfg := testConfig(mr.Addr())
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyFailClosed
 		cfg.RateLimit.FailureCode = 503
-		cfg.RateLimit.Average = 2
-		cfg.RateLimit.Burst = 2
+		cfg.RateLimit.Static.Average = 2
+		cfg.RateLimit.Static.Burst = 2
 		cfg.RateLimit.External.Enabled = true
 
 		extRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -243,6 +248,7 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 				"average":        100,
 				"burst":          50,
 				"period":         "1s",
+				"backend_url":    "http://backend:8080",
 				"failure_policy": "inmemoryfallback",
 			})
 		}))
@@ -304,6 +310,7 @@ func TestResolveFailurePolicy(t *testing.T) {
 	t.Run("valid policy override replaces static", func(t *testing.T) {
 		c := makeChain(config.FailurePolicyFailClosed, 503)
 		fp, fc := c.resolveFailurePolicy(&ratelimit.ExternalLimits{
+			BackendURL:    "http://backend:8080",
 			FailurePolicy: config.FailurePolicyPassThrough,
 		})
 		assert.Equal(t, config.FailurePolicyPassThrough, fp)
@@ -313,6 +320,7 @@ func TestResolveFailurePolicy(t *testing.T) {
 	t.Run("valid code override replaces static", func(t *testing.T) {
 		c := makeChain(config.FailurePolicyFailClosed, 503)
 		fp, fc := c.resolveFailurePolicy(&ratelimit.ExternalLimits{
+			BackendURL:  "http://backend:8080",
 			FailureCode: 429,
 		})
 		assert.Equal(t, config.FailurePolicyFailClosed, fp) // Policy not overridden.
@@ -322,6 +330,7 @@ func TestResolveFailurePolicy(t *testing.T) {
 	t.Run("both overrides replace static", func(t *testing.T) {
 		c := makeChain(config.FailurePolicyFailClosed, 503)
 		fp, fc := c.resolveFailurePolicy(&ratelimit.ExternalLimits{
+			BackendURL:    "http://backend:8080",
 			FailurePolicy: config.FailurePolicyPassThrough,
 			FailureCode:   200,
 		})
@@ -332,6 +341,7 @@ func TestResolveFailurePolicy(t *testing.T) {
 	t.Run("invalid policy is ignored", func(t *testing.T) {
 		c := makeChain(config.FailurePolicyFailClosed, 503)
 		fp, fc := c.resolveFailurePolicy(&ratelimit.ExternalLimits{
+			BackendURL:    "http://backend:8080",
 			FailurePolicy: config.FailurePolicy("garbage"),
 			FailureCode:   418,
 		})

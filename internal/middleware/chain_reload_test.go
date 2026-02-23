@@ -33,10 +33,10 @@ func newTestChain(t *testing.T, cfg *config.Config) *Chain {
 
 func baseCfg() *config.Config {
 	cfg := config.Defaults()
-	cfg.Backend.URL = "http://127.0.0.1:9999"
-	cfg.RateLimit.Average = 100
-	cfg.RateLimit.Burst = 50
-	cfg.RateLimit.Period = "1s"
+	cfg.RateLimit.Static.BackendURL = "http://127.0.0.1:9999"
+	cfg.RateLimit.Static.Average = 100
+	cfg.RateLimit.Static.Burst = 50
+	cfg.RateLimit.Static.Period = "1s"
 	return cfg
 }
 
@@ -49,9 +49,9 @@ func TestChainReload_UpdatesRateLimitParams(t *testing.T) {
 
 	// Reload with different params.
 	newCfg := baseCfg()
-	newCfg.RateLimit.Average = 10
-	newCfg.RateLimit.Burst = 5
-	newCfg.RateLimit.Period = "10s"
+	newCfg.RateLimit.Static.Average = 10
+	newCfg.RateLimit.Static.Burst = 5
+	newCfg.RateLimit.Static.Period = "10s"
 	newCfg.RateLimit.FailurePolicy = config.FailurePolicyFailClosed
 
 	err := chain.Reload(newCfg)
@@ -68,7 +68,7 @@ func TestChainReload_UpdatesKeyStrategy(t *testing.T) {
 
 	// Reload with header-based key strategy.
 	newCfg := baseCfg()
-	newCfg.RateLimit.KeyStrategy = config.KeyStrategyConfig{
+	newCfg.RateLimit.Static.KeyStrategy = config.KeyStrategyConfig{
 		Type:       config.KeyStrategyHeader,
 		HeaderName: "X-Tenant-Id",
 	}
@@ -90,7 +90,7 @@ func TestChainReload_InvalidKeyStrategyKeepsOld(t *testing.T) {
 
 	// Try to reload with an invalid key strategy.
 	newCfg := baseCfg()
-	newCfg.RateLimit.KeyStrategy = config.KeyStrategyConfig{
+	newCfg.RateLimit.Static.KeyStrategy = config.KeyStrategyConfig{
 		Type: "nonexistent",
 	}
 

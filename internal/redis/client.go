@@ -43,6 +43,9 @@ type Client interface {
 	EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *goredis.Cmd
 	Get(ctx context.Context, key string) *goredis.StringCmd
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *goredis.StatusCmd
+	Del(ctx context.Context, keys ...string) *goredis.IntCmd
+	SAdd(ctx context.Context, key string, members ...any) *goredis.IntCmd
+	SMembers(ctx context.Context, key string) *goredis.StringSliceCmd
 	Ping(ctx context.Context) *goredis.StatusCmd
 	Close() error
 }
@@ -493,6 +496,45 @@ func (r *ReplicationClient) Ping(ctx context.Context) *goredis.StatusCmd {
 		return cmd
 	}
 	return master.Ping(ctx)
+}
+
+// Del implements Client.
+func (r *ReplicationClient) Del(ctx context.Context, keys ...string) *goredis.IntCmd {
+	var result *goredis.IntCmd
+	err := r.withReadOnlyRetry(func(master *goredis.Client) error {
+		result = master.Del(ctx, keys...)
+		return result.Err()
+	})
+	if err != nil && result == nil {
+		result = goredis.NewIntCmd(ctx)
+		result.SetErr(err)
+	}
+	return result
+}
+
+// SAdd implements Client.
+func (r *ReplicationClient) SAdd(ctx context.Context, key string, members ...any) *goredis.IntCmd {
+	var result *goredis.IntCmd
+	err := r.withReadOnlyRetry(func(master *goredis.Client) error {
+		result = master.SAdd(ctx, key, members...)
+		return result.Err()
+	})
+	if err != nil && result == nil {
+		result = goredis.NewIntCmd(ctx)
+		result.SetErr(err)
+	}
+	return result
+}
+
+// SMembers implements Client.
+func (r *ReplicationClient) SMembers(ctx context.Context, key string) *goredis.StringSliceCmd {
+	master, err := r.getMaster()
+	if err != nil {
+		cmd := goredis.NewStringSliceCmd(ctx)
+		cmd.SetErr(err)
+		return cmd
+	}
+	return master.SMembers(ctx, key)
 }
 
 // Close implements Client.

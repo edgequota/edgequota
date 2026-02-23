@@ -1,6 +1,6 @@
 # EdgeQuota Documentation
 
-EdgeQuota is an edge-native reverse proxy that enforces distributed rate limiting and pluggable authentication for Kubernetes workloads. It sits before your ingress controller or API gateway, applying policy decisions at line speed across HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, and WebSocket traffic on a single port.
+EdgeQuota is an edge-native reverse proxy that enforces distributed rate limiting, pluggable authentication, and CDN-style response caching for Kubernetes workloads. It sits before your ingress controller or API gateway, applying policy decisions at line speed across HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, and WebSocket traffic on a single port.
 
 ---
 
@@ -12,6 +12,7 @@ EdgeQuota is an edge-native reverse proxy that enforces distributed rate limitin
 ## Core Features
 
 - [Rate Limiting](rate-limiting.md) -- Token bucket algorithm, Redis Lua script, distributed correctness, key strategies, failure policies, and the external rate limit service.
+- [Response Caching](caching.md) -- CDN-style response caching honoring Cache-Control, cache keys, invalidation, conditional requests, and metrics.
 - [Authentication](authentication.md) -- External auth flow, HTTP/gRPC backends, failure policies, circuit breaker, and header filtering.
 - [Multi-Protocol Proxy](proxy.md) -- HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC, SSE, and WebSocket proxying.
 - [Events](events.md) -- Asynchronous usage event emission via HTTP/gRPC webhooks.
@@ -19,6 +20,7 @@ EdgeQuota is an edge-native reverse proxy that enforces distributed rate limitin
 ## Operations
 
 - [Deployment](deployment.md) -- Kubernetes deployment, horizontal scaling, Redis topology, HA, autoscaling, and production sizing.
+- [Deployment Scenarios](deployment-scenarios.md) -- Common deployment patterns: static RL only, auth + static RL, external RL (FE/assets), and auth + external RL.
 - [Observability](observability.md) -- Prometheus metrics, health probes, structured logging, OpenTelemetry tracing, and Grafana dashboards.
 - [Security](security.md) -- Threat model, SSRF protection, header trust, Redis security, TLS, and container hardening.
 
@@ -62,17 +64,18 @@ The recommended sidebar order for a documentation site:
 1. Getting Started
 2. Configuration Reference
 3. Rate Limiting
-4. Authentication
-5. Multi-Protocol Proxy
-6. Events
-7. Deployment
-8. Observability
-9. Security
-10. Go SDK
-11. Helm Chart
-12. API Reference
-13. Architecture
-14. Troubleshooting
+4. Response Caching
+5. Authentication
+6. Multi-Protocol Proxy
+7. Events
+8. Deployment
+9. Observability
+10. Security
+11. Go SDK
+12. Helm Chart
+13. API Reference
+14. Architecture
+15. Troubleshooting
 ```
 
 ### MkDocs Configuration
@@ -97,6 +100,7 @@ nav:
   - Getting Started: getting-started.md
   - Configuration Reference: configuration.md
   - Rate Limiting: rate-limiting.md
+  - Response Caching: caching.md
   - Authentication: authentication.md
   - Multi-Protocol Proxy: proxy.md
   - Events: events.md

@@ -8,10 +8,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -613,4 +617,200 @@ func TestWithMaxRequestBodySize_Integration(t *testing.T) {
 		// fails when the counting reader errors.
 		assert.Equal(t, http.StatusBadGateway, rr.Code)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Cache integration tests
+// ---------------------------------------------------------------------------
+
+func newTestCacheStore(t *testing.T) *cache.Store {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	client, err := redis.NewClient(config.RedisConfig{
+		Endpoints: []string{mr.Addr()},
+		Mode:      config.RedisModeSingle,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	return cache.NewStore(client)
+}
+
+func TestProxyCacheHitMiss(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("cached body"))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	// First request — cache miss, proxied to backend.
+	req1 := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	rr1 := httptest.NewRecorder()
+	p.ServeHTTP(rr1, req1)
+
+	assert.Equal(t, http.StatusOK, rr1.Code)
+	assert.Equal(t, "cached body", rr1.Body.String())
+	assert.Equal(t, int64(1), backendHits.Load())
+
+	// Second request — served from cache, backend NOT called.
+	req2 := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	rr2 := httptest.NewRecorder()
+	p.ServeHTTP(rr2, req2)
+
+	assert.Equal(t, http.StatusOK, rr2.Code)
+	assert.Equal(t, "cached body", rr2.Body.String())
+	assert.Equal(t, int64(1), backendHits.Load(), "backend should not be called on cache hit")
+}
+
+func TestProxyCacheNoStore(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not cached"))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/no-store", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	assert.Equal(t, int64(2), backendHits.Load(), "no-store responses must not be cached")
+}
+
+func TestProxyCachePrivate(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("private"))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/private", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	assert.Equal(t, int64(2), backendHits.Load(), "private responses must not be cached")
+}
+
+func TestProxyCachePOSTBypasses(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("post response"))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader("body"))
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	assert.Equal(t, int64(2), backendHits.Load(), "POST requests must bypass the cache")
+}
+
+func TestProxyCacheMaxBodySize(t *testing.T) {
+	var backendHits atomic.Int64
+	largeBody := strings.Repeat("x", 2<<20) // 2 MB — exceeds default 1 MB limit
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(largeBody))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/large", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, largeBody, rr.Body.String())
+	}
+
+	assert.Equal(t, int64(2), backendHits.Load(), "responses exceeding MaxBodySize must not be cached")
+}
+
+func TestProxyCacheXCacheHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hit me"))
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	// Populate cache.
+	req1 := httptest.NewRequest(http.MethodGet, "/x-cache", nil)
+	rr1 := httptest.NewRecorder()
+	p.ServeHTTP(rr1, req1)
+	assert.Empty(t, rr1.Header().Get("X-Cache"), "first request should not have X-Cache: HIT")
+
+	// Cache hit — must have X-Cache: HIT.
+	req2 := httptest.NewRequest(http.MethodGet, "/x-cache", nil)
+	rr2 := httptest.NewRecorder()
+	p.ServeHTTP(rr2, req2)
+	assert.Equal(t, "HIT", rr2.Header().Get("X-Cache"))
+}
+
+func TestProxyCacheDisabled(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("no cache configured"))
+	}))
+	defer backend.Close()
+
+	// No WithCache option — caching is disabled.
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger())
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/disabled", nil)
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	assert.Equal(t, int64(2), backendHits.Load(), "without WithCache both requests must hit the backend")
 }

@@ -85,11 +85,12 @@ When using the `clientIP` key strategy, EdgeQuota extracts the client IP in this
 
 ```yaml
 rate_limit:
-  key_strategy:
-    type: "clientIP"
-    trusted_proxies:
-      - "10.0.0.0/8"       # Internal load balancer CIDR
-      - "172.16.0.0/12"    # Kubernetes pod CIDR
+  static:
+    key_strategy:
+      type: "clientIP"
+      trusted_proxies:
+        - "10.0.0.0/8"       # Internal load balancer CIDR
+        - "172.16.0.0/12"    # Kubernetes pod CIDR
 ```
 
 **Risk:** If `trusted_proxies` is configured too broadly, an attacker can spoof `X-Forwarded-For` to impersonate another client's IP.
@@ -405,9 +406,7 @@ Production deployment checklist:
 
 ---
 
-## See Also
-
-- [Configuration Reference](configuration.md) -- Full `url_policy`, TLS, and auth config.
+## See Also- [Configuration Reference](configuration.md) -- Full `url_policy`, TLS, and auth config.
 - [Multi-Protocol Proxy](proxy.md) -- SSRF protection and WebSocket origin validation.
 - [Deployment](deployment.md) -- Network policies and container security contexts.
 - [Architecture](architecture.md) -- Trust boundaries and failure modes.

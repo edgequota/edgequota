@@ -212,7 +212,7 @@ func TestEmitter_CustomHeaders(t *testing.T) {
 		defer srv.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Events.Enabled = true
 		cfg.Events.HTTP.URL = srv.URL
 		cfg.Events.HTTP.AuthToken = "legacy-token"
@@ -242,7 +242,7 @@ func TestEmitter_CustomHeaders(t *testing.T) {
 		defer srv.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Events.Enabled = true
 		cfg.Events.HTTP.URL = srv.URL
 		cfg.Events.HTTP.AuthToken = "api-key-val"

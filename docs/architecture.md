@@ -6,7 +6,13 @@ This document describes the internal architecture of EdgeQuota, its data flow, f
 
 ## System Overview
 
-EdgeQuota is a standalone reverse proxy that enforces rate limits and authentication at the edge of a Kubernetes cluster. It receives all inbound traffic, applies policy decisions, and forwards allowed requests to the configured backend.
+EdgeQuota is a standalone reverse proxy that serves three roles at the edge of a Kubernetes cluster:
+
+1. **Rate-limit enforcer** — Token-bucket quota enforcement backed by Redis.
+2. **Auth gateway** — External authentication forwarding before any backend call.
+3. **CDN** — Caches backend responses in Redis, honoring standard `Cache-Control` semantics.
+
+It receives all inbound traffic, applies policy decisions, caches eligible responses, and forwards allowed requests to the configured backend.
 
 ```
                          Internet / Internal Clients
@@ -30,7 +36,10 @@ EdgeQuota is a standalone reverse proxy that enforces rate limits and authentica
                     │  │  2. Rate Limit          │  │
                     │  │     (Redis + fallback)  │  │
                     │  │         │               │  │
-                    │  │  3. Reverse Proxy       │  │
+                    │  │  3. Response Cache      │  │
+                    │  │     (CDN, optional)     │  │
+                    │  │         │               │  │
+                    │  │  4. Reverse Proxy       │  │
                     │  │     (protocol-aware)    │  │
                     │  └────────────┬────────────┘  │
                     │               │               │
@@ -40,8 +49,8 @@ EdgeQuota is a standalone reverse proxy that enforces rate limits and authentica
                          │                   │
                          ▼                   ▼
                     Redis Cluster       Admin Server
-                    (counters)          :9090/metrics
-                                        :9090/healthz
+                    (counters +         :9090/metrics
+                     response cache)    :9090/healthz
                                         :9090/readyz
                                         :9090/startz
 ```
@@ -98,11 +107,12 @@ Shutdown sequence:
 The chain executes several stages in sequence. Each stage can short-circuit:
 
 ```
-Request ──► Concurrency ──► Auth Check ──► Rate Limit ──► Proxy ──► Backend
-            Gate              │                │              │
-            │                 ▼                ▼              └──► Events (async)
-            ▼             Deny (4xx)       429 Too Many
-        503 (at capacity)    Requests
+Request ──► Concurrency ──► Auth Check ──► Rate Limit ──► Cache ──► Proxy ──► Backend
+            Gate              │                │            │          │
+            │                 ▼                ▼            │          └──► Events (async)
+            ▼             Deny (4xx)       429 Too Many     │
+        503 (at capacity)    Requests                   Cache Hit
+                                                        (served from Redis)
 ```
 
 **Stage 0: Concurrency Gate** (if `max_concurrent_requests > 0`)
@@ -121,7 +131,11 @@ Calls the external auth service with the full request metadata (method, path, he
 4. Execute the Redis Lua script for atomic token-bucket check.
 5. If Redis is unreachable: apply the configured failure policy.
 
-**Stage 3: Proxy**
+**Stage 3: Response Cache** (if `cache.enabled`)
+
+Check the Redis response cache for a matching entry. On a cache hit, the stored response is served directly to the client — no backend call. On a miss, the request proceeds to the proxy stage. When the backend responds, cacheable responses (200/301 with `Cache-Control: max-age` or `public`) are stored in Redis for future requests. See [Response Caching](caching.md).
+
+**Stage 4: Proxy**
 
 Forward the request to the backend via the protocol-aware reverse proxy. Protocol selection (HTTP/1.1, HTTP/2, HTTP/3, WebSocket) is automatic.
 
@@ -350,6 +364,7 @@ The container image is based on `gcr.io/distroless/static-debian12:nonroot`. It 
 
 - [Configuration Reference](configuration.md) -- Every configuration field and default.
 - [Rate Limiting](rate-limiting.md) -- Algorithm details, Lua script, and distributed correctness.
+- [Response Caching](caching.md) -- CDN-style response caching semantics and configuration.
 - [Authentication](authentication.md) -- Auth flow and security model.
 - [Multi-Protocol Proxy](proxy.md) -- Protocol detection and transport selection.
 - [Events](events.md) -- Async usage event emission.

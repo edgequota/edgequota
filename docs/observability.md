@@ -28,6 +28,14 @@ Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exp
 | `edgequota_concurrent_requests_rejected_total` | Concurrency limit rejections | `max_concurrent_requests` exceeded; request received 503 |
 | `edgequota_external_rl_semaphore_rejected_total` | External RL semaphore rejections | `max_concurrent_requests` for external RL calls exceeded |
 | `edgequota_external_rl_singleflight_shared_total` | Singleflight shared results | A concurrent cache miss shared the result of another in-flight external call |
+| `edgequota_response_cache_hits_total` | Response cache hits | Request served from the CDN-style response cache |
+| `edgequota_response_cache_misses_total` | Response cache misses | Request missed the cache and was proxied to the backend |
+| `edgequota_response_cache_stores_total` | Response cache stores | Backend response stored in cache |
+| `edgequota_response_cache_store_errors_total` | Response cache store errors | Error storing a response in cache (Redis write failure) |
+| `edgequota_response_cache_evictions_total` | Response cache evictions | Cache entry evicted (TTL expiry or explicit purge) |
+| `edgequota_response_cache_purge_total` | Response cache purge operations | Purge executed (by key or by tag) |
+| `edgequota_response_cache_revalidations_total` | Response cache revalidations | Conditional request received 304 Not Modified from backend |
+| `edgequota_response_cache_skip_total` | Response cache skips | Response skipped from caching (no-store, too large, non-cacheable status) |
 
 ### Gauges
 
@@ -44,6 +52,7 @@ Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exp
 | `edgequota_external_rl_duration_seconds` | — | 0.0005–5s | Latency of external rate limit service calls |
 | `edgequota_backend_duration_seconds` | — | 0.001–30s | Latency of backend proxy calls |
 | `edgequota_ratelimit_remaining_tokens` | — | 0–1000 | Distribution of remaining tokens across rate-limit checks |
+| `edgequota_response_cache_body_size_bytes` | — | 100–10M | Distribution of cached response body sizes |
 
 ### Go Runtime Metrics
 
@@ -301,7 +310,20 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 | Auth denials/sec | `rate(edgequota_auth_denied_total[5m])` | Time series |
 | Auth error ratio | `rate(edgequota_auth_errors_total[5m]) / (rate(edgequota_requests_allowed_total[5m]) + rate(edgequota_requests_limited_total[5m]))` | Gauge |
 
-### Dashboard 4: Infrastructure
+### Dashboard 4: Response Cache
+
+**Purpose:** CDN-style response cache performance.
+
+| Panel | Query | Visualization |
+|-------|-------|---------------|
+| Hit rate | `rate(edgequota_response_cache_hits_total[5m]) / (rate(edgequota_response_cache_hits_total[5m]) + rate(edgequota_response_cache_misses_total[5m]))` | Gauge (0–100%) |
+| Hits vs misses | `rate(edgequota_response_cache_hits_total[5m])` vs `rate(edgequota_response_cache_misses_total[5m])` | Stacked time series |
+| Store errors/sec | `rate(edgequota_response_cache_store_errors_total[5m])` | Time series |
+| Purge operations | `rate(edgequota_response_cache_purge_total[5m])` | Time series |
+| Cache skips/sec | `rate(edgequota_response_cache_skip_total[5m])` | Time series |
+| Cached body size distribution | `histogram_quantile(0.5, rate(edgequota_response_cache_body_size_bytes_bucket[5m]))` | Time series |
+
+### Dashboard 5: Infrastructure
 
 **Purpose:** Resource consumption and runtime health.
 
@@ -375,6 +397,25 @@ groups:
           severity: warning
         annotations:
           summary: "EdgeQuota is dropping usage events (buffer overflow)"
+
+      - alert: EdgeQuotaLowCacheHitRate
+        expr: |
+          rate(edgequota_response_cache_hits_total[5m])
+          / (rate(edgequota_response_cache_hits_total[5m]) + rate(edgequota_response_cache_misses_total[5m]))
+          < 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Response cache hit rate below 30%"
+
+      - alert: EdgeQuotaCacheStoreErrors
+        expr: rate(edgequota_response_cache_store_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota is failing to store responses in cache (Redis write errors)"
 
       - alert: EdgeQuotaConcurrencyRejections
         expr: rate(edgequota_concurrent_requests_rejected_total[1m]) > 0

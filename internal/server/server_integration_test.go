@@ -24,10 +24,10 @@ func TestServerRunAndShutdown(t *testing.T) {
 	t.Run("starts and stops gracefully", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://127.0.0.1:1" // won't actually connect
-		cfg.Server.Address = ":0"              // random port
-		cfg.Admin.Address = ":0"               // random port
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://127.0.0.1:1" // won't actually connect
+		cfg.Server.Address = ":0"                              // random port
+		cfg.Admin.Address = ":0"                               // random port
+		cfg.RateLimit.Static.Average = 0
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -62,10 +62,10 @@ func TestServerHealthEndpoints(t *testing.T) {
 		adminAddr := freeAddr(t)
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://127.0.0.1:1"
+		cfg.RateLimit.Static.BackendURL = "http://127.0.0.1:1"
 		cfg.Server.Address = proxyAddr
 		cfg.Admin.Address = adminAddr
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.Average = 0
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -157,10 +157,10 @@ func TestServerProxiesTraffic(t *testing.T) {
 
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = backendServer.URL
+		cfg.RateLimit.Static.BackendURL = backendServer.URL
 		cfg.Server.Address = proxyAddr
 		cfg.Admin.Address = adminAddr
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.Average = 0
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 		denyPrivate := false
 		cfg.Backend.URLPolicy.DenyPrivateNetworks = &denyPrivate
@@ -207,10 +207,10 @@ func TestAdminEndpointVersioning(t *testing.T) {
 	proxyAddr := freeAddr(t)
 
 	cfg := config.Defaults()
-	cfg.Backend.URL = "http://127.0.0.1:1"
+	cfg.RateLimit.Static.BackendURL = "http://127.0.0.1:1"
 	cfg.Server.Address = proxyAddr
 	cfg.Admin.Address = adminAddr
-	cfg.RateLimit.Average = 0
+	cfg.RateLimit.Static.Average = 0
 	cfg.Redis.Endpoints = []string{mr.Addr()}
 
 	srv, err := New(cfg, testLogger(), "test")
@@ -264,10 +264,10 @@ func TestAdminConfigOmitsSensitiveData(t *testing.T) {
 	proxyAddr := freeAddr(t)
 
 	cfg := config.Defaults()
-	cfg.Backend.URL = "https://api.backend.internal:443/v1"
+	cfg.RateLimit.Static.BackendURL = "https://api.backend.internal:443/v1"
 	cfg.Server.Address = proxyAddr
 	cfg.Admin.Address = adminAddr
-	cfg.RateLimit.Average = 100
+	cfg.RateLimit.Static.Average = 100
 	cfg.Redis.Endpoints = []string{mr.Addr()}
 	cfg.Redis.Password = "s3cret"
 
@@ -329,10 +329,10 @@ func TestServerTLSHTTP2(t *testing.T) {
 
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = h2cBackend.URL
+		cfg.RateLimit.Static.BackendURL = h2cBackend.URL
 		cfg.Server.Address = proxyAddr
 		cfg.Admin.Address = adminAddr
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.Average = 0
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 		denyPrivate := false
 		cfg.Backend.URLPolicy.DenyPrivateNetworks = &denyPrivate
@@ -392,10 +392,10 @@ func TestServerTLSHTTP2(t *testing.T) {
 
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = backendServer.URL
+		cfg.RateLimit.Static.BackendURL = backendServer.URL
 		cfg.Server.Address = proxyAddr
 		cfg.Admin.Address = adminAddr
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.Average = 0
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 		denyPrivate := false
 		cfg.Backend.URLPolicy.DenyPrivateNetworks = &denyPrivate

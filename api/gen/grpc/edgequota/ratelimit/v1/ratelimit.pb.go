@@ -153,8 +153,6 @@ func (BackendProtocol) EnumDescriptor() ([]byte, []int) {
 // GetLimitsRequest identifies the client and context for limit lookup.
 type GetLimitsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Rate limit bucket key (e.g. tenant ID, client IP).
-	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	// Flattened request headers for context.
 	Headers map[string]string `protobuf:"bytes,2,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// HTTP method.
@@ -193,13 +191,6 @@ func (x *GetLimitsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use GetLimitsRequest.ProtoReflect.Descriptor instead.
 func (*GetLimitsRequest) Descriptor() ([]byte, []int) {
 	return file_edgequota_ratelimit_v1_ratelimit_proto_rawDescGZIP(), []int{0}
-}
-
-func (x *GetLimitsRequest) GetKey() string {
-	if x != nil {
-		return x.Key
-	}
-	return ""
 }
 
 func (x *GetLimitsRequest) GetHeaders() map[string]string {

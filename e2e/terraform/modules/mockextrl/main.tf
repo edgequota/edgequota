@@ -22,6 +22,12 @@ variable "backend_b_url" {
   type        = string
 }
 
+variable "node_port" {
+  description = "Optional NodePort for external access (0 = ClusterIP only)"
+  type        = number
+  default     = 0
+}
+
 resource "kubernetes_deployment_v1" "mockextrl" {
   metadata {
     name      = "mockextrl"
@@ -88,11 +94,13 @@ resource "kubernetes_service_v1" "mockextrl" {
   }
 
   spec {
+    type     = var.node_port > 0 ? "NodePort" : "ClusterIP"
     selector = { app = "mockextrl" }
 
     port {
       port        = 8090
       target_port = 8090
+      node_port   = var.node_port > 0 ? var.node_port : null
     }
   }
 }

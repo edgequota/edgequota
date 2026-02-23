@@ -88,20 +88,21 @@ module "eq_single_pt" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "single-pt"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -136,20 +137,21 @@ module "eq_single_fc" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "failClosed"
       key_prefix: "single-fc"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -184,20 +186,21 @@ module "eq_single_fb" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "inMemoryFallback"
       key_prefix: "single-fb"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -232,20 +235,21 @@ module "eq_repl_basic" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "repl-basic"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_repl_primary}"
@@ -281,20 +285,21 @@ module "eq_sentinel_basic" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "sentinel-basic"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_sentinel_ep}"
@@ -330,20 +335,21 @@ module "eq_cluster_basic" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "cluster-basic"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
 %{for ep in local.redis_cluster_eps~}
@@ -380,21 +386,22 @@ module "eq_key_header" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "key-header"
-      key_strategy:
-        type: "header"
-        header_name: "X-Tenant-Id"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -429,22 +436,23 @@ module "eq_key_composite" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 10
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "key-composite"
-      key_strategy:
-        type: "composite"
-        header_name: "X-Tenant-Id"
-        path_prefix: true
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 10
+        period: "1s"
+        key_strategy:
+          type: "composite"
+          header_name: "X-Tenant-Id"
+          path_prefix: true
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -479,20 +487,21 @@ module "eq_burst_test" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 2
-      burst: 3
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "burst-test"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 2
+        burst: 3
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -527,20 +536,21 @@ module "eq_no_limit" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 0
-      burst: 1
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "no-limit"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -579,20 +589,21 @@ module "eq_protocol" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.testbackend_url}"
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 0
-      burst: 1
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "protocol"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.testbackend_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -627,20 +638,21 @@ module "eq_protocol_rl" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.testbackend_url}"
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 2
-      burst: 3
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "protocol-rl"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.testbackend_url}"
+        average: 2
+        burst: 3
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -703,7 +715,6 @@ module "eq_protocol_h3" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.testbackend_tls_url}"
       timeout: "30s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
@@ -711,13 +722,15 @@ module "eq_protocol_h3" {
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 0
-      burst: 1
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "protocol-h3"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.testbackend_tls_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -752,20 +765,21 @@ module "eq_config_reload" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 100
-      burst: 50
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "config-reload"
-      key_strategy:
-        type: "clientIP"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 100
+        burst: 50
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
     redis:
       endpoints:
         - "${local.redis_single_ep}"
@@ -791,6 +805,7 @@ module "mockextrl" {
   image         = var.mockextrl_image
   backend_a_url = local.backend_url
   backend_b_url = local.testbackend_url
+  node_port     = 30190
 }
 
 # --- dynamic-backend: Tenant-aware backend URL via external RL service ---
@@ -810,7 +825,6 @@ module "eq_dynamic_backend" {
     admin:
       address: ":9090"
     backend:
-      url: "${local.backend_url}"
       timeout: "10s"
       max_idle_conns: 50
       idle_conn_timeout: "60s"
@@ -819,17 +833,27 @@ module "eq_dynamic_backend" {
       url_policy:
         deny_private_networks: false
     rate_limit:
-      average: 1000
-      burst: 500
-      period: "1s"
       failure_policy: "passThrough"
       key_prefix: "dynamic-backend"
-      key_strategy:
-        type: "header"
-        header_name: "X-Tenant-Id"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 1000
+        burst: 500
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
       external:
         enabled: true
         timeout: "5s"
+        fallback:
+          backend_url: "${local.backend_url}"
+          average: 1000
+          burst: 500
+          period: "1s"
+          key_strategy:
+            type: "global"
+            global_key: "dynamic-fallback"
         http:
           url: "${module.mockextrl.endpoint}"
     redis:
@@ -846,4 +870,126 @@ module "eq_dynamic_backend" {
   YAML
 
   depends_on = [module.redis_single, module.whoami, module.testbackend, module.mockextrl]
+}
+
+# --------------------------------------------------------------------------
+# Cache (CDN-style response cache) test scenarios
+# --------------------------------------------------------------------------
+
+# --- cache-basic: Response cache enabled, testbackend returns Cache-Control ---
+module "eq_cache_basic" {
+  source          = "./modules/edgequota"
+  namespace       = local.ns
+  scenario        = "cache-basic"
+  image           = var.edgequota_image
+  node_port       = 30117
+  admin_node_port = 30217
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8080"
+      read_timeout: "30s"
+      write_timeout: "30s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+    admin:
+      address: ":9090"
+    backend:
+      timeout: "10s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
+    cache:
+      enabled: true
+      max_body_size: "1MB"
+    rate_limit:
+      failure_policy: "passThrough"
+      key_prefix: "cache-basic"
+      static:
+        backend_url: "${local.testbackend_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.testbackend]
+}
+
+# --- cache-extrl: External RL with caching (tests RL response cache) ---
+module "eq_cache_extrl" {
+  source    = "./modules/edgequota"
+  namespace = local.ns
+  scenario  = "cache-extrl"
+  image     = var.edgequota_image
+  node_port = 30118
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8080"
+      read_timeout: "30s"
+      write_timeout: "30s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+    admin:
+      address: ":9090"
+    backend:
+      timeout: "10s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+      transport:
+        backend_protocol: "h1"
+      url_policy:
+        deny_private_networks: false
+    rate_limit:
+      failure_policy: "passThrough"
+      key_prefix: "cache-extrl"
+      static:
+        backend_url: "${local.backend_url}"
+        average: 1000
+        burst: 500
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
+      external:
+        enabled: true
+        timeout: "5s"
+        fallback:
+          backend_url: "${local.backend_url}"
+          average: 1000
+          burst: 500
+          period: "1s"
+          key_strategy:
+            type: "global"
+            global_key: "cache-extrl-fallback"
+        http:
+          url: "${module.mockextrl.endpoint}"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.whoami, module.mockextrl]
 }

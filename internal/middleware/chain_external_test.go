@@ -26,9 +26,10 @@ func TestChainExternalRLReceivesHostHeader(t *testing.T) {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer externalRL.Close()
@@ -67,9 +68,10 @@ func TestChainExternalRLReceivesHostHeader(t *testing.T) {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer externalRL.Close()
@@ -104,9 +106,10 @@ func TestChainServeHTTPWithExternalRateLimit(t *testing.T) {
 		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer externalRL.Close()
@@ -164,15 +167,17 @@ func TestChainServeHTTPWithExternalRateLimit(t *testing.T) {
 		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer externalRL.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.RateLimit.External.Enabled = true
 		cfg.RateLimit.External.HTTP.URL = externalRL.URL
 		cfg.Redis.Endpoints = []string{"127.0.0.1:1"}
@@ -245,13 +250,14 @@ func TestChainBackendURLFromExternalService(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 
-	t.Run("no context URL when external service omits backend_url", func(t *testing.T) {
+	t.Run("no context URL when external service returns empty backend_url", func(t *testing.T) {
 		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "",
 			})
 		}))
 		defer externalRL.Close()
@@ -263,7 +269,7 @@ func TestChainBackendURLFromExternalService(t *testing.T) {
 
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctxURL := r.Context().Value(proxy.BackendURLContextKey)
-			assert.Nil(t, ctxURL, "backend URL should NOT be in context when omitted")
+			assert.Nil(t, ctxURL, "backend URL should NOT be in context when empty")
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -323,6 +329,7 @@ func TestChainBackendProtocolFromExternalService(t *testing.T) {
 				"average":          100,
 				"burst":            50,
 				"period":           "1s",
+				"backend_url":      "http://backend:8080",
 				"backend_protocol": "h2",
 			})
 		}))
@@ -355,9 +362,10 @@ func TestChainBackendProtocolFromExternalService(t *testing.T) {
 		externalRL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"average": 100,
-				"burst":   50,
-				"period":  "1s",
+				"average":     100,
+				"burst":       50,
+				"period":      "1s",
+				"backend_url": "http://backend:8080",
 			})
 		}))
 		defer externalRL.Close()
@@ -392,6 +400,7 @@ func TestChainBackendProtocolFromExternalService(t *testing.T) {
 				"average":          100,
 				"burst":            50,
 				"period":           "1s",
+				"backend_url":      "http://backend:8080",
 				"backend_protocol": "ftp",
 			})
 		}))

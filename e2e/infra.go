@@ -80,6 +80,8 @@ func waitForInfrastructure() {
 		{"EdgeQuota (protocol-h3)", "edgequota-scenario=protocol-h3"},
 		{"Mock external RL service", "app=mockextrl"},
 		{"EdgeQuota (dynamic-backend)", "edgequota-scenario=dynamic-backend"},
+		{"EdgeQuota (cache-basic)", "edgequota-scenario=cache-basic"},
+		{"EdgeQuota (cache-extrl)", "edgequota-scenario=cache-extrl"},
 	}
 
 	for _, c := range checks {

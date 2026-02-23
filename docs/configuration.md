@@ -18,7 +18,7 @@ Variables are derived from the YAML path, uppercased, with dots replaced by unde
 
 ```
 server.address         → EDGEQUOTA_SERVER_ADDRESS
-rate_limit.average     → EDGEQUOTA_RATE_LIMIT_AVERAGE
+rate_limit.static.average → EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE
 redis.endpoints        → EDGEQUOTA_REDIS_ENDPOINTS (comma-separated)
 backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 ```
@@ -28,7 +28,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | YAML Type | Env Var Format | Example |
 |-----------|---------------|---------|
 | `string` | Raw string | `EDGEQUOTA_SERVER_ADDRESS=:8080` |
-| `int` / `int64` | Decimal integer | `EDGEQUOTA_RATE_LIMIT_AVERAGE=100` |
+| `int` / `int64` | Decimal integer | `EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE=100` |
 | `bool` | `true` / `false` | `EDGEQUOTA_AUTH_ENABLED=true` |
 | `float64` | Decimal float | `EDGEQUOTA_TRACING_SAMPLE_RATE=0.1` |
 | `[]string` | Comma-separated | `EDGEQUOTA_REDIS_ENDPOINTS=redis-0:6379,redis-1:6379` |
@@ -74,11 +74,12 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 | `write_timeout` | duration | `"10s"` | `EDGEQUOTA_ADMIN_WRITE_TIMEOUT` | Write timeout for admin connections |
 | `idle_timeout` | duration | `"30s"` | `EDGEQUOTA_ADMIN_IDLE_TIMEOUT` | Idle timeout for admin connections |
 
-### `backend` — Upstream Backend
+### `backend` — Upstream Backend (Transport Settings)
+
+The `backend` block contains only transport settings (timeout, connections, TLS). The backend URL is configured in `rate_limit.static.backend_url` when external RL is disabled, or in `rate_limit.external.fallback.backend_url` when external RL is enabled.
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `url` | string | **(required)** | `EDGEQUOTA_BACKEND_URL` | Backend URL to proxy to (e.g., `http://my-service:8080`). Normalized at load time to always include a port. |
 | `timeout` | duration | `"30s"` | `EDGEQUOTA_BACKEND_TIMEOUT` | Response timeout for backend requests |
 | `max_idle_conns` | int | `100` | `EDGEQUOTA_BACKEND_MAX_IDLE_CONNS` | Maximum idle connections to the backend |
 | `idle_conn_timeout` | duration | `"90s"` | `EDGEQUOTA_BACKEND_IDLE_CONN_TIMEOUT` | Idle connection timeout |
@@ -167,13 +168,12 @@ backend:
 | `allow_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (deny_list ignored when set) |
 | `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers |
 
-### `rate_limit` — Rate Limiting
+### `rate_limit` — Rate Limiting (Top-Level)
+
+These fields apply regardless of whether static or external rate limiting is used.
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `average` | int64 | `0` | `EDGEQUOTA_RATE_LIMIT_AVERAGE` | Requests per period. `0` disables rate limiting. |
-| `burst` | int64 | `1` | `EDGEQUOTA_RATE_LIMIT_BURST` | Maximum burst capacity. Minimum: 1. |
-| `period` | duration | `"1s"` | `EDGEQUOTA_RATE_LIMIT_PERIOD` | Rate limit time window |
 | `failure_policy` | string | `"passThrough"` | `EDGEQUOTA_RATE_LIMIT_FAILURE_POLICY` | Behavior when Redis is down: `passThrough`, `failClosed`, `inMemoryFallback` |
 | `failure_code` | int | `429` | `EDGEQUOTA_RATE_LIMIT_FAILURE_CODE` | HTTP status code for `failClosed` rejections. Must be 4xx or 5xx. |
 | `min_ttl` | duration | `""` (auto) | `EDGEQUOTA_RATE_LIMIT_MIN_TTL` | Floor for Redis key TTL. Reduces EXPIRE churn for high-cardinality keys. |
@@ -181,15 +181,38 @@ backend:
 | `max_tenant_labels` | int | `1000` | `EDGEQUOTA_RATE_LIMIT_MAX_TENANT_LABELS` | Max distinct tenant labels in per-tenant Prometheus metrics. Prevents cardinality explosion. |
 | `global_passthrough_rps` | float64 | `0` | `EDGEQUOTA_RATE_LIMIT_GLOBAL_PASSTHROUGH_RPS` | Safety valve: max global RPS when in passthrough mode (Redis down). 0 = unlimited. |
 
-### `rate_limit.key_strategy` — Key Extraction
+### `rate_limit.static` — Static Rate-Limit Bucket
+
+Defines the token-bucket dimensions and key extraction strategy used when **external RL is disabled**. When external RL is enabled, this block is ignored (key extraction is skipped and the external service owns quota resolution).
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `type` | string | `"clientIP"` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TYPE` | Key strategy: `clientIP`, `header`, `composite` |
-| `header_name` | string | `""` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_HEADER_NAME` | Header to extract key from (required for `header` and `composite`) |
-| `path_prefix` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_PATH_PREFIX` | Include first path segment in composite key |
-| `trusted_proxies` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TRUSTED_PROXIES` | CIDRs whose X-Forwarded-For / X-Real-IP are trusted. Empty = only RemoteAddr. |
-| `trusted_ip_depth` | int | `0` | `EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TRUSTED_IP_DEPTH` | Which XFF entry to use: 0=leftmost, N=Nth from right |
+| `backend_url` | string | **(required when external RL disabled)** | `EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL` | Backend URL to proxy to (e.g., `http://my-service:8080`). Normalized at load time to always include a port. |
+| `average` | int64 | `0` | `EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE` | Requests per period. `0` disables rate limiting. |
+| `burst` | int64 | `1` | `EDGEQUOTA_RATE_LIMIT_STATIC_BURST` | Maximum burst capacity. Minimum: 1. |
+| `period` | duration | `"1s"` | `EDGEQUOTA_RATE_LIMIT_STATIC_PERIOD` | Rate limit time window |
+
+### `rate_limit.static.key_strategy` — Key Extraction (Static)
+
+Controls how the per-client rate-limit key is derived from incoming requests.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `type` | string | `"clientIP"` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_TYPE` | Key strategy: `clientIP`, `header`, `composite`, `global` |
+| `header_name` | string | `""` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_HEADER_NAME` | Header to extract key from (required for `header` and `composite`) |
+| `path_prefix` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_PATH_PREFIX` | Include first path segment in composite key |
+| `global_key` | string | `""` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_GLOBAL_KEY` | Fixed key for `global` strategy. Defaults to `"global"` when empty. |
+| `trusted_proxies` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_TRUSTED_PROXIES` | CIDRs whose X-Forwarded-For / X-Real-IP are trusted. Empty = only RemoteAddr. |
+| `trusted_ip_depth` | int | `0` | `EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_TRUSTED_IP_DEPTH` | Which XFF entry to use: 0=leftmost, N=Nth from right |
+
+**Key strategy types:**
+
+| Type | Description | Redis cardinality |
+|------|-------------|-------------------|
+| `clientIP` | Rate limit by client IP address. Default. | One key per unique IP. |
+| `header` | Rate limit by a request header (e.g. `X-Tenant-Id`). Requires `header_name`. | One key per unique header value. |
+| `composite` | Combine header + optional first path segment. Requires `header_name`. | One key per header+path combination. |
+| `global` | Fixed key -- all requests share one bucket. Ideal for FE/static assets. | Exactly one key. |
 
 ### `rate_limit.external` — External Rate Limit Service
 
@@ -197,7 +220,7 @@ backend:
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_ENABLED` | Enable external rate limit resolution |
 | `timeout` | duration | `"5s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_TIMEOUT` | Timeout for external rate limit calls |
-| `cache_ttl` | duration | `"60s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CACHE_TTL` | Default cache TTL when response has no cache hints |
+| `cache_ttl` | duration | `"60s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_CACHE_TTL` | **Deprecated.** Default cache TTL when response has no cache directives. Ignored when CDN-style caching is enabled — external services should return `Cache-Control` headers or body fields instead. See [Response Caching](caching.md). |
 | `max_concurrent_requests` | int | `50` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_MAX_CONCURRENT_REQUESTS` | Semaphore cap on concurrent external calls |
 | `failure_policy` | string | `"static_fallback"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FAILURE_POLICY` | Behavior when external service is down: `static_fallback`, `failclosed` |
 
@@ -230,10 +253,35 @@ backend:
 
 ### `rate_limit.external.header_filter` — External Rate Limit Header Filtering
 
+Controls which headers are **sent to the external service** over the wire. This is a security/privacy concern — sensitive headers should not reach the external service.
+
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
 | `allow_list` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (deny_list ignored when set) |
 | `deny_list` | []string | `[]` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_HEADER_FILTER_DENY_LIST` | Never forward these headers |
+
+### `rate_limit.external.fallback` — Fallback When External Service Is Unreachable
+
+**Required when `external.enabled` is `true`.** When the external rate limit service is unreachable (timeout, circuit breaker open, no cached response, or response lacks `backend_url`) and the failure policy is not `failclosed`, EdgeQuota applies rate limits from this block instead.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `backend_url` | string | **(required when external RL enabled)** | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_BACKEND_URL` | Backend URL used when the external service response does not include `backend_url` or when the external service is unreachable. |
+| `average` | int64 | **(required)** | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_AVERAGE` | Requests per period. Must be > 0 when external RL is enabled. |
+| `burst` | int64 | `1` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_BURST` | Maximum burst capacity. Minimum: 1. |
+| `period` | duration | `"1s"` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_PERIOD` | Rate limit time window. |
+
+### `rate_limit.external.fallback.key_strategy` — Fallback Key Extraction
+
+**Required when `external.enabled` is `true`.** The key strategy used to extract the rate-limit key during fallback. Same structure as `rate_limit.static.key_strategy`.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `type` | string | **(required)** | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_KEY_STRATEGY_TYPE` | `clientIP`, `header`, `composite`, or `global` |
+| `header_name` | string | `""` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_KEY_STRATEGY_HEADER_NAME` | Required for `header` / `composite` |
+| `global_key` | string | `""` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_KEY_STRATEGY_GLOBAL_KEY` | Fixed key for `global` strategy |
+
+The `global` type is recommended for FE/static asset fallbacks since browsers do not send custom headers. For backend APIs where auth injects tenant headers, `header` or `clientIP` may be more appropriate.
 
 ### `redis` — Redis Connection
 
@@ -298,6 +346,49 @@ cache_redis:
     - "cache-replica-2:6379"
   mode: "replication"
   pool_size: 20
+```
+
+### `cache` — Response Cache (CDN)
+
+EdgeQuota can cache backend responses in Redis, acting as a CDN. The cache is response-driven — backends opt in via `Cache-Control` headers. See [Response Caching](caching.md) for full semantics.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `enabled` | bool | `false` | `EDGEQUOTA_CACHE_ENABLED` | Enable CDN-style response caching |
+| `max_body_size` | int64 | `1048576` | `EDGEQUOTA_CACHE_MAX_BODY_SIZE` | Maximum response body size in bytes eligible for caching (default: 1 MB) |
+
+```yaml
+cache:
+  enabled: true
+  max_body_size: 5242880  # 5 MB
+```
+
+### `response_cache_redis` — Dedicated Redis for Response Cache (Optional)
+
+When configured, the response cache uses this Redis connection instead of `cache_redis` or `redis`. The field schema is identical to the `redis` section. If omitted, the fallback chain is: `cache_redis` → `redis`.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `endpoints` | []string | — | `EDGEQUOTA_RESPONSE_CACHE_REDIS_ENDPOINTS` | Response cache Redis endpoints |
+| `mode` | string | `"single"` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_MODE` | Topology: `single`, `replication`, `sentinel`, `cluster` |
+| `master_name` | string | `""` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_MASTER_NAME` | Master name (sentinel mode) |
+| `username` | string | `""` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_USERNAME` | Redis username |
+| `password` | string | `""` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_PASSWORD` | Redis password |
+| `db` | int | `0` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_DB` | Redis database |
+| `pool_size` | int | `10` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_POOL_SIZE` | Connection pool size |
+| `dial_timeout` | duration | `"5s"` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_DIAL_TIMEOUT` | Connection timeout |
+| `read_timeout` | duration | `"3s"` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_READ_TIMEOUT` | Read timeout |
+| `write_timeout` | duration | `"3s"` | `EDGEQUOTA_RESPONSE_CACHE_REDIS_WRITE_TIMEOUT` | Write timeout |
+
+TLS sub-fields: `EDGEQUOTA_RESPONSE_CACHE_REDIS_TLS_ENABLED`, `EDGEQUOTA_RESPONSE_CACHE_REDIS_TLS_INSECURE_SKIP_VERIFY`.
+
+```yaml
+response_cache_redis:
+  endpoints:
+    - "cdn-cache-primary:6379"
+    - "cdn-cache-replica:6379"
+  mode: "replication"
+  pool_size: 30
 ```
 
 ### `events` — Usage Event Emission
@@ -405,18 +496,21 @@ The following constraints are enforced at load time:
 
 | Rule | Error |
 |------|-------|
-| `backend.url` is empty | `backend.url is required` |
-| `backend.url` has no scheme or host | `invalid backend.url: scheme and host are required` |
+| External RL disabled and `rate_limit.static.backend_url` empty | `rate_limit.static.backend_url is required when external RL is disabled` |
+| External RL enabled and `rate_limit.external.fallback.backend_url` empty | `rate_limit.external.fallback.backend_url is required when external RL is enabled` |
+| `backend_url` has no scheme or host | `invalid backend_url: scheme and host are required` |
 | Any duration field is not a valid Go duration | `invalid <field> "<value>"` |
 | TLS enabled but `cert_file` or `key_file` missing | `server.tls.cert_file and server.tls.key_file are required` |
 | HTTP/3 enabled without TLS | `server.tls.http3_enabled requires server.tls.enabled` |
 | `min_version` not `1.2` or `1.3` | `invalid server.tls.min_version` |
 | Auth enabled but no backend URL | `auth.http.url or auth.grpc.address is required` |
-| `average < 0` | `rate_limit.average must be >= 0` |
+| `static.average < 0` | `rate_limit.static.average must be >= 0` |
 | `failure_policy` not recognized | `invalid rate_limit.failure_policy` |
 | `failure_code` not 4xx or 5xx | `invalid rate_limit.failure_code` |
 | `header`/`composite` strategy without `header_name` | `header_name is required` |
 | External RL enabled without backend | `rate_limit.external requires http.url or grpc.address` |
+| External RL enabled without `fallback.key_strategy` | `rate_limit.external.fallback.key_strategy is required` |
+| External RL enabled with `fallback.average <= 0` | `rate_limit.external.fallback.average must be > 0` |
 | Redis mode not recognized | `invalid redis.mode` |
 | Single mode with > 1 endpoint | `single mode requires exactly one endpoint` |
 | Sentinel mode without `master_name` | `redis.master_name is required for sentinel mode` |
@@ -433,14 +527,17 @@ The following constraints are enforced at load time:
 
 ```yaml
 backend:
-  url: "http://my-backend:8080"
+  timeout: "30s"
+  max_idle_conns: 100
 rate_limit:
-  average: 100
-  burst: 50
-  period: "1s"
-  key_strategy:
-    type: "header"
-    header_name: "X-Tenant-Id"
+  static:
+    backend_url: "http://my-backend:8080"
+    average: 100
+    burst: 50
+    period: "1s"
+    key_strategy:
+      type: "header"
+      header_name: "X-Tenant-Id"
 redis:
   endpoints:
     - "redis-master:6379"
@@ -458,8 +555,8 @@ EdgeQuota watches the config file for changes using `fsnotify`. When the file is
 1. The file is re-read and validated.
 2. If validation fails, the old config is kept and an error is logged.
 3. If validation passes, the following are hot-swapped **without restart**:
-   - Rate-limit parameters (`average`, `burst`, `period`, `min_ttl`, `failure_policy`, `failure_code`)
-   - Key strategy (type, header name, trusted proxies)
+   - Rate-limit parameters (`rate_limit.static.average`, `burst`, `period`, `min_ttl`, `failure_policy`, `failure_code`)
+   - Key strategy (`rate_limit.static.key_strategy`: type, header name, trusted proxies)
    - Auth client (reconnects if URL/TLS config changed)
    - External rate-limit client (reconnects if URL/TLS config changed)
    - TLS certificates (via `GetCertificate` — new connections pick up the new cert immediately)
@@ -475,6 +572,7 @@ Rapid file writes are debounced (300ms) to handle editors that use atomic rename
 - [Getting Started](getting-started.md) -- Quick start guide with minimal configs.
 - [Multi-Protocol Proxy](proxy.md) -- Backend protocol selection and transport tuning.
 - [Rate Limiting](rate-limiting.md) -- Algorithm details and external rate limit service.
+- [Response Caching](caching.md) -- CDN-style response caching semantics and configuration.
 - [Authentication](authentication.md) -- Auth flow and security model.
 - [Events](events.md) -- Usage event emission.
 - [Security](security.md) -- Backend URL policy and SSRF protection.

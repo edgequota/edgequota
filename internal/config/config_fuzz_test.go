@@ -16,8 +16,9 @@ server:
 backend:
   url: "http://localhost:9090"
 rate_limit:
-  average: 100
-  burst: 200
+  static:
+    average: 100
+    burst: 200
 redis:
   addrs: ["localhost:6379"]
 `))
@@ -43,18 +44,24 @@ backend:
   idle_conn_timeout: "30s"
   max_request_body_size: 1048576
 rate_limit:
-  average: 10
-  burst: 20
-  key_strategy:
-    type: composite
-    header_name: X-Api-Key
-    composite_parts: ["client_ip", "header"]
+  static:
+    average: 10
+    burst: 20
+    key_strategy:
+      type: composite
+      header_name: X-Api-Key
   external:
     enabled: true
     http:
       url: "http://ratelimit:8080"
     timeout: "2s"
     cache_ttl: "30s"
+    fallback:
+      average: 100
+      burst: 20
+      period: "1s"
+      key_strategy:
+        type: global
 auth:
   enabled: true
   failure_policy: failopen

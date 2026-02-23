@@ -85,8 +85,8 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
-		cfg.RateLimit.Average = 2
-		cfg.RateLimit.Burst = 2
+		cfg.RateLimit.Static.Average = 2
+		cfg.RateLimit.Static.Burst = 2
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -137,8 +137,8 @@ func TestRedisOutagePolicyConformance(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
-		cfg.RateLimit.Average = 1
-		cfg.RateLimit.Burst = 1
+		cfg.RateLimit.Static.Average = 1
+		cfg.RateLimit.Static.Burst = 1
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -186,8 +186,8 @@ func TestRedisRecoveryConformance(t *testing.T) {
 		cfg := testConfig("127.0.0.1:1")
 		cfg.Redis.DialTimeout = "50ms"
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyPassThrough
-		cfg.RateLimit.Average = 10
-		cfg.RateLimit.Burst = 5
+		cfg.RateLimit.Static.Average = 10
+		cfg.RateLimit.Static.Burst = 5
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -222,8 +222,8 @@ func TestRedisRecoveryConformance(t *testing.T) {
 		cfg := testConfig("127.0.0.1:1")
 		cfg.Redis.DialTimeout = "50ms"
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
-		cfg.RateLimit.Average = 10
-		cfg.RateLimit.Burst = 5
+		cfg.RateLimit.Static.Average = 10
+		cfg.RateLimit.Static.Burst = 5
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -263,8 +263,8 @@ func TestRateLimitHeadersConformance(t *testing.T) {
 	t.Run("allowed response includes rate limit headers", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
-		cfg.RateLimit.Average = 100
-		cfg.RateLimit.Burst = 50
+		cfg.RateLimit.Static.Average = 100
+		cfg.RateLimit.Static.Burst = 50
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -288,8 +288,8 @@ func TestRateLimitHeadersConformance(t *testing.T) {
 	t.Run("denied response includes rate limit headers", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
-		cfg.RateLimit.Average = 1
-		cfg.RateLimit.Burst = 1
+		cfg.RateLimit.Static.Average = 1
+		cfg.RateLimit.Static.Burst = 1
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)

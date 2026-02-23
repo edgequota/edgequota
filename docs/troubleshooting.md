@@ -51,7 +51,7 @@ EdgeQuota retries Redis connections indefinitely with capped exponential backoff
 
 ### Rate limiting is not working (all requests pass through)
 
-1. **`rate_limit.average` is 0**: this disables rate limiting entirely.
+1. **`rate_limit.static.average` is 0**: this disables rate limiting entirely.
 2. **`failure_policy: passThrough`**: if Redis is down, all requests are allowed.
 3. **External rate limit service returns `average: 0`**: this means "unlimited" for that key.
 4. **Check metrics**: `edgequota_redis_errors_total` indicates Redis connectivity problems.
@@ -74,7 +74,7 @@ Redis client logs use Go's `log/slog` structured format, matching EdgeQuota's ow
 
 The backend is unreachable or returned an error. Check:
 
-1. **Backend URL**: verify `backend.url` resolves and the service is healthy.
+1. **Backend URL**: verify `rate_limit.static.backend_url` resolves and the service is healthy.
 2. **Timeouts**: `backend.timeout` may be too short. Increase it for slow backends.
 3. **TLS mismatch**: if the backend requires TLS, use `https://` in the URL.
 4. **HTTP/3 issues**: see "HTTP/3 connections timing out" below.
@@ -168,6 +168,43 @@ Certain headers cannot be set as custom event headers because they would break H
 
 ---
 
+## Cache Issues
+
+### Low cache hit rate
+
+When `edgequota_response_cache_hits_total` is low relative to `edgequota_response_cache_misses_total`:
+
+1. **Backend not returning `Cache-Control`**: EdgeQuota only caches responses with explicit `Cache-Control: max-age=N` or `Cache-Control: public, max-age=N`. Responses without cache directives are never cached.
+2. **Backend returning `no-store` or `private`**: These directives prevent caching. Check the backend's response headers with `curl -I`.
+3. **Non-cacheable status codes**: Only `200 OK` and `301 Moved Permanently` are cached.
+4. **Response too large**: Responses exceeding `cache.max_body_size` (default: 1 MB) pass through uncached. Increase the limit if needed.
+5. **High cardinality `Vary` header**: A `Vary` header with many possible values (e.g., `Vary: *`) produces unique cache entries per request variation.
+
+### Cache purge not working
+
+1. **Wrong key format**: Purge by key requires the exact internal cache key format (`METHOD|PATH?QUERY|Headers`). Use the access log `rl_key` field to find the correct key.
+2. **Tag not set**: Tag-based purge requires the backend to return `Surrogate-Key` or `Cache-Tag` headers. Verify the backend includes these headers.
+3. **Redis connectivity**: Purge operations write to Redis. Check `edgequota_response_cache_store_errors_total` for Redis failures.
+
+### Stale content being served
+
+1. **TTL not expired**: The cached response is still within its `max-age` window. Wait for expiry or issue a purge.
+2. **Conditional revalidation succeeding**: If the backend returns `304 Not Modified`, the cached entry's TTL is refreshed. Ensure the backend returns updated `ETag` or `Last-Modified` when content changes.
+
+### Cache store errors
+
+When `edgequota_response_cache_store_errors_total` is incrementing:
+
+1. **Redis memory full**: The response cache Redis may be out of memory. Check `redis INFO memory`.
+2. **Redis connectivity**: Check `edgequota_redis_errors_total` and Redis logs.
+3. **Response too large for Redis**: Extremely large responses may exceed Redis's `proto-max-bulk-len`. Consider lowering `cache.max_body_size`.
+
+### Cache not enabled
+
+Verify `cache.enabled: true` in the configuration. Response caching is disabled by default.
+
+---
+
 ## Configuration Issues
 
 ### Hot reload not working
@@ -184,7 +221,7 @@ Environment variables must follow the `EDGEQUOTA_*` naming convention with dots 
 
 ```
 server.tls.enabled → EDGEQUOTA_SERVER_TLS_ENABLED
-rate_limit.key_strategy.type → EDGEQUOTA_RATE_LIMIT_KEY_STRATEGY_TYPE
+rate_limit.static.key_strategy.type → EDGEQUOTA_RATE_LIMIT_STATIC_KEY_STRATEGY_TYPE
 ```
 
 ### Deprecated auth_token/auth_header warnings

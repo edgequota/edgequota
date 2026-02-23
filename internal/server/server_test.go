@@ -1,22 +1,29 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +36,7 @@ func TestNew(t *testing.T) {
 	t.Run("creates server with valid config", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -46,7 +53,7 @@ func TestNew(t *testing.T) {
 
 	t.Run("returns error for invalid backend URL", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "://invalid"
+		cfg.RateLimit.Static.BackendURL = "://invalid"
 
 		_, err := New(cfg, testLogger(), "test")
 		assert.Error(t, err)
@@ -55,8 +62,8 @@ func TestNew(t *testing.T) {
 
 	t.Run("creates server with rate limiting disabled", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 
 		srv, err := New(cfg, testLogger(), "test")
 		require.NoError(t, err)
@@ -66,8 +73,8 @@ func TestNew(t *testing.T) {
 
 	t.Run("creates server with passthrough on Redis failure", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 100
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 100
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyPassThrough
 		cfg.Redis.Endpoints = []string{"127.0.0.1:1"}
 		cfg.Redis.DialTimeout = "100ms"
@@ -83,7 +90,7 @@ func TestServerErrorLog(t *testing.T) {
 	t.Run("main and admin servers have ErrorLog set", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -99,7 +106,7 @@ func TestServerConfigAddresses(t *testing.T) {
 	t.Run("uses configured server and admin addresses", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.Address = ":7777"
 		cfg.Admin.Address = ":7778"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
@@ -135,10 +142,10 @@ func TestServerReload(t *testing.T) {
 	t.Run("reloads chain configuration", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
-		cfg.RateLimit.Average = 100
-		cfg.RateLimit.Burst = 10
+		cfg.RateLimit.Static.Average = 100
+		cfg.RateLimit.Static.Burst = 10
 
 		srv, err := New(cfg, testLogger(), "test")
 		require.NoError(t, err)
@@ -146,10 +153,10 @@ func TestServerReload(t *testing.T) {
 
 		// Prepare a new config with different rate limit.
 		newCfg := config.Defaults()
-		newCfg.Backend.URL = "http://backend:8080"
+		newCfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		newCfg.Redis.Endpoints = []string{mr.Addr()}
-		newCfg.RateLimit.Average = 200
-		newCfg.RateLimit.Burst = 20
+		newCfg.RateLimit.Static.Average = 200
+		newCfg.RateLimit.Static.Burst = 20
 
 		err = srv.Reload(newCfg)
 		assert.NoError(t, err)
@@ -159,7 +166,7 @@ func TestServerReload(t *testing.T) {
 	t.Run("reloads TLS certs when TLS is enabled", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -177,7 +184,7 @@ func TestServerReload(t *testing.T) {
 
 		// Reload with cert paths in the new config.
 		newCfg := config.Defaults()
-		newCfg.Backend.URL = "http://backend:8080"
+		newCfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		newCfg.Redis.Endpoints = []string{mr.Addr()}
 		newCfg.Server.TLS.CertFile = certFile
 		newCfg.Server.TLS.KeyFile = keyFile
@@ -192,7 +199,7 @@ func TestReloadCerts(t *testing.T) {
 	t.Run("no-op when TLS is not enabled", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -206,7 +213,7 @@ func TestReloadCerts(t *testing.T) {
 	t.Run("logs error for invalid cert files", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -230,7 +237,7 @@ func TestReloadCerts(t *testing.T) {
 	t.Run("successfully reloads valid cert", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{mr.Addr()}
 
 		srv, err := New(cfg, testLogger(), "test")
@@ -262,7 +269,7 @@ func TestReloadCerts(t *testing.T) {
 func TestBackendChanged(t *testing.T) {
 	base := func() *config.Config {
 		c := config.Defaults()
-		c.Backend.URL = "http://backend:8080"
+		c.RateLimit.Static.BackendURL = "http://backend:8080"
 		return c
 	}
 
@@ -282,7 +289,7 @@ func TestBackendChanged(t *testing.T) {
 	t.Run("detects URL change", func(t *testing.T) {
 		old := base()
 		new_ := base()
-		new_.Backend.URL = "https://other:443"
+		new_.RateLimit.Static.BackendURL = "https://other:443"
 		assert.True(t, backendChanged(old, new_))
 	})
 
@@ -307,6 +314,175 @@ func TestBackendChanged(t *testing.T) {
 		new_.Backend.URLPolicy.DenyPrivateNetworks = &deny
 		assert.True(t, backendChanged(old, new_))
 	})
+}
+
+func newTestCacheStore(t *testing.T) *cache.Store {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	client, err := redis.NewClient(config.RedisConfig{
+		Endpoints: []string{mr.Addr()},
+		Mode:      config.RedisModeSingle,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	return cache.NewStore(client)
+}
+
+func postJSON(handler http.Handler, body any) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(body)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge", &buf)
+	r.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, r)
+	return w
+}
+
+func TestCachePurgeByKey(t *testing.T) {
+	store := newTestCacheStore(t)
+	store.Set(context.Background(), "my-key", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("data"),
+	}, time.Minute)
+
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{Key: "my-key"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, ok := store.Get(context.Background(), "my-key")
+	assert.False(t, ok, "entry should be deleted after purge by key")
+}
+
+func TestCachePurgeByURL(t *testing.T) {
+	store := newTestCacheStore(t)
+	store.Set(context.Background(), "GET|/static/bundle.js", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("js-content"),
+	}, time.Minute)
+
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{URL: "/static/bundle.js", Method: "GET"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, ok := store.Get(context.Background(), "GET|/static/bundle.js")
+	assert.False(t, ok, "entry should be deleted after purge by URL")
+}
+
+func TestCachePurgeByURLDefaultMethod(t *testing.T) {
+	store := newTestCacheStore(t)
+	store.Set(context.Background(), "GET|/page", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("html"),
+	}, time.Minute)
+
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{URL: "/page"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, ok := store.Get(context.Background(), "GET|/page")
+	assert.False(t, ok, "entry should be deleted when method defaults to GET")
+}
+
+func TestCachePurgeNotFound(t *testing.T) {
+	store := newTestCacheStore(t)
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{Key: "nonexistent"})
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestCachePurgeBadRequest(t *testing.T) {
+	store := newTestCacheStore(t)
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{})
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestCachePurgeMethodNotAllowed(t *testing.T) {
+	store := newTestCacheStore(t)
+	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/cache/purge", nil)
+	handler.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+func TestCachePurgeStoreNil(t *testing.T) {
+	handler := cachePurgeHandler(func() *cache.Store { return nil }, slog.Default())
+
+	w := postJSON(handler, purgeRequest{Key: "anything"})
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestCachePurgeTagsByTag(t *testing.T) {
+	store := newTestCacheStore(t)
+	ctx := context.Background()
+
+	store.Set(ctx, "page-1", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("page1"),
+		Tags:       []string{"pages"},
+	}, time.Minute)
+	store.Set(ctx, "page-2", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("page2"),
+		Tags:       []string{"pages"},
+	}, time.Minute)
+	store.Set(ctx, "unrelated", &cache.Entry{
+		StatusCode: 200,
+		Body:       []byte("other"),
+		Tags:       []string{"other"},
+	}, time.Minute)
+
+	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(purgeTagsRequest{Tags: []string{"pages"}})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge/tags", &buf)
+	r.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, ok := store.Get(ctx, "page-1")
+	assert.False(t, ok, "page-1 should be purged")
+	_, ok = store.Get(ctx, "page-2")
+	assert.False(t, ok, "page-2 should be purged")
+
+	_, ok = store.Get(ctx, "unrelated")
+	assert.True(t, ok, "unrelated entry should remain")
+}
+
+func TestCachePurgeTagsEmpty(t *testing.T) {
+	store := newTestCacheStore(t)
+	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(purgeTagsRequest{Tags: []string{}})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge/tags", &buf)
+	r.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestCachePurgeTagsMethodNotAllowed(t *testing.T) {
+	store := newTestCacheStore(t)
+	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/cache/purge/tags", nil)
+	handler.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
 
 // generateSelfSignedCert creates a minimal self-signed cert+key for testing.

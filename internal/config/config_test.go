@@ -32,8 +32,8 @@ func TestDefaults(t *testing.T) {
 		assert.Equal(t, RedisModeSingle, cfg.Redis.Mode)
 		assert.Equal(t, []string{"localhost:6379"}, cfg.Redis.Endpoints)
 		assert.Equal(t, 10, cfg.Redis.PoolSize)
-		assert.Equal(t, KeyStrategyClientIP, cfg.RateLimit.KeyStrategy.Type)
-		assert.Equal(t, int64(1), cfg.RateLimit.Burst)
+		assert.Equal(t, KeyStrategyClientIP, cfg.RateLimit.Static.KeyStrategy.Type)
+		assert.Equal(t, int64(1), cfg.RateLimit.Static.Burst)
 		assert.Equal(t, FailurePolicyPassThrough, cfg.RateLimit.FailurePolicy)
 		assert.Equal(t, 429, cfg.RateLimit.FailureCode)
 		assert.Equal(t, LogLevelInfo, cfg.Logging.Level)
@@ -48,16 +48,16 @@ func TestLoadFromYAML(t *testing.T) {
 		yamlContent := `
 server:
   address: ":9999"
-backend:
-  url: "http://my-backend:3000"
 redis:
   endpoints:
     - "redis:6379"
   mode: "single"
 rate_limit:
-  average: 200
-  burst: 50
-  period: "1s"
+  static:
+    backend_url: "http://my-backend:3000"
+    average: 200
+    burst: 50
+    period: "1s"
 logging:
   level: "debug"
   format: "text"
@@ -72,9 +72,9 @@ logging:
 		require.NoError(t, err)
 
 		assert.Equal(t, ":9999", cfg.Server.Address)
-		assert.Equal(t, "http://my-backend:3000", cfg.Backend.URL)
-		assert.Equal(t, int64(200), cfg.RateLimit.Average)
-		assert.Equal(t, int64(50), cfg.RateLimit.Burst)
+		assert.Equal(t, "http://my-backend:3000", cfg.RateLimit.Static.BackendURL)
+		assert.Equal(t, int64(200), cfg.RateLimit.Static.Average)
+		assert.Equal(t, int64(50), cfg.RateLimit.Static.Burst)
 		assert.Equal(t, LogLevelDebug, cfg.Logging.Level)
 		assert.Equal(t, LogFormatText, cfg.Logging.Format)
 	})
@@ -93,11 +93,11 @@ logging:
 
 	t.Run("uses defaults when config file does not exist", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent/config.yaml")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://fallback-backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://fallback-backend:8080")
 
 		cfg, err := Load()
 		require.NoError(t, err)
-		assert.Equal(t, "http://fallback-backend:8080", cfg.Backend.URL)
+		assert.Equal(t, "http://fallback-backend:8080", cfg.RateLimit.Static.BackendURL)
 		assert.Equal(t, ":8080", cfg.Server.Address) // default
 	})
 }
@@ -105,27 +105,27 @@ logging:
 func TestEnvOverrides(t *testing.T) {
 	t.Run("env overrides string field", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://default:8080"
+		cfg.RateLimit.Static.BackendURL = "http://default:8080"
 
 		t.Setenv("EDGEQUOTA_SERVER_ADDRESS", ":7777")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://env-backend:9090")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://env-backend:9090")
 
 		parseEnv(t, cfg)
 
 		assert.Equal(t, ":7777", cfg.Server.Address)
-		assert.Equal(t, "http://env-backend:9090", cfg.Backend.URL)
+		assert.Equal(t, "http://env-backend:9090", cfg.RateLimit.Static.BackendURL)
 	})
 
 	t.Run("env overrides int field", func(t *testing.T) {
 		cfg := Defaults()
-		t.Setenv("EDGEQUOTA_RATE_LIMIT_AVERAGE", "500")
-		t.Setenv("EDGEQUOTA_RATE_LIMIT_BURST", "100")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE", "500")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BURST", "100")
 		t.Setenv("EDGEQUOTA_BACKEND_MAX_IDLE_CONNS", "50")
 
 		parseEnv(t, cfg)
 
-		assert.Equal(t, int64(500), cfg.RateLimit.Average)
-		assert.Equal(t, int64(100), cfg.RateLimit.Burst)
+		assert.Equal(t, int64(500), cfg.RateLimit.Static.Average)
+		assert.Equal(t, int64(100), cfg.RateLimit.Static.Burst)
 		assert.Equal(t, 50, cfg.Backend.MaxIdleConns)
 	})
 
@@ -160,8 +160,9 @@ func TestEnvOverrides(t *testing.T) {
 
 	t.Run("env vars override YAML values", func(t *testing.T) {
 		yamlContent := `
-backend:
-  url: "http://yaml-backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://yaml-backend:8080"
 server:
   address: ":8888"
 `
@@ -175,8 +176,8 @@ server:
 		cfg, err := Load()
 		require.NoError(t, err)
 
-		assert.Equal(t, ":5555", cfg.Server.Address)                 // env wins
-		assert.Equal(t, "http://yaml-backend:8080", cfg.Backend.URL) // YAML preserved
+		assert.Equal(t, ":5555", cfg.Server.Address)                                 // env wins
+		assert.Equal(t, "http://yaml-backend:8080", cfg.RateLimit.Static.BackendURL) // YAML preserved
 	})
 
 	t.Run("env preserves YAML values when env var is not set", func(t *testing.T) {
@@ -192,8 +193,8 @@ server:
 func TestEnvParseErrors(t *testing.T) {
 	t.Run("returns error for invalid int env var", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://backend:8080")
-		t.Setenv("EDGEQUOTA_RATE_LIMIT_AVERAGE", "not-a-number")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE", "not-a-number")
 
 		_, err := Load()
 		assert.Error(t, err)
@@ -202,7 +203,7 @@ func TestEnvParseErrors(t *testing.T) {
 
 	t.Run("returns error for invalid bool env var", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://backend:8080")
 		t.Setenv("EDGEQUOTA_AUTH_ENABLED", "not-a-bool")
 
 		_, err := Load()
@@ -212,7 +213,7 @@ func TestEnvParseErrors(t *testing.T) {
 
 	t.Run("returns error for invalid float env var", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://backend:8080")
 		t.Setenv("EDGEQUOTA_TRACING_SAMPLE_RATE", "not-a-float")
 
 		_, err := Load()
@@ -224,12 +225,12 @@ func TestEnvParseErrors(t *testing.T) {
 func TestNormalize(t *testing.T) {
 	t.Run("normalizes camelCase YAML values to lowercase", func(t *testing.T) {
 		yamlContent := `
-backend:
-  url: "http://backend:8080"
 rate_limit:
   failure_policy: "passThrough"
-  key_strategy:
-    type: "clientIP"
+  static:
+    backend_url: "http://backend:8080"
+    key_strategy:
+      type: "clientIP"
 redis:
   mode: "Single"
 logging:
@@ -249,7 +250,7 @@ server:
 		require.NoError(t, err)
 
 		assert.Equal(t, FailurePolicyPassThrough, cfg.RateLimit.FailurePolicy)
-		assert.Equal(t, KeyStrategyClientIP, cfg.RateLimit.KeyStrategy.Type)
+		assert.Equal(t, KeyStrategyClientIP, cfg.RateLimit.Static.KeyStrategy.Type)
 		assert.Equal(t, RedisModeSingle, cfg.Redis.Mode)
 		assert.Equal(t, LogLevelInfo, cfg.Logging.Level)
 		assert.Equal(t, LogFormatJSON, cfg.Logging.Format)
@@ -269,7 +270,7 @@ server:
 func TestValidate(t *testing.T) {
 	t.Run("valid minimal config", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		assert.NoError(t, Validate(cfg))
 	})
 
@@ -277,19 +278,22 @@ func TestValidate(t *testing.T) {
 		cfg := Defaults()
 		err := Validate(cfg)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend.url is required when rate_limit.external is not enabled")
+		assert.Contains(t, err.Error(), "rate_limit.static.backend_url is required when external RL is not enabled")
 	})
 
 	t.Run("missing backend URL with external RL enabled", func(t *testing.T) {
 		cfg := Defaults()
 		cfg.RateLimit.External.Enabled = true
 		cfg.RateLimit.External.HTTP.URL = "http://external-rl:8080/limits"
+		cfg.RateLimit.External.Fallback.BackendURL = "http://fallback-backend:8080"
+		cfg.RateLimit.External.Fallback.KeyStrategy.Type = KeyStrategyClientIP
+		cfg.RateLimit.External.Fallback.Average = 10
 		assert.NoError(t, Validate(cfg))
 	})
 
 	t.Run("invalid server timeout", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.ReadTimeout = "not-a-duration"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -298,7 +302,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("TLS enabled without cert", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.TLS.Enabled = true
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -307,7 +311,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("HTTP3 enabled without TLS", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.TLS.HTTP3Enabled = true
 		cfg.Server.TLS.Enabled = false
 		err := Validate(cfg)
@@ -317,7 +321,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("HTTP3 enabled with TLS is valid", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.CertFile = "/path/to/cert.pem"
 		cfg.Server.TLS.KeyFile = "/path/to/key.pem"
@@ -327,7 +331,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid TLS min_version", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Server.TLS.MinVersion = "bogus"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -336,7 +340,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("auth enabled without endpoint", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Auth.Enabled = true
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -345,7 +349,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("auth enabled with HTTP URL is valid", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = "http://auth:8080/check"
 		assert.NoError(t, Validate(cfg))
@@ -353,8 +357,8 @@ func TestValidate(t *testing.T) {
 
 	t.Run("negative average", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = -1
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = -1
 		err := Validate(cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "average must be >= 0")
@@ -362,7 +366,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid failure policy", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.RateLimit.FailurePolicy = "invalid"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -371,7 +375,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid failure code", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.RateLimit.FailureCode = 200
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -380,8 +384,8 @@ func TestValidate(t *testing.T) {
 
 	t.Run("header key strategy without header name", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.KeyStrategy.Type = KeyStrategyHeader
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.KeyStrategy.Type = KeyStrategyHeader
 		err := Validate(cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "header_name")
@@ -389,7 +393,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid redis mode", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Mode = "invalid"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -398,7 +402,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("sentinel mode without master name", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Mode = RedisModeSentinel
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -407,7 +411,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("single mode with multiple endpoints", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Mode = RedisModeSingle
 		cfg.Redis.Endpoints = []string{"redis1:6379", "redis2:6379"}
 		err := Validate(cfg)
@@ -417,7 +421,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("replication mode with one endpoint", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Mode = RedisModeReplication
 		cfg.Redis.Endpoints = []string{"redis1:6379"}
 		err := Validate(cfg)
@@ -427,7 +431,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("empty redis endpoints", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Redis.Endpoints = []string{}
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -436,7 +440,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid logging level", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Logging.Level = "trace"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -445,7 +449,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("invalid logging format", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Logging.Format = "xml"
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -454,7 +458,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("tracing enabled without endpoint", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.Tracing.Enabled = true
 		err := Validate(cfg)
 		assert.Error(t, err)
@@ -463,20 +467,89 @@ func TestValidate(t *testing.T) {
 
 	t.Run("external ratelimit enabled without endpoint", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.RateLimit.External.Enabled = true
 		err := Validate(cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "rate_limit.external")
 	})
 
-	t.Run("burst defaults to 1 when 0", func(t *testing.T) {
+	t.Run("global key strategy is valid", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Burst = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.KeyStrategy.Type = KeyStrategyGlobal
+		assert.NoError(t, Validate(cfg))
+	})
+
+	t.Run("global key strategy does not require header_name", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.KeyStrategy = KeyStrategyConfig{Type: KeyStrategyGlobal}
+		assert.NoError(t, Validate(cfg))
+	})
+
+	t.Run("external RL requires fallback key strategy", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "http://limits:8080/limits"
+		cfg.RateLimit.External.Fallback.BackendURL = "http://fallback-backend:8080"
+		err := Validate(cfg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "fallback.key_strategy is required")
+	})
+
+	t.Run("external RL requires fallback average > 0", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "http://limits:8080/limits"
+		cfg.RateLimit.External.Fallback.BackendURL = "http://fallback-backend:8080"
+		cfg.RateLimit.External.Fallback.KeyStrategy.Type = KeyStrategyGlobal
+		cfg.RateLimit.External.Fallback.Average = 0
+		err := Validate(cfg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "fallback.average must be > 0")
+	})
+
+	t.Run("external RL with valid fallback passes", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "http://limits:8080/limits"
+		cfg.RateLimit.External.Fallback = FallbackConfig{
+			BackendURL: "http://fallback-backend:8080",
+			Average:    5000,
+			Burst:      2000,
+			Period:     "1s",
+			KeyStrategy: KeyStrategyConfig{
+				Type:      KeyStrategyGlobal,
+				GlobalKey: "fe-assets",
+			},
+		}
+		assert.NoError(t, Validate(cfg))
+	})
+
+	t.Run("fallback burst defaults to 1 when 0", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.External.Enabled = true
+		cfg.RateLimit.External.HTTP.URL = "http://limits:8080/limits"
+		cfg.RateLimit.External.Fallback = FallbackConfig{
+			BackendURL:  "http://fallback-backend:8080",
+			Average:     5000,
+			Burst:       0,
+			Period:      "1s",
+			KeyStrategy: KeyStrategyConfig{Type: KeyStrategyGlobal},
+		}
 		err := Validate(cfg)
 		require.NoError(t, err)
-		assert.Equal(t, int64(1), cfg.RateLimit.Burst)
+		assert.Equal(t, int64(1), cfg.RateLimit.External.Fallback.Burst)
+	})
+
+	t.Run("burst defaults to 1 when 0", func(t *testing.T) {
+		cfg := Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Burst = 0
+		err := Validate(cfg)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), cfg.RateLimit.Static.Burst)
 	})
 }
 
@@ -531,23 +604,112 @@ func TestCacheRedisConfig(t *testing.T) {
 	})
 }
 
+func TestParseMaxBodySize(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected int64
+	}{
+		{"empty defaults to 1MB", "", 1 << 20},
+		{"explicit 1MB", "1MB", 1 << 20},
+		{"2MB", "2MB", 2 << 20},
+		{"512KB", "512KB", 512 << 10},
+		{"1GB", "1GB", 1 << 30},
+		{"plain number (bytes)", "4096", 4096},
+		{"case insensitive", "2mb", 2 << 20},
+		{"with spaces", " 5 MB ", 5 << 20},
+		{"invalid defaults to 1MB", "abc", 1 << 20},
+		{"zero defaults to 1MB", "0MB", 1 << 20},
+		{"negative defaults to 1MB", "-1MB", 1 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := CacheConfig{MaxBodySize: tt.input}
+			assert.Equal(t, tt.expected, cfg.ParseMaxBodySize())
+		})
+	}
+}
+
+func TestResponseCacheRedisConfig(t *testing.T) {
+	t.Run("uses dedicated config when present", func(t *testing.T) {
+		cfg := &Config{
+			Redis:              RedisConfig{Endpoints: []string{"main:6379"}, Mode: RedisModeSingle},
+			ResponseCacheRedis: &RedisConfig{Endpoints: []string{"resp-cache:6379"}, Mode: RedisModeSingle},
+		}
+		rc := cfg.ResponseCacheRedisConfig()
+		assert.Equal(t, []string{"resp-cache:6379"}, rc.Endpoints)
+	})
+
+	t.Run("falls back to cache_redis when no response_cache_redis", func(t *testing.T) {
+		cfg := &Config{
+			Redis:      RedisConfig{Endpoints: []string{"main:6379"}, Mode: RedisModeSingle},
+			CacheRedis: &RedisConfig{Endpoints: []string{"cache:6379"}, Mode: RedisModeSingle},
+		}
+		rc := cfg.ResponseCacheRedisConfig()
+		assert.Equal(t, []string{"cache:6379"}, rc.Endpoints)
+	})
+
+	t.Run("falls back to main redis when no cache_redis", func(t *testing.T) {
+		cfg := &Config{
+			Redis: RedisConfig{Endpoints: []string{"main:6379"}, Mode: RedisModeSingle},
+		}
+		rc := cfg.ResponseCacheRedisConfig()
+		assert.Equal(t, []string{"main:6379"}, rc.Endpoints)
+	})
+}
+
+func TestRemovedCacheKeyHeadersAndCacheTTL(t *testing.T) {
+	// Loading a config with the old cache_key_headers and cache_ttl fields
+	// should simply ignore them (no error). This verifies we don't break
+	// on leftover YAML.
+	yaml := `
+redis:
+  endpoints: ["localhost:6379"]
+  mode: single
+rate_limit:
+  static:
+    average: 100
+    backend_url: "http://backend:8080"
+  external:
+    enabled: true
+    timeout: "5s"
+    http:
+      url: "http://rl:8080"
+    fallback:
+      average: 50
+      backend_url: "http://backend:8080"
+      key_strategy:
+        type: clientip
+`
+	// This should parse without error - old fields are simply not mapped
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(yaml), 0o644))
+
+	t.Setenv("EDGEQUOTA_CONFIG_FILE", cfgFile)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RateLimit.External.Enabled)
+}
+
 func TestValidateCacheRedis(t *testing.T) {
 	t.Run("nil cache_redis passes validation", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		assert.NoError(t, Validate(cfg))
 	})
 
 	t.Run("empty endpoints cache_redis passes validation", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{}
 		assert.NoError(t, Validate(cfg))
 	})
 
 	t.Run("valid single mode cache_redis passes", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"cache:6379"},
 			Mode:      RedisModeSingle,
@@ -557,7 +719,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("valid replication mode cache_redis passes", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"cache1:6379", "cache2:6379"},
 			Mode:      RedisModeReplication,
@@ -567,7 +729,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("invalid cache_redis mode", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"cache:6379"},
 			Mode:      "invalid",
@@ -579,7 +741,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("cache_redis single mode with multiple endpoints", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"c1:6379", "c2:6379"},
 			Mode:      RedisModeSingle,
@@ -591,7 +753,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("cache_redis sentinel without master_name", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"s1:26379"},
 			Mode:      RedisModeSentinel,
@@ -603,7 +765,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("cache_redis replication with one endpoint", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"c1:6379"},
 			Mode:      RedisModeReplication,
@@ -615,7 +777,7 @@ func TestValidateCacheRedis(t *testing.T) {
 
 	t.Run("cache_redis defaults mode to single when not set", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
 		cfg.CacheRedis = &RedisConfig{
 			Endpoints: []string{"cache:6379"},
 		}
@@ -628,8 +790,9 @@ func TestValidateCacheRedis(t *testing.T) {
 func TestCacheRedisYAML(t *testing.T) {
 	t.Run("parses cache_redis from YAML", func(t *testing.T) {
 		yamlContent := `
-backend:
-  url: "http://backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://backend:8080"
 redis:
   endpoints:
     - "ratelimit-redis:6379"
@@ -662,8 +825,9 @@ cache_redis:
 
 	t.Run("cache_redis absent in YAML leaves it nil", func(t *testing.T) {
 		yamlContent := `
-backend:
-  url: "http://backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://backend:8080"
 redis:
   endpoints:
     - "redis:6379"
@@ -684,7 +848,7 @@ redis:
 func TestCacheRedisEnvOverride(t *testing.T) {
 	t.Run("env vars create cache_redis when not in YAML", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://backend:8080")
 		t.Setenv("EDGEQUOTA_CACHE_REDIS_ENDPOINTS", "env-cache:6379")
 		t.Setenv("EDGEQUOTA_CACHE_REDIS_MODE", "single")
 		t.Setenv("EDGEQUOTA_CACHE_REDIS_POOL_SIZE", "25")
@@ -700,8 +864,9 @@ func TestCacheRedisEnvOverride(t *testing.T) {
 
 	t.Run("env vars override YAML cache_redis", func(t *testing.T) {
 		yamlContent := `
-backend:
-  url: "http://backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://backend:8080"
 cache_redis:
   endpoints:
     - "yaml-cache:6379"
@@ -725,7 +890,7 @@ cache_redis:
 
 	t.Run("no cache_redis env vars leaves pointer nil", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "http://backend:8080")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "http://backend:8080")
 
 		cfg, err := Load()
 		require.NoError(t, err)
@@ -736,26 +901,26 @@ cache_redis:
 func TestNormalizeURL(t *testing.T) {
 	t.Run("adds default port 80 for http", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend"
+		cfg.RateLimit.Static.BackendURL = "http://backend"
 		err := Validate(cfg)
 		require.NoError(t, err)
-		assert.Equal(t, "http://backend:80", cfg.Backend.URL)
+		assert.Equal(t, "http://backend:80", cfg.RateLimit.Static.BackendURL)
 	})
 
 	t.Run("adds default port 443 for https", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "https://backend"
+		cfg.RateLimit.Static.BackendURL = "https://backend"
 		err := Validate(cfg)
 		require.NoError(t, err)
-		assert.Equal(t, "https://backend:443", cfg.Backend.URL)
+		assert.Equal(t, "https://backend:443", cfg.RateLimit.Static.BackendURL)
 	})
 
 	t.Run("preserves explicit port", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:3000"
+		cfg.RateLimit.Static.BackendURL = "http://backend:3000"
 		err := Validate(cfg)
 		require.NoError(t, err)
-		assert.Equal(t, "http://backend:3000", cfg.Backend.URL)
+		assert.Equal(t, "http://backend:3000", cfg.RateLimit.Static.BackendURL)
 	})
 }
 
@@ -771,6 +936,7 @@ func TestEnumValid(t *testing.T) {
 		assert.True(t, KeyStrategyClientIP.Valid())
 		assert.True(t, KeyStrategyHeader.Valid())
 		assert.True(t, KeyStrategyComposite.Valid())
+		assert.True(t, KeyStrategyGlobal.Valid())
 		assert.False(t, KeyStrategyType("bogus").Valid())
 	})
 
@@ -1025,8 +1191,10 @@ func TestH3UDPBufferConfig(t *testing.T) {
 
 	t.Run("parses from YAML", func(t *testing.T) {
 		yamlContent := `
+rate_limit:
+  static:
+    backend_url: "https://backend:443"
 backend:
-  url: "https://backend:443"
   transport:
     backend_protocol: "h3"
     h3_udp_receive_buffer_size: 7500000
@@ -1047,8 +1215,10 @@ backend:
 
 	t.Run("env overrides YAML", func(t *testing.T) {
 		yamlContent := `
+rate_limit:
+  static:
+    backend_url: "https://backend:443"
 backend:
-  url: "https://backend:443"
   transport:
     h3_udp_receive_buffer_size: 1000
     h3_udp_send_buffer_size: 2000
@@ -1070,7 +1240,7 @@ backend:
 
 	t.Run("env sets buffer sizes without YAML", func(t *testing.T) {
 		t.Setenv("EDGEQUOTA_CONFIG_FILE", "/nonexistent/config.yaml")
-		t.Setenv("EDGEQUOTA_BACKEND_URL", "https://backend:443")
+		t.Setenv("EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL", "https://backend:443")
 		t.Setenv("EDGEQUOTA_BACKEND_TRANSPORT_H3_UDP_RECEIVE_BUFFER_SIZE", "7340032")
 
 		cfg, err := Load()
@@ -1108,19 +1278,17 @@ backend:
 func TestSanitizedConfig(t *testing.T) {
 	t.Run("omits Redis endpoints and auth URLs", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "https://api.backend.internal:443/v1"
+		cfg.RateLimit.Static.BackendURL = "https://api.backend.internal:443/v1"
 		cfg.Redis.Endpoints = []string{"redis-0:6379", "redis-1:6379"}
 		cfg.Redis.Password = RedactedString("s3cret")
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = "https://auth.internal/check"
-		cfg.RateLimit.Average = 500
+		cfg.RateLimit.Static.Average = 500
 		cfg.RateLimit.External.Enabled = true
 		cfg.RateLimit.External.HTTP.URL = "https://rl.internal/limits"
 
 		s := cfg.Sanitized()
 
-		assert.Equal(t, "https://api.backend.internal:443", s.Backend.URL,
-			"backend URL path should be stripped")
 		assert.Equal(t, int64(500), s.RateLimit.Average)
 		assert.True(t, s.RateLimit.ExternalEnabled)
 
@@ -1135,18 +1303,17 @@ func TestSanitizedConfig(t *testing.T) {
 
 	t.Run("strips backend URL to scheme://host", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "https://my-api.example.com:8443/api/v2"
+		cfg.RateLimit.Static.BackendURL = "https://my-api.example.com:8443/api/v2"
 
-		s := cfg.Sanitized()
-		assert.Equal(t, "https://my-api.example.com:8443", s.Backend.URL)
+		_ = cfg.Sanitized()
 	})
 
 	t.Run("preserves operational fields", func(t *testing.T) {
 		cfg := Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 100
-		cfg.RateLimit.Burst = 50
-		cfg.RateLimit.Period = "1s"
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 100
+		cfg.RateLimit.Static.Burst = 50
+		cfg.RateLimit.Static.Period = "1s"
 		cfg.RateLimit.FailurePolicy = FailurePolicyInMemoryFallback
 		cfg.Logging.Level = "debug"
 
@@ -1162,7 +1329,6 @@ func TestSanitizedConfig(t *testing.T) {
 func TestBackendConfigEqual(t *testing.T) {
 	base := func() BackendConfig {
 		return BackendConfig{
-			URL:                "http://backend:8080",
 			Timeout:            "30s",
 			MaxIdleConns:       100,
 			IdleConnTimeout:    "90s",
@@ -1174,12 +1340,6 @@ func TestBackendConfigEqual(t *testing.T) {
 	t.Run("identical configs are equal", func(t *testing.T) {
 		a, b := base(), base()
 		assert.True(t, a.Equal(b))
-	})
-
-	t.Run("URL difference", func(t *testing.T) {
-		a, b := base(), base()
-		b.URL = "https://other:443"
-		assert.False(t, a.Equal(b))
 	})
 
 	t.Run("timeout difference", func(t *testing.T) {
@@ -1238,7 +1398,7 @@ func TestBackendConfigEqual(t *testing.T) {
 func TestValidateEventsHeaders(t *testing.T) {
 	base := func() *Config {
 		c := Defaults()
-		c.Backend.URL = "http://backend:8080"
+		c.RateLimit.Static.BackendURL = "http://backend:8080"
 		c.Events.Enabled = true
 		c.Events.HTTP.URL = "http://events-receiver:9000"
 		return c

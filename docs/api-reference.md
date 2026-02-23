@@ -22,7 +22,6 @@ Both HTTP (`POST` to the configured URL) and gRPC use the same JSON schema:
 
 ```json
 {
-  "key": "tenant-42",
   "headers": {
     "X-Tenant-Id": "tenant-42",
     "X-Plan": "enterprise",
@@ -35,10 +34,11 @@ Both HTTP (`POST` to the configured URL) and gRPC use the same JSON schema:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `key` | string | Extracted rate-limit key |
 | `headers` | map[string]string | Filtered request headers (controlled by `external.header_filter`). Includes `Host` (re-injected from `r.Host`). |
 | `method` | string | HTTP method |
 | `path` | string | Request path |
+
+The external service derives the tenant/bucket key from the request context (headers, Host, path). There is no pre-extracted `key` field.
 
 ### Response
 
@@ -62,7 +62,7 @@ Both HTTP (`POST` to the configured URL) and gRPC use the same JSON schema:
 | `average` | int64 | yes | Requests per period. `0` = unlimited. |
 | `burst` | int64 | yes | Maximum burst capacity |
 | `period` | string | yes | Duration string (e.g., `"1s"`, `"1m"`) |
-| `tenant_key` | string | no | Custom Redis bucket key. Replaces the extracted key with `t:` prefix (e.g., `rl:edgequota:t:acme-corp`). |
+| `tenant_key` | string | no | Custom Redis bucket key. Prefixed with `t:` (e.g., `rl:edgequota:t:acme-corp`). The external service should return this to assign a per-tenant bucket. |
 | `failure_policy` | string | no | Per-tenant Redis-down behavior: `passthrough`, `failclosed`, `inmemoryfallback` |
 | `failure_code` | int | no | HTTP status for `failclosed` rejections |
 | `backend_url` | string | no | Per-request backend URL override |

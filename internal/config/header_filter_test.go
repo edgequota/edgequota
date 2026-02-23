@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -117,5 +118,29 @@ func TestHeaderFilterFilterHeaders(t *testing.T) {
 		filtered := hf.FilterHeaders(input)
 		assert.Len(t, filtered, 1)
 		assert.Equal(t, "acme", filtered["X-Tenant-Id"])
+	})
+}
+
+func TestBuildEphemeralSet(t *testing.T) {
+	t.Run("includes all default ephemeral headers", func(t *testing.T) {
+		set := BuildEphemeralSet()
+
+		for _, h := range DefaultEphemeralHeaders {
+			_, ok := set[strings.ToLower(h)]
+			assert.True(t, ok, "expected %q in ephemeral set", h)
+		}
+	})
+
+	t.Run("stores lower-cased keys", func(t *testing.T) {
+		set := BuildEphemeralSet()
+		_, ok := set["traceparent"]
+		assert.True(t, ok)
+		_, ok = set["Traceparent"]
+		assert.False(t, ok, "keys must be lower-cased")
+	})
+
+	t.Run("returns correct count", func(t *testing.T) {
+		set := BuildEphemeralSet()
+		assert.True(t, len(set) >= len(DefaultEphemeralHeaders))
 	})
 }

@@ -168,6 +168,35 @@ func TestFirstPathSegment(t *testing.T) {
 	})
 }
 
+func TestGlobalStrategy(t *testing.T) {
+	t.Run("always returns configured key", func(t *testing.T) {
+		s := &GlobalStrategy{Key: "my-bucket"}
+		req, _ := http.NewRequest(http.MethodGet, "/static/app.js", nil)
+
+		key, err := s.Extract(req)
+		require.NoError(t, err)
+		assert.Equal(t, "my-bucket", key)
+	})
+
+	t.Run("returns key regardless of headers or path", func(t *testing.T) {
+		s := &GlobalStrategy{Key: "fe-assets"}
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/users", nil)
+		req.Header.Set("X-Tenant-Id", "tenant-123")
+
+		key, err := s.Extract(req)
+		require.NoError(t, err)
+		assert.Equal(t, "fe-assets", key)
+	})
+
+	t.Run("never returns error", func(t *testing.T) {
+		s := &GlobalStrategy{Key: "test"}
+		req, _ := http.NewRequest(http.MethodGet, "/", nil)
+
+		_, err := s.Extract(req)
+		assert.NoError(t, err)
+	})
+}
+
 func TestNewKeyStrategy(t *testing.T) {
 	t.Run("creates clientIP strategy by default", func(t *testing.T) {
 		ks, err := NewKeyStrategy(config.KeyStrategyConfig{})
@@ -212,6 +241,27 @@ func TestNewKeyStrategy(t *testing.T) {
 		_, err := NewKeyStrategy(config.KeyStrategyConfig{Type: config.KeyStrategyComposite})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "header_name")
+	})
+
+	t.Run("creates global strategy with custom key", func(t *testing.T) {
+		ks, err := NewKeyStrategy(config.KeyStrategyConfig{
+			Type:      config.KeyStrategyGlobal,
+			GlobalKey: "fe-assets",
+		})
+		require.NoError(t, err)
+		gs, ok := ks.(*GlobalStrategy)
+		require.True(t, ok)
+		assert.Equal(t, "fe-assets", gs.Key)
+	})
+
+	t.Run("creates global strategy with default key", func(t *testing.T) {
+		ks, err := NewKeyStrategy(config.KeyStrategyConfig{
+			Type: config.KeyStrategyGlobal,
+		})
+		require.NoError(t, err)
+		gs, ok := ks.(*GlobalStrategy)
+		require.True(t, ok)
+		assert.Equal(t, "global", gs.Key)
 	})
 
 	t.Run("returns error for unknown type", func(t *testing.T) {

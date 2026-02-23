@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,11 +55,12 @@ const (
 	KeyStrategyClientIP  KeyStrategyType = "clientip"
 	KeyStrategyHeader    KeyStrategyType = "header"
 	KeyStrategyComposite KeyStrategyType = "composite"
+	KeyStrategyGlobal    KeyStrategyType = "global"
 )
 
 func (k KeyStrategyType) Valid() bool {
 	switch k {
-	case KeyStrategyClientIP, KeyStrategyHeader, KeyStrategyComposite:
+	case KeyStrategyClientIP, KeyStrategyHeader, KeyStrategyComposite, KeyStrategyGlobal:
 		return true
 	}
 	return false
@@ -149,17 +151,62 @@ func (p AuthFailurePolicy) Valid() bool {
 }
 
 // Config is the top-level EdgeQuota configuration.
+// Config is the top-level EdgeQuota configuration.
 type Config struct {
-	Server     ServerConfig    `yaml:"server"      envPrefix:"SERVER_"`
-	Admin      AdminConfig     `yaml:"admin"       envPrefix:"ADMIN_"`
-	Backend    BackendConfig   `yaml:"backend"     envPrefix:"BACKEND_"`
-	Auth       AuthConfig      `yaml:"auth"        envPrefix:"AUTH_"`
-	RateLimit  RateLimitConfig `yaml:"rate_limit"  envPrefix:"RATE_LIMIT_"`
-	Redis      RedisConfig     `yaml:"redis"       envPrefix:"REDIS_"`
-	CacheRedis *RedisConfig    `yaml:"cache_redis" envPrefix:"CACHE_REDIS_"`
-	Events     EventsConfig    `yaml:"events"      envPrefix:"EVENTS_"`
-	Logging    LoggingConfig   `yaml:"logging"     envPrefix:"LOGGING_"`
-	Tracing    TracingConfig   `yaml:"tracing"     envPrefix:"TRACING_"`
+	Server             ServerConfig    `yaml:"server"              envPrefix:"SERVER_"`
+	Admin              AdminConfig     `yaml:"admin"               envPrefix:"ADMIN_"`
+	Backend            BackendConfig   `yaml:"backend"             envPrefix:"BACKEND_"`
+	Auth               AuthConfig      `yaml:"auth"                envPrefix:"AUTH_"`
+	RateLimit          RateLimitConfig `yaml:"rate_limit"          envPrefix:"RATE_LIMIT_"`
+	Redis              RedisConfig     `yaml:"redis"               envPrefix:"REDIS_"`
+	CacheRedis         *RedisConfig    `yaml:"cache_redis"         envPrefix:"CACHE_REDIS_"`
+	Cache              CacheConfig     `yaml:"cache"               envPrefix:"CACHE_"`
+	ResponseCacheRedis *RedisConfig    `yaml:"response_cache_redis" envPrefix:"RESPONSE_CACHE_REDIS_"`
+	Events             EventsConfig    `yaml:"events"              envPrefix:"EVENTS_"`
+	Logging            LoggingConfig   `yaml:"logging"             envPrefix:"LOGGING_"`
+	Tracing            TracingConfig   `yaml:"tracing"             envPrefix:"TRACING_"`
+}
+
+// CacheConfig controls the CDN-style response cache. When enabled,
+// EdgeQuota caches backend responses that include Cache-Control headers.
+type CacheConfig struct {
+	Enabled     bool   `yaml:"enabled"       env:"ENABLED"`
+	MaxBodySize string `yaml:"max_body_size" env:"MAX_BODY_SIZE"`
+}
+
+// ParseMaxBodySize parses the MaxBodySize string into bytes.
+// Supports suffixes: KB, MB, GB. Default: 1MB.
+func (c CacheConfig) ParseMaxBodySize() int64 {
+	s := strings.TrimSpace(strings.ToUpper(c.MaxBodySize))
+	if s == "" {
+		return 1 << 20
+	}
+	var multiplier int64 = 1
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		multiplier = 1 << 30
+		s = strings.TrimSuffix(s, "GB")
+	case strings.HasSuffix(s, "MB"):
+		multiplier = 1 << 20
+		s = strings.TrimSuffix(s, "MB")
+	case strings.HasSuffix(s, "KB"):
+		multiplier = 1 << 10
+		s = strings.TrimSuffix(s, "KB")
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n <= 0 {
+		return 1 << 20
+	}
+	return n * multiplier
+}
+
+// ResponseCacheRedisConfig returns the Redis config for the response cache.
+// Priority: response_cache_redis > cache_redis > main redis.
+func (c *Config) ResponseCacheRedisConfig() RedisConfig {
+	if c.ResponseCacheRedis != nil && len(c.ResponseCacheRedis.Endpoints) > 0 {
+		return *c.ResponseCacheRedis
+	}
+	return c.CacheRedisConfig()
 }
 
 // EventsConfig holds optional usage event emission settings.
@@ -254,9 +301,11 @@ type AdminConfig struct {
 	IdleTimeout  string `yaml:"idle_timeout"  env:"IDLE_TIMEOUT"`
 }
 
-// BackendConfig defines the upstream backend to proxy requests to.
+// BackendConfig holds transport-level settings shared by all backend
+// connections regardless of routing mode (static, external, fallback).
+// The actual backend URL lives in rate_limit.static.backend_url and
+// rate_limit.external.fallback.backend_url.
 type BackendConfig struct {
-	URL                string           `yaml:"url"                      env:"URL"`
 	Timeout            string           `yaml:"timeout"                  env:"TIMEOUT"`
 	MaxIdleConns       int              `yaml:"max_idle_conns"           env:"MAX_IDLE_CONNS"`
 	IdleConnTimeout    string           `yaml:"idle_conn_timeout"        env:"IDLE_CONN_TIMEOUT"`
@@ -269,8 +318,7 @@ type BackendConfig struct {
 // Equal returns true if both BackendConfigs are equivalent. This replaces
 // reflect.DeepEqual for a faster, explicit comparison.
 func (b BackendConfig) Equal(other BackendConfig) bool {
-	if b.URL != other.URL ||
-		b.Timeout != other.Timeout ||
+	if b.Timeout != other.Timeout ||
 		b.MaxIdleConns != other.MaxIdleConns ||
 		b.IdleConnTimeout != other.IdleConnTimeout ||
 		b.TLSInsecureVerify != other.TLSInsecureVerify ||
@@ -418,6 +466,74 @@ var DefaultSensitiveHeaders = []string{
 	"X-Xsrf-Token",
 }
 
+// DefaultEphemeralHeaders lists per-request headers that MUST NOT participate
+// in cache/singleflight/circuit-breaker lookup keys. These headers change on
+// every request (tracing IDs, correlation IDs, timestamps) and would cause
+// every request to produce a unique key, destroying cache hit rates.
+//
+// This list covers the most widely deployed tracing/correlation standards.
+// When header_filter.allow_list is configured, it already restricts the set
+// to only meaningful headers, making this list unnecessary (but harmless).
+var DefaultEphemeralHeaders = []string{
+	// OpenTelemetry / W3C Trace Context
+	"Traceparent",
+	"Tracestate",
+
+	// Zipkin / B3 propagation (single + multi-header)
+	"X-B3-Traceid",
+	"X-B3-Spanid",
+	"X-B3-Parentspanid",
+	"X-B3-Sampled",
+	"X-B3-Flags",
+	"B3",
+
+	// Jaeger
+	"Uber-Trace-Id",
+
+	// AWS X-Ray
+	"X-Amzn-Trace-Id",
+
+	// Google Cloud Trace
+	"X-Cloud-Trace-Context",
+
+	// Generic request/correlation IDs
+	"X-Request-Id",
+	"X-Correlation-Id",
+	"Request-Id",
+	"X-Req-Id",
+
+	// Envoy / service mesh
+	"X-Envoy-Attempt-Count",
+	"X-Envoy-External-Address",
+	"X-Envoy-Decorator-Operation",
+	"X-Envoy-Upstream-Service-Time",
+
+	// Miscellaneous per-request headers
+	"X-Forwarded-For",
+	"X-Forwarded-Proto",
+	"X-Forwarded-Host",
+	"X-Forwarded-Port",
+	"X-Real-Ip",
+	"Forwarded",
+	"Via",
+	"X-Amz-Cf-Id",
+	"Cf-Ray",
+	"Cdn-Loop",
+	"X-Request-Start",
+	"X-Queue-Start",
+	"True-Client-Ip",
+}
+
+// BuildEphemeralSet compiles the ephemeral header list into a lower-cased set
+// for O(1) lookups.
+func BuildEphemeralSet() map[string]struct{} {
+	set := make(map[string]struct{}, len(DefaultEphemeralHeaders))
+	for _, h := range DefaultEphemeralHeaders {
+		set[strings.ToLower(h)] = struct{}{}
+	}
+	return set
+}
+
 // HeaderFilter is the compiled, ready-to-use form of HeaderFilterConfig.
 // Use NewHeaderFilter to construct one.
 type HeaderFilter struct {
@@ -562,15 +678,39 @@ func (c GRPCTLSConfig) ResolveServerName(grpcAddress string) string {
 }
 
 // RateLimitConfig holds rate limiting settings.
+// StaticRateLimitConfig holds the static rate-limit parameters: the token
+// bucket dimensions and the key extraction strategy.
+type StaticRateLimitConfig struct {
+	Average     int64             `yaml:"average"      env:"AVERAGE"`
+	Burst       int64             `yaml:"burst"        env:"BURST"`
+	Period      string            `yaml:"period"       env:"PERIOD"`
+	KeyStrategy KeyStrategyConfig `yaml:"key_strategy" envPrefix:"KEY_STRATEGY_"`
+
+	// BackendURL is the upstream backend URL used when external RL is
+	// disabled (static mode). Required when external RL is not enabled.
+	BackendURL string `yaml:"backend_url" env:"BACKEND_URL"`
+}
+
+// FallbackConfig mirrors StaticRateLimitConfig and is used as the fallback
+// rate-limit parameters when the external RL service is unavailable.
+type FallbackConfig struct {
+	Average     int64             `yaml:"average"      env:"AVERAGE"`
+	Burst       int64             `yaml:"burst"        env:"BURST"`
+	Period      string            `yaml:"period"       env:"PERIOD"`
+	KeyStrategy KeyStrategyConfig `yaml:"key_strategy" envPrefix:"KEY_STRATEGY_"`
+
+	// BackendURL is the upstream backend URL used during fallback when the
+	// external RL service is unreachable. Required when external RL is enabled.
+	BackendURL string `yaml:"backend_url" env:"BACKEND_URL"`
+}
+
+// RateLimitConfig holds rate limiting settings.
 type RateLimitConfig struct {
-	Average       int64             `yaml:"average"        env:"AVERAGE"`
-	Burst         int64             `yaml:"burst"          env:"BURST"`
-	Period        string            `yaml:"period"         env:"PERIOD"`
-	FailurePolicy FailurePolicy     `yaml:"failure_policy" env:"FAILURE_POLICY"`
-	FailureCode   int               `yaml:"failure_code"   env:"FAILURE_CODE"`
-	KeyPrefix     string            `yaml:"key_prefix"     env:"KEY_PREFIX"`
-	KeyStrategy   KeyStrategyConfig `yaml:"key_strategy"   envPrefix:"KEY_STRATEGY_"`
-	External      ExternalRLConfig  `yaml:"external"       envPrefix:"EXTERNAL_"`
+	Static        StaticRateLimitConfig `yaml:"static"         envPrefix:"STATIC_"`
+	FailurePolicy FailurePolicy         `yaml:"failure_policy" env:"FAILURE_POLICY"`
+	FailureCode   int                   `yaml:"failure_code"   env:"FAILURE_CODE"`
+	KeyPrefix     string                `yaml:"key_prefix"     env:"KEY_PREFIX"`
+	External      ExternalRLConfig      `yaml:"external"       envPrefix:"EXTERNAL_"`
 
 	// MinTTL sets a floor for the Redis key TTL (e.g. "10s"). When empty,
 	// the TTL is computed automatically from the rate and period. Use this
@@ -600,6 +740,10 @@ type KeyStrategyConfig struct {
 	Type       KeyStrategyType `yaml:"type"        env:"TYPE"`
 	HeaderName string          `yaml:"header_name" env:"HEADER_NAME"`
 	PathPrefix bool            `yaml:"path_prefix" env:"PATH_PREFIX"`
+
+	// GlobalKey is the fixed key used when type is "global". All requests
+	// share the same bucket. Defaults to "global" when empty.
+	GlobalKey string `yaml:"global_key" env:"GLOBAL_KEY"`
 
 	// TrustedProxies is a list of CIDR ranges whose X-Forwarded-For and
 	// X-Real-IP headers are trusted. When empty, proxy headers are always
@@ -636,11 +780,15 @@ func (p ExternalRLFailurePolicy) Valid() bool {
 type ExternalRLConfig struct {
 	Enabled       bool                    `yaml:"enabled"        env:"ENABLED"`
 	Timeout       string                  `yaml:"timeout"        env:"TIMEOUT"`
-	CacheTTL      string                  `yaml:"cache_ttl"      env:"CACHE_TTL"`
 	FailurePolicy ExternalRLFailurePolicy `yaml:"failure_policy" env:"FAILURE_POLICY"`
 	HTTP          ExternalHTTPConfig      `yaml:"http"           envPrefix:"HTTP_"`
 	GRPC          ExternalGRPCConfig      `yaml:"grpc"           envPrefix:"GRPC_"`
 	HeaderFilter  HeaderFilterConfig      `yaml:"header_filter"  envPrefix:"HEADER_FILTER_"`
+
+	// Fallback holds the rate-limit parameters (average, burst, period,
+	// key_strategy) used when the external RL service is unavailable and
+	// the failure policy triggers a static fallback.
+	Fallback FallbackConfig `yaml:"fallback" envPrefix:"FALLBACK_"`
 
 	// MaxConcurrentRequests caps the number of simultaneous in-flight
 	// requests to the external rate limit service. This protects the
@@ -787,16 +935,17 @@ func Defaults() *Config {
 			Timeout: "5s",
 		},
 		RateLimit: RateLimitConfig{
-			Burst:         1,
-			Period:        "1s",
+			Static: StaticRateLimitConfig{
+				Burst:  1,
+				Period: "1s",
+				KeyStrategy: KeyStrategyConfig{
+					Type: KeyStrategyClientIP,
+				},
+			},
 			FailurePolicy: FailurePolicyPassThrough,
 			FailureCode:   429,
-			KeyStrategy: KeyStrategyConfig{
-				Type: KeyStrategyClientIP,
-			},
 			External: ExternalRLConfig{
-				Timeout:  "5s",
-				CacheTTL: "60s",
+				Timeout: "5s",
 			},
 		},
 		Redis: RedisConfig{
@@ -853,15 +1002,20 @@ func LoadFromPath(configFile string) (*Config, error) {
 	if cfg.CacheRedis == nil {
 		cfg.CacheRedis = &RedisConfig{}
 	}
+	respCacheRedisPresentInYAML := cfg.ResponseCacheRedis != nil
+	if cfg.ResponseCacheRedis == nil {
+		cfg.ResponseCacheRedis = &RedisConfig{}
+	}
 
 	if envErr := env.ParseWithOptions(cfg, env.Options{Prefix: "EDGEQUOTA_"}); envErr != nil {
 		return nil, fmt.Errorf("parsing environment variables: %w", envErr)
 	}
 
-	// A CacheRedis with no endpoints is meaningless — reset to nil so
-	// CacheRedisConfig() falls back to the main redis section.
 	if len(cfg.CacheRedis.Endpoints) == 0 && !cacheRedisPresentInYAML {
 		cfg.CacheRedis = nil
+	}
+	if len(cfg.ResponseCacheRedis.Endpoints) == 0 && !respCacheRedisPresentInYAML {
+		cfg.ResponseCacheRedis = nil
 	}
 
 	cfg.normalize()
@@ -877,7 +1031,8 @@ func LoadFromPath(configFile string) (*Config, error) {
 // or env values like "PASSTHROUGH" match the canonical lowercase constants.
 func (cfg *Config) normalize() {
 	cfg.RateLimit.FailurePolicy = FailurePolicy(strings.ToLower(string(cfg.RateLimit.FailurePolicy)))
-	cfg.RateLimit.KeyStrategy.Type = KeyStrategyType(strings.ToLower(string(cfg.RateLimit.KeyStrategy.Type)))
+	cfg.RateLimit.Static.KeyStrategy.Type = KeyStrategyType(strings.ToLower(string(cfg.RateLimit.Static.KeyStrategy.Type)))
+	cfg.RateLimit.External.Fallback.KeyStrategy.Type = KeyStrategyType(strings.ToLower(string(cfg.RateLimit.External.Fallback.KeyStrategy.Type)))
 	cfg.Redis.Mode = RedisMode(strings.ToLower(string(cfg.Redis.Mode)))
 	if cfg.CacheRedis != nil {
 		cfg.CacheRedis.Mode = RedisMode(strings.ToLower(string(cfg.CacheRedis.Mode)))
@@ -934,24 +1089,30 @@ func Validate(cfg *Config) error {
 }
 
 func validateBackend(cfg *Config) error {
-	if cfg.Backend.URL == "" {
-		// backend.url is optional when the external rate limit service is
-		// enabled — the external service can provide per-tenant backend URLs.
-		// Without either, there is no backend to proxy to.
-		if !cfg.RateLimit.External.Enabled {
-			return fmt.Errorf("backend.url is required when rate_limit.external is not enabled")
+	if cfg.RateLimit.External.Enabled {
+		// When external RL is enabled, static.backend_url is not used (the
+		// external service owns routing). fallback.backend_url is required.
+		if cfg.RateLimit.External.Fallback.BackendURL == "" {
+			return fmt.Errorf("rate_limit.external.fallback.backend_url is required when external RL is enabled")
 		}
-		return nil
+		normalized, err := normalizeURL(cfg.RateLimit.External.Fallback.BackendURL)
+		if err != nil {
+			return fmt.Errorf("invalid rate_limit.external.fallback.backend_url %q: %w",
+				cfg.RateLimit.External.Fallback.BackendURL, err)
+		}
+		cfg.RateLimit.External.Fallback.BackendURL = normalized
+	} else {
+		// Static mode: static.backend_url is required.
+		if cfg.RateLimit.Static.BackendURL == "" {
+			return fmt.Errorf("rate_limit.static.backend_url is required when external RL is not enabled")
+		}
+		normalized, err := normalizeURL(cfg.RateLimit.Static.BackendURL)
+		if err != nil {
+			return fmt.Errorf("invalid rate_limit.static.backend_url %q: %w",
+				cfg.RateLimit.Static.BackendURL, err)
+		}
+		cfg.RateLimit.Static.BackendURL = normalized
 	}
-
-	// Normalize the backend URL so that host always includes an explicit port.
-	// This avoids port-guessing logic scattered across the codebase.
-	normalized, err := normalizeURL(cfg.Backend.URL)
-	if err != nil {
-		return fmt.Errorf("invalid backend.url %q: %w", cfg.Backend.URL, err)
-	}
-	cfg.Backend.URL = normalized
-
 	return nil
 }
 
@@ -1043,11 +1204,11 @@ func validateAuth(cfg *Config) error {
 }
 
 func validateRateLimit(cfg *Config) error {
-	if cfg.RateLimit.Average < 0 {
-		return fmt.Errorf("rate_limit.average must be >= 0")
+	if cfg.RateLimit.Static.Average < 0 {
+		return fmt.Errorf("rate_limit.static.average must be >= 0")
 	}
-	if cfg.RateLimit.Burst < 1 {
-		cfg.RateLimit.Burst = 1
+	if cfg.RateLimit.Static.Burst < 1 {
+		cfg.RateLimit.Static.Burst = 1
 	}
 	if fp := cfg.RateLimit.FailurePolicy; fp != "" && !fp.Valid() {
 		return fmt.Errorf("invalid rate_limit.failure_policy %q: must be passthrough, failclosed, or inmemoryfallback", fp)
@@ -1055,23 +1216,42 @@ func validateRateLimit(cfg *Config) error {
 	if cfg.RateLimit.FailureCode != 0 && (cfg.RateLimit.FailureCode < 400 || cfg.RateLimit.FailureCode > 599) {
 		return fmt.Errorf("invalid rate_limit.failure_code %d: must be 4xx or 5xx", cfg.RateLimit.FailureCode)
 	}
-	if err := validateKeyStrategy(cfg.RateLimit.KeyStrategy); err != nil {
+	if err := validateKeyStrategy("rate_limit.static", cfg.RateLimit.Static.KeyStrategy); err != nil {
 		return err
 	}
 	if cfg.RateLimit.External.Enabled {
-		if cfg.RateLimit.External.HTTP.URL == "" && cfg.RateLimit.External.GRPC.Address == "" {
-			return fmt.Errorf("rate_limit.external requires http.url or grpc.address when enabled")
-		}
+		return validateExternalRL(cfg)
 	}
 	return nil
 }
 
-func validateKeyStrategy(ks KeyStrategyConfig) error {
+func validateExternalRL(cfg *Config) error {
+	ext := cfg.RateLimit.External
+	if ext.HTTP.URL == "" && ext.GRPC.Address == "" {
+		return fmt.Errorf("rate_limit.external requires http.url or grpc.address when enabled")
+	}
+	fb := ext.Fallback
+	if fb.KeyStrategy.Type == "" {
+		return fmt.Errorf("rate_limit.external.fallback.key_strategy is required when external RL is enabled")
+	}
+	if err := validateKeyStrategy("rate_limit.external.fallback", fb.KeyStrategy); err != nil {
+		return err
+	}
+	if fb.Average <= 0 {
+		return fmt.Errorf("rate_limit.external.fallback.average must be > 0 when external RL is enabled")
+	}
+	if fb.Burst < 1 {
+		cfg.RateLimit.External.Fallback.Burst = 1
+	}
+	return nil
+}
+
+func validateKeyStrategy(prefix string, ks KeyStrategyConfig) error {
 	if ks.Type != "" && !ks.Type.Valid() {
-		return fmt.Errorf("unknown rate_limit.key_strategy.type %q", ks.Type)
+		return fmt.Errorf("unknown %s.key_strategy.type %q", prefix, ks.Type)
 	}
 	if (ks.Type == KeyStrategyHeader || ks.Type == KeyStrategyComposite) && ks.HeaderName == "" {
-		return fmt.Errorf("rate_limit.key_strategy.header_name is required when type is %q", ks.Type)
+		return fmt.Errorf("%s.key_strategy.header_name is required when type is %q", prefix, ks.Type)
 	}
 	return nil
 }
@@ -1186,9 +1366,9 @@ type SanitizedConfig struct {
 	Tracing   TracingConfig    `json:"tracing"`
 }
 
-// SanitizedBackend exposes backend tuning without the full URL.
+// SanitizedBackend exposes backend transport tuning. The backend URL is
+// exposed under rate_limit (static.backend_url or fallback.backend_url).
 type SanitizedBackend struct {
-	URL                string          `json:"url"`
 	Timeout            string          `json:"timeout"`
 	MaxIdleConns       int             `json:"max_idle_conns"`
 	IdleConnTimeout    string          `json:"idle_conn_timeout"`
@@ -1205,13 +1385,17 @@ type SanitizedRL struct {
 	FailureCode     int             `json:"failure_code"`
 	KeyStrategy     KeyStrategyType `json:"key_strategy"`
 	ExternalEnabled bool            `json:"external_enabled"`
+	BackendURL      string          `json:"backend_url"`
 }
 
 // Sanitized returns a safe-to-expose view of the configuration, omitting
 // Redis endpoints, auth URLs, external RL service addresses, events receiver
 // addresses, and all secrets.
 func (c *Config) Sanitized() SanitizedConfig {
-	backendURL := c.Backend.URL
+	backendURL := c.RateLimit.Static.BackendURL
+	if c.RateLimit.External.Enabled {
+		backendURL = c.RateLimit.External.Fallback.BackendURL
+	}
 	if u, err := url.Parse(backendURL); err == nil && u.Host != "" {
 		backendURL = u.Scheme + "://" + u.Host
 	}
@@ -1220,7 +1404,6 @@ func (c *Config) Sanitized() SanitizedConfig {
 		Server: c.Server,
 		Admin:  c.Admin,
 		Backend: SanitizedBackend{
-			URL:                backendURL,
 			Timeout:            c.Backend.Timeout,
 			MaxIdleConns:       c.Backend.MaxIdleConns,
 			IdleConnTimeout:    c.Backend.IdleConnTimeout,
@@ -1228,13 +1411,14 @@ func (c *Config) Sanitized() SanitizedConfig {
 			Transport:          c.Backend.Transport,
 		},
 		RateLimit: SanitizedRL{
-			Average:         c.RateLimit.Average,
-			Burst:           c.RateLimit.Burst,
-			Period:          c.RateLimit.Period,
+			Average:         c.RateLimit.Static.Average,
+			Burst:           c.RateLimit.Static.Burst,
+			Period:          c.RateLimit.Static.Period,
 			FailurePolicy:   c.RateLimit.FailurePolicy,
 			FailureCode:     c.RateLimit.FailureCode,
-			KeyStrategy:     c.RateLimit.KeyStrategy.Type,
+			KeyStrategy:     c.RateLimit.Static.KeyStrategy.Type,
 			ExternalEnabled: c.RateLimit.External.Enabled,
+			BackendURL:      backendURL,
 		},
 		Logging: c.Logging,
 		Tracing: c.Tracing,

@@ -59,6 +59,13 @@ var scenarioNodePorts = map[string]int{
 	"protocol-h3":     30214, // TLS NodePort (TCP + UDP/QUIC)
 	"config-reload":   30115,
 	"dynamic-backend": 30116,
+	"cache-basic":     30117,
+	"cache-extrl":     30118,
+}
+
+// adminNodePorts maps scenario names to their admin NodePort (when exposed).
+var adminNodePorts = map[string]int{
+	"cache-basic": 30217,
 }
 
 // runAllTests resolves the minikube IP, builds base URLs for every scenario,
@@ -78,6 +85,12 @@ func runAllTests() bool {
 		baseURLs[scenario] = fmt.Sprintf("%s://%s:%d", scheme, minikubeIP, port)
 	}
 
+	// Build admin URL map for scenarios that expose admin via NodePort.
+	adminURLs := make(map[string]string, len(adminNodePorts))
+	for scenario, port := range adminNodePorts {
+		adminURLs[scenario] = fmt.Sprintf("http://%s:%d", minikubeIP, port)
+	}
+
 	// Wait for all EdgeQuota instances to become reachable.
 	info("Waiting for EdgeQuota instances to become reachable...")
 	for scenario, base := range baseURLs {
@@ -87,7 +100,7 @@ func runAllTests() bool {
 		info("  ✓ %s reachable", scenario)
 	}
 
-	cases := allTestCases(baseURLs)
+	cases := allTestCases(baseURLs, adminURLs)
 	entries := make([]TestEntry, 0, len(cases))
 	passCount, failCount := 0, 0
 
@@ -165,7 +178,7 @@ func runAllTests() bool {
 // Test definitions
 // ---------------------------------------------------------------------------
 
-func allTestCases(urls map[string]string) []testCase {
+func allTestCases(urls, adminURLs map[string]string) []testCase {
 	return []testCase{
 		// Topology: single
 		{"Single mode — passThrough (happy path)", "single-pt", func() testResult { return testSinglePassThrough(urls["single-pt"]) }},
@@ -236,6 +249,29 @@ func allTestCases(urls map[string]string) []testCase {
 		// Per-request backend_protocol override via external RL
 		{"Dynamic backend — per-request backend_protocol=h1 from ext RL", "dynamic-backend", func() testResult {
 			return testDynamicBackendProtocolOverride(urls["dynamic-backend"])
+		}},
+
+		// Response cache (CDN-style)
+		{"Cache — static asset cached on second GET", "cache-basic", func() testResult {
+			return testCacheStaticAsset(urls["cache-basic"])
+		}},
+		{"Cache — no-store bypass (never cached)", "cache-basic", func() testResult {
+			return testCacheNoStore(urls["cache-basic"])
+		}},
+		{"Cache — PURGE by URL invalidates cached entry", "cache-basic", func() testResult {
+			return testCachePurgeByURL(urls["cache-basic"], adminURLs["cache-basic"])
+		}},
+		{"Cache — PURGE by tag invalidates tagged entries", "cache-basic", func() testResult {
+			return testCachePurgeByTag(urls["cache-basic"], adminURLs["cache-basic"])
+		}},
+		{"Cache — max body size exceeded, not cached", "cache-basic", func() testResult {
+			return testCacheMaxBodySize(urls["cache-basic"])
+		}},
+		{"Cache — external RL response cached via Cache-Control", "cache-extrl", func() testResult {
+			return testExtRLCacheControl(urls["cache-extrl"])
+		}},
+		{"Cache — external RL response not cached without headers", "cache-extrl", func() testResult {
+			return testExtRLNoCache(urls["cache-extrl"])
 		}},
 	}
 }
@@ -1299,6 +1335,356 @@ func testDynamicBackendProtocolOverride(base string) testResult {
 	return pass("dyn-proto-override", "per-request backend_protocol=h1 from external RL works correctly")
 }
 
+// ---------------------------------------------------------------------------
+// CDN-style response cache tests
+// ---------------------------------------------------------------------------
+
+// testCacheStaticAsset verifies that a backend response with
+// Cache-Control: max-age=60 is cached. The second identical GET should
+// return the same body without hitting the backend again.
+func testCacheStaticAsset(base string) testResult {
+	const name = "cache-static"
+
+	// First request — cache miss, hits backend.
+	body1, err := doJSONGet(base + "/cache/static")
+	if err != nil {
+		return fail(name, "first request error: %v", err)
+	}
+
+	call1, _ := body1["call"].(float64)
+	if call1 == 0 {
+		return fail(name, "first request: missing call counter in body: %v", body1)
+	}
+
+	// Second request — should be served from cache with same body.
+	body2, err := doJSONGet(base + "/cache/static")
+	if err != nil {
+		return fail(name, "second request error: %v", err)
+	}
+
+	call2, _ := body2["call"].(float64)
+	if call2 != call1 {
+		return fail(name, "cache miss: call counter changed from %.0f to %.0f (expected same)", call1, call2)
+	}
+
+	return pass(name, "second GET served from cache (call counter=%.0f unchanged)", call1)
+}
+
+// testCacheNoStore verifies that responses with Cache-Control: no-store
+// are never cached. Each GET should hit the backend and return a new
+// call counter.
+func testCacheNoStore(base string) testResult {
+	const name = "cache-no-store"
+
+	body1, err := doJSONGet(base + "/cache/no-store")
+	if err != nil {
+		return fail(name, "first request error: %v", err)
+	}
+	call1, _ := body1["call"].(float64)
+
+	body2, err := doJSONGet(base + "/cache/no-store")
+	if err != nil {
+		return fail(name, "second request error: %v", err)
+	}
+	call2, _ := body2["call"].(float64)
+
+	if call2 <= call1 {
+		return fail(name, "expected call counter to increment (%.0f → %.0f), response was cached", call1, call2)
+	}
+
+	return pass(name, "both requests hit backend (call counter %.0f → %.0f)", call1, call2)
+}
+
+// testCachePurgeByURL verifies that a cached entry can be invalidated via
+// the admin PURGE endpoint using the URL+method key.
+func testCachePurgeByURL(base, adminBase string) testResult {
+	const name = "cache-purge-url"
+
+	// Step 1: Populate cache.
+	body1, err := doJSONGet(base + "/cache/static")
+	if err != nil {
+		return fail(name, "populate request error: %v", err)
+	}
+	call1, _ := body1["call"].(float64)
+
+	// Verify it's cached.
+	body2, err := doJSONGet(base + "/cache/static")
+	if err != nil {
+		return fail(name, "verify-cache request error: %v", err)
+	}
+	call2, _ := body2["call"].(float64)
+	if call2 != call1 {
+		return fail(name, "entry not cached before purge (call counter %.0f → %.0f)", call1, call2)
+	}
+
+	// Step 2: Purge by URL via admin API.
+	purgeBody := `{"url":"/cache/static","method":"GET"}`
+	resp, err := doHTTPRequestFull(adminBase+"/v1/cache/purge", http.MethodPost, map[string]string{
+		"Content-Type": "application/json",
+	}, purgeBody)
+	if err != nil {
+		return fail(name, "purge request error: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fail(name, "purge returned %d, expected 204 or 404", resp.StatusCode)
+	}
+
+	// Step 3: GET again — should be a cache miss.
+	body3, err := doJSONGet(base + "/cache/static")
+	if err != nil {
+		return fail(name, "post-purge request error: %v", err)
+	}
+	call3, _ := body3["call"].(float64)
+
+	if call3 <= call1 {
+		return fail(name, "still cached after purge (call counter %.0f → %.0f)", call1, call3)
+	}
+
+	return pass(name, "purge worked: call counter %.0f → (cached %.0f) → purge → %.0f", call1, call2, call3)
+}
+
+// testCachePurgeByTag verifies that cache entries with a Surrogate-Key tag
+// can be invalidated using the tag-based purge endpoint.
+func testCachePurgeByTag(base, adminBase string) testResult {
+	const name = "cache-purge-tag"
+
+	// Step 1: Populate cache with a tagged response.
+	body1, err := doJSONGet(base + "/cache/tagged")
+	if err != nil {
+		return fail(name, "populate request error: %v", err)
+	}
+	call1, _ := body1["call"].(float64)
+
+	// Verify it's cached.
+	body2, err := doJSONGet(base + "/cache/tagged")
+	if err != nil {
+		return fail(name, "verify-cache request error: %v", err)
+	}
+	call2, _ := body2["call"].(float64)
+	if call2 != call1 {
+		return fail(name, "entry not cached before purge (call counter %.0f → %.0f)", call1, call2)
+	}
+
+	// Step 2: Purge by tag.
+	purgeBody := `{"tags":["product-123"]}`
+	resp, err := doHTTPRequestFull(adminBase+"/v1/cache/purge/tags", http.MethodPost, map[string]string{
+		"Content-Type": "application/json",
+	}, purgeBody)
+	if err != nil {
+		return fail(name, "purge-tags request error: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fail(name, "purge-tags returned %d, expected 204", resp.StatusCode)
+	}
+
+	// Step 3: GET again — should be a cache miss.
+	body3, err := doJSONGet(base + "/cache/tagged")
+	if err != nil {
+		return fail(name, "post-purge request error: %v", err)
+	}
+	call3, _ := body3["call"].(float64)
+
+	if call3 <= call1 {
+		return fail(name, "still cached after tag purge (call counter %.0f → %.0f)", call1, call3)
+	}
+
+	return pass(name, "tag purge worked: call counter %.0f → (cached %.0f) → purge 'product-123' → %.0f", call1, call2, call3)
+}
+
+// testCacheMaxBodySize verifies that responses larger than max_body_size
+// are proxied but NOT cached. Every GET should hit the backend.
+func testCacheMaxBodySize(base string) testResult {
+	const name = "cache-max-body"
+
+	body1, err := doJSONGet(base + "/cache/large")
+	if err != nil {
+		return fail(name, "first request error: %v", err)
+	}
+	call1, _ := body1["call"].(float64)
+
+	body2, err := doJSONGet(base + "/cache/large")
+	if err != nil {
+		return fail(name, "second request error: %v", err)
+	}
+	call2, _ := body2["call"].(float64)
+
+	if call2 <= call1 {
+		return fail(name, "large body was cached (call counter %.0f → %.0f)", call1, call2)
+	}
+
+	return pass(name, "large body not cached: call counter %.0f → %.0f", call1, call2)
+}
+
+// testExtRLCacheControl verifies that when the external RL service returns
+// a response with Cache-Control: max-age=30, subsequent requests with the
+// same key do NOT hit the external RL service.
+func testExtRLCacheControl(base string) testResult {
+	const name = "extrl-cache"
+
+	mockextrlBase := getMockExtRLBaseURL()
+
+	// Reset hit counter on the mock external RL service.
+	resp, err := doHTTPRequestFull(mockextrlBase+"/hits/reset", http.MethodPost, nil, "")
+	if err != nil {
+		return fail(name, "reset hits error: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	headers := map[string]string{"X-Tenant-Id": "tenant-rl-cached"}
+
+	// First request — external RL is called.
+	resp1, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail(name, "first request error: %v", err)
+	}
+	io.Copy(io.Discard, resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		return fail(name, "first request: expected 200, got %d", resp1.StatusCode)
+	}
+
+	hits1, err := getMockExtRLHits(mockextrlBase)
+	if err != nil {
+		return fail(name, "get hits after first: %v", err)
+	}
+	if hits1 == 0 {
+		return fail(name, "first request did not hit external RL")
+	}
+
+	// Second request — should use cached RL response.
+	resp2, err := doHTTPRequest(base, headers)
+	if err != nil {
+		return fail(name, "second request error: %v", err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+
+	hits2, err := getMockExtRLHits(mockextrlBase)
+	if err != nil {
+		return fail(name, "get hits after second: %v", err)
+	}
+
+	if hits2 > hits1 {
+		return fail(name, "second request hit external RL (hits %d → %d)", hits1, hits2)
+	}
+
+	return pass(name, "RL response cached: hits stayed at %d after second request", hits1)
+}
+
+// testExtRLNoCache verifies that when the external RL service returns no
+// cache headers, every request hits the external RL service.
+func testExtRLNoCache(base string) testResult {
+	const name = "extrl-no-cache"
+
+	mockextrlBase := getMockExtRLBaseURL()
+
+	// Reset hit counter.
+	resp, err := doHTTPRequestFull(mockextrlBase+"/hits/reset", http.MethodPost, nil, "")
+	if err != nil {
+		return fail(name, "reset hits error: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	headers := map[string]string{"X-Tenant-Id": "tenant-rl-nocache"}
+
+	// Send 3 requests — each should hit the external RL service.
+	for i := 1; i <= 3; i++ {
+		r, rerr := doHTTPRequest(base, headers)
+		if rerr != nil {
+			return fail(name, "request %d error: %v", i, rerr)
+		}
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+	}
+
+	hits, err := getMockExtRLHits(mockextrlBase)
+	if err != nil {
+		return fail(name, "get hits: %v", err)
+	}
+
+	if hits < 3 {
+		return fail(name, "expected ≥3 external RL hits, got %d (responses cached)", hits)
+	}
+
+	return pass(name, "no caching: %d external RL hits for 3 requests", hits)
+}
+
+// ---------------------------------------------------------------------------
+// Cache test helpers
+// ---------------------------------------------------------------------------
+
+// doJSONGet performs a GET request and decodes the JSON response body.
+func doJSONGet(url string) (map[string]any, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+	}
+
+	var m map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return nil, fmt.Errorf("decode JSON: %w", err)
+	}
+	return m, nil
+}
+
+// doHTTPRequestFull sends an HTTP request with full control over method,
+// headers, and body. Returns the raw response.
+func doHTTPRequestFull(url, method string, headers map[string]string, body string) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	return client.Do(req)
+}
+
+// getMockExtRLBaseURL returns the in-cluster URL of the mock external RL service.
+// The mock service runs on a ClusterIP service, but we can reach it via
+// kubectl port-forward or through the minikube NodePort if configured.
+// For simplicity, we use the minikube IP + the mockextrl NodePort.
+func getMockExtRLBaseURL() string {
+	minikubeIP := getMinikubeIP()
+	return fmt.Sprintf("http://%s:30190", minikubeIP)
+}
+
+// getMockExtRLHits fetches the current hit counter from the mock external RL service.
+func getMockExtRLHits(mockextrlBase string) (int64, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(mockextrlBase + "/hits")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Hits int64 `json:"hits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	return result.Hits, nil
+}
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -1322,7 +1708,7 @@ func testConfigReload(base string) testResult {
 	}
 
 	// 2. Patch the ConfigMap to lower the limits drastically (average=5, burst=3).
-	patchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  average: 5\n  burst: 3\n  period: \"1s\"\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  key_strategy:\n    type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
+	patchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  static:\n    backend_url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n    average: 5\n    burst: 3\n    period: \"1s\"\n    key_strategy:\n      type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
 
 	_, err := kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace,
 		"--type=merge", "-p", patchJSON)

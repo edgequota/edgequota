@@ -51,7 +51,7 @@ func TestNewExternalClientGRPC(t *testing.T) {
 				Address: "localhost:0",
 			},
 		}
-		ec, err := NewExternalClient(cfg, nil)
+		ec, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		assert.NotNil(t, ec)
 		assert.NotNil(t, ec.grpcClient)
@@ -70,7 +70,7 @@ func TestNewExternalClientGRPC(t *testing.T) {
 				},
 			},
 		}
-		_, err := NewExternalClient(cfg, nil)
+		_, err := NewExternalClient(cfg, nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "external ratelimit grpc tls")
 	})
@@ -96,12 +96,11 @@ func TestGetLimitsGRPC(t *testing.T) {
 				Address: lis.Addr().String(),
 			},
 		}
-		ec, err := NewExternalClient(cfg, nil)
+		ec, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		defer ec.Close()
 
 		limits, err := ec.GetLimits(context.Background(), &ExternalRequest{
-			Key:    "test-key",
 			Method: "GET",
 			Path:   "/api",
 		})
@@ -128,16 +127,15 @@ func TestGetLimitsGRPC(t *testing.T) {
 		defer srv.Stop()
 
 		cfg := config.ExternalRLConfig{
-			Enabled:  true,
-			Timeout:  "5s",
-			CacheTTL: "10s",
-			GRPC:     config.ExternalGRPCConfig{Address: lis.Addr().String()},
+			Enabled: true,
+			Timeout: "5s",
+			GRPC:    config.ExternalGRPCConfig{Address: lis.Addr().String()},
 		}
-		ec, err := NewExternalClient(cfg, redisClient)
+		ec, err := NewExternalClient(cfg, redisClient, nil)
 		require.NoError(t, err)
 		defer ec.Close()
 
-		req := &ExternalRequest{Key: "cache-key", Method: "GET", Path: "/"}
+		req := &ExternalRequest{Method: "GET", Path: "/"}
 
 		// First call should hit the server.
 		_, err = ec.GetLimits(context.Background(), req)
@@ -145,7 +143,7 @@ func TestGetLimitsGRPC(t *testing.T) {
 		assert.Equal(t, 1, rlSvc.callCount)
 
 		// Verify Redis TTL comes from body field (300s), not default (10s).
-		ttl := mr.TTL(cacheKeyPrefix + "cache-key")
+		ttl := mr.TTL(cacheKeyPrefix + "GET|/")
 		assert.True(t, ttl.Seconds() > 200, "expected TTL ~300s from body field, got %v", ttl)
 
 		// Second call should use Redis cache.
@@ -170,16 +168,15 @@ func TestGetLimitsGRPC(t *testing.T) {
 		defer srv.Stop()
 
 		cfg := config.ExternalRLConfig{
-			Enabled:  true,
-			Timeout:  "5s",
-			CacheTTL: "60s",
-			GRPC:     config.ExternalGRPCConfig{Address: lis.Addr().String()},
+			Enabled: true,
+			Timeout: "5s",
+			GRPC:    config.ExternalGRPCConfig{Address: lis.Addr().String()},
 		}
-		ec, err := NewExternalClient(cfg, redisClient)
+		ec, err := NewExternalClient(cfg, redisClient, nil)
 		require.NoError(t, err)
 		defer ec.Close()
 
-		req := &ExternalRequest{Key: "no-store-key", Method: "GET", Path: "/"}
+		req := &ExternalRequest{Method: "GET", Path: "/"}
 
 		_, err = ec.GetLimits(context.Background(), req)
 		require.NoError(t, err)
@@ -194,11 +191,11 @@ func TestGetLimitsGRPC(t *testing.T) {
 			Timeout: "100ms",
 			GRPC:    config.ExternalGRPCConfig{Address: "127.0.0.1:1"},
 		}
-		ec, err := NewExternalClient(cfg, nil)
+		ec, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		defer ec.Close()
 
-		_, err = ec.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
+		_, err = ec.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/k"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "grpc get limits")
 	})
@@ -218,7 +215,7 @@ func TestExternalClientCloseGRPC(t *testing.T) {
 			Timeout: "5s",
 			GRPC:    config.ExternalGRPCConfig{Address: lis.Addr().String()},
 		}
-		ec, err := NewExternalClient(cfg, nil)
+		ec, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		assert.NoError(t, ec.Close())
 	})
@@ -233,7 +230,7 @@ func TestGetLimitsNoServiceConfigured(t *testing.T) {
 			cbResetTimeout: defaultCBResetTimeout,
 			done:           make(chan struct{}),
 		}
-		_, err := ec.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
+		_, err := ec.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/k"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "no external rate limit service configured")
 	})

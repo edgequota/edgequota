@@ -35,11 +35,10 @@ func int64Ptr(v int64) *int64 { return &v }
 func TestNewExternalClient(t *testing.T) {
 	t.Run("creates client with HTTP URL", func(t *testing.T) {
 		cfg := config.ExternalRLConfig{
-			Timeout:  "5s",
-			CacheTTL: "30s",
-			HTTP:     config.ExternalHTTPConfig{URL: "http://rl-service:8080/limits"},
+			Timeout: "5s",
+			HTTP:    config.ExternalHTTPConfig{URL: "http://rl-service:8080/limits"},
 		}
-		c, err := NewExternalClient(cfg, nil)
+		c, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		assert.NotNil(t, c)
 		assert.Equal(t, "http://rl-service:8080/limits", c.httpURL)
@@ -48,14 +47,12 @@ func TestNewExternalClient(t *testing.T) {
 
 	t.Run("defaults timeout for invalid value", func(t *testing.T) {
 		cfg := config.ExternalRLConfig{
-			Timeout:  "invalid",
-			CacheTTL: "invalid",
-			HTTP:     config.ExternalHTTPConfig{URL: "http://rl:8080"},
+			Timeout: "invalid",
+			HTTP:    config.ExternalHTTPConfig{URL: "http://rl:8080"},
 		}
-		c, err := NewExternalClient(cfg, nil)
+		c, err := NewExternalClient(cfg, nil, nil)
 		require.NoError(t, err)
 		assert.Equal(t, "5s", c.timeout.String())
-		assert.Equal(t, "1m0s", c.cacheTTL.String())
 		require.NoError(t, c.Close())
 	})
 }
@@ -66,13 +63,14 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			var req ExternalRequest
 			err := json.NewDecoder(r.Body).Decode(&req)
 			require.NoError(t, err)
-			assert.Equal(t, "tenant-1", req.Key)
 			assert.Equal(t, "GET", req.Method)
+			assert.Equal(t, "/api/v1", req.Path)
 
 			json.NewEncoder(w).Encode(ExternalLimits{
-				Average: 100,
-				Burst:   50,
-				Period:  "1s",
+				Average:    100,
+				Burst:      50,
+				Period:     "1s",
+				BackendURL: "http://backend:8080",
 			})
 		}))
 		defer srv.Close()
@@ -81,7 +79,6 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       0,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
@@ -90,7 +87,6 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 		}
 
 		limits, err := c.GetLimits(context.Background(), &ExternalRequest{
-			Key:    "tenant-1",
 			Method: "GET",
 			Path:   "/api/v1",
 		})
@@ -117,7 +113,7 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/test"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "status 500")
 	})
@@ -134,7 +130,7 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/test"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "http request")
 	})
@@ -148,7 +144,7 @@ func TestExternalClientGetLimitsHTTP(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "test"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/test"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "no external rate limit service")
 	})
@@ -173,7 +169,6 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -182,12 +177,12 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		limits1, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cached-key"})
+		limits1, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/cached-key"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(200), limits1.Average)
 		assert.Equal(t, 1, callCount)
 
-		limits2, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cached-key"})
+		limits2, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/cached-key"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(200), limits2.Average)
 		assert.Equal(t, 1, callCount)
@@ -200,9 +195,10 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			callCount++
 			w.Header().Set("Cache-Control", "max-age=60")
 			json.NewEncoder(w).Encode(ExternalLimits{
-				Average: int64(100 * callCount),
-				Burst:   50,
-				Period:  "1s",
+				Average:    int64(100 * callCount),
+				Burst:      50,
+				Period:     "1s",
+				BackendURL: "http://backend:8080",
 			})
 		}))
 		defer srv.Close()
@@ -211,7 +207,6 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -220,8 +215,8 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		limits1, _ := c.GetLimits(context.Background(), &ExternalRequest{Key: "key-a"})
-		limits2, _ := c.GetLimits(context.Background(), &ExternalRequest{Key: "key-b"})
+		limits1, _ := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/key-a"})
+		limits2, _ := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/key-b"})
 
 		assert.Equal(t, int64(100), limits1.Average)
 		assert.Equal(t, int64(200), limits2.Average)
@@ -240,7 +235,6 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
 			cbThreshold:    defaultCBThreshold,
@@ -248,15 +242,14 @@ func TestExternalClientRedisCaching(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
-		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "k"})
+		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/k"})
+		_, _ = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/k"})
 		assert.Equal(t, 2, callCount)
 	})
 }
 
 func TestResolveHTTPCacheTTL(t *testing.T) {
 	ec := &ExternalClient{
-		cacheTTL:    60e9,
 		maxBreakers: defaultMaxCircuitBreakers,
 		done:        make(chan struct{}),
 	}
@@ -313,15 +306,14 @@ func TestResolveHTTPCacheTTL(t *testing.T) {
 		assert.Equal(t, int64(0), int64(ec.resolveHTTPCacheTTL(h, limits)))
 	})
 
-	t.Run("no headers and no body fields returns default TTL", func(t *testing.T) {
+	t.Run("no headers and no body fields returns zero TTL", func(t *testing.T) {
 		h := http.Header{}
-		assert.Equal(t, 60*1e9, float64(ec.resolveHTTPCacheTTL(h, &ExternalLimits{})))
+		assert.Equal(t, int64(0), int64(ec.resolveHTTPCacheTTL(h, &ExternalLimits{})))
 	})
 }
 
 func TestResolveBodyCacheTTL(t *testing.T) {
 	ec := &ExternalClient{
-		cacheTTL:    60e9,
 		maxBreakers: defaultMaxCircuitBreakers,
 		done:        make(chan struct{}),
 	}
@@ -336,14 +328,14 @@ func TestResolveBodyCacheTTL(t *testing.T) {
 		assert.Equal(t, 120*1e9, float64(ec.resolveBodyCacheTTL(limits)))
 	})
 
-	t.Run("nil cache_max_age_seconds returns default TTL", func(t *testing.T) {
+	t.Run("nil cache_max_age_seconds returns zero TTL", func(t *testing.T) {
 		limits := &ExternalLimits{}
-		assert.Equal(t, 60*1e9, float64(ec.resolveBodyCacheTTL(limits)))
+		assert.Equal(t, int64(0), int64(ec.resolveBodyCacheTTL(limits)))
 	})
 
 	t.Run("zero cache_max_age_seconds treated as not set", func(t *testing.T) {
 		limits := &ExternalLimits{CacheMaxAgeSec: int64Ptr(0)}
-		assert.Equal(t, 60*1e9, float64(ec.resolveBodyCacheTTL(limits)))
+		assert.Equal(t, int64(0), int64(ec.resolveBodyCacheTTL(limits)))
 	})
 }
 
@@ -358,6 +350,7 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 				Average:        100,
 				Burst:          50,
 				Period:         "1s",
+				BackendURL:     "http://backend:8080",
 				CacheMaxAgeSec: int64Ptr(600),
 			})
 		}))
@@ -367,7 +360,6 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       10e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -376,12 +368,12 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "body-ttl"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/body-ttl"})
 		require.NoError(t, err)
 		assert.Equal(t, 1, callCount)
 
 		// Verify the Redis key TTL is ~600s (from body), not 10s (default).
-		ttl := mr.TTL(cacheKeyPrefix + "body-ttl")
+		ttl := mr.TTL(cacheKeyPrefix + "GET|/body-ttl")
 		assert.True(t, ttl.Seconds() > 500, "expected TTL > 500s from body field, got %v", ttl)
 	})
 
@@ -403,7 +395,6 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -412,9 +403,9 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "no-store"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/no-store"})
 		require.NoError(t, err)
-		_, err = c.GetLimits(context.Background(), &ExternalRequest{Key: "no-store"})
+		_, err = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/no-store"})
 		require.NoError(t, err)
 		assert.Equal(t, 2, callCount) // Both calls hit the server — not cached.
 	})
@@ -427,6 +418,7 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 				Average:        100,
 				Burst:          50,
 				Period:         "1s",
+				BackendURL:     "http://backend:8080",
 				CacheMaxAgeSec: int64Ptr(3600), // body says 1h
 			})
 		}))
@@ -436,7 +428,6 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -445,11 +436,11 @@ func TestHTTPBodyCacheFieldsEndToEnd(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "header-wins"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/header-wins"})
 		require.NoError(t, err)
 
 		// Header said 30s, body said 3600s — header should win.
-		ttl := mr.TTL(cacheKeyPrefix + "header-wins")
+		ttl := mr.TTL(cacheKeyPrefix + "GET|/header-wins")
 		assert.True(t, ttl.Seconds() <= 30, "expected TTL ~30s from header, got %v", ttl)
 	})
 }
@@ -548,6 +539,24 @@ func TestSetMetricHooks(t *testing.T) {
 	assert.True(t, sfCalled)
 }
 
+func TestSetCacheMetricHooks(t *testing.T) {
+	c := &ExternalClient{done: make(chan struct{})}
+
+	var hitCalled, missCalled, staleCalled bool
+	c.SetCacheMetricHooks(
+		func() { hitCalled = true },
+		func() { missCalled = true },
+		func() { staleCalled = true },
+	)
+
+	c.onCacheHit()
+	c.onCacheMiss()
+	c.onCacheStaleHit()
+	assert.True(t, hitCalled)
+	assert.True(t, missCalled)
+	assert.True(t, staleCalled)
+}
+
 func TestTenantCBIsStale(t *testing.T) {
 	cb := newTenantCB(5, 30*time.Second)
 	now := time.Now()
@@ -638,4 +647,158 @@ func TestExternalClientBuildFilteredHeaders(t *testing.T) {
 	assert.Equal(t, "application/json", got["Content-Type"])
 	assert.Equal(t, "456", got["X-Request-Id"])
 	assert.NotContains(t, got, "Authorization")
+}
+
+// --- lookupKey tests ---
+
+func newLookupKeyClient(t *testing.T) *ExternalClient {
+	t.Helper()
+	cfg := config.ExternalRLConfig{
+		Timeout: "5s",
+		HTTP:    config.ExternalHTTPConfig{URL: "http://rl:8080"},
+	}
+	c, err := NewExternalClient(cfg, nil, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+func TestLookupKey_EphemeralHeadersExcludedByDefault(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	base := &ExternalRequest{
+		Method:  "GET",
+		Path:    "/api/v1/data",
+		Headers: map[string]string{"Host": "api.example.com", "X-Tenant-Id": "acme"},
+	}
+	baseKey := c.LookupKey(base)
+
+	ephemeralHeaders := []string{
+		"X-Request-Id", "X-Correlation-Id", "Request-Id",
+		"Traceparent", "Tracestate",
+		"X-B3-Traceid", "X-B3-Spanid", "X-B3-Parentspanid", "X-B3-Sampled",
+		"Uber-Trace-Id", "X-Amzn-Trace-Id", "X-Cloud-Trace-Context",
+		"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host",
+		"X-Real-Ip", "Forwarded", "Via",
+		"X-Envoy-Attempt-Count", "X-Envoy-External-Address",
+		"Cf-Ray", "Cdn-Loop", "X-Request-Start",
+		"True-Client-Ip", "B3",
+	}
+
+	for _, eh := range ephemeralHeaders {
+		t.Run(eh, func(t *testing.T) {
+			withEphemeral := &ExternalRequest{
+				Method: "GET",
+				Path:   "/api/v1/data",
+				Headers: map[string]string{
+					"Host":        "api.example.com",
+					"X-Tenant-Id": "acme",
+					eh:            "unique-value-per-request-" + eh,
+				},
+			}
+			assert.Equal(t, baseKey, c.LookupKey(withEphemeral),
+				"ephemeral header %q should not affect lookup key", eh)
+		})
+	}
+}
+
+func TestLookupKey_StableHeadersIncluded(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	req1 := &ExternalRequest{
+		Method:  "GET",
+		Path:    "/api",
+		Headers: map[string]string{"X-Tenant-Id": "acme"},
+	}
+	req2 := &ExternalRequest{
+		Method:  "GET",
+		Path:    "/api",
+		Headers: map[string]string{"X-Tenant-Id": "globex"},
+	}
+	assert.NotEqual(t, c.LookupKey(req1), c.LookupKey(req2),
+		"different stable headers must produce different keys")
+}
+
+func TestLookupKey_MethodAndPathAffectKey(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	headers := map[string]string{"Host": "api.example.com"}
+
+	get := c.LookupKey(&ExternalRequest{Method: "GET", Path: "/api", Headers: headers})
+	post := c.LookupKey(&ExternalRequest{Method: "POST", Path: "/api", Headers: headers})
+	assert.NotEqual(t, get, post, "different methods must produce different keys")
+
+	pathA := c.LookupKey(&ExternalRequest{Method: "GET", Path: "/api/a", Headers: headers})
+	pathB := c.LookupKey(&ExternalRequest{Method: "GET", Path: "/api/b", Headers: headers})
+	assert.NotEqual(t, pathA, pathB, "different paths must produce different keys")
+}
+
+func TestLookupKey_Deterministic(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	req := &ExternalRequest{
+		Method: "POST",
+		Path:   "/submit",
+		Headers: map[string]string{
+			"Host":        "api.example.com",
+			"X-Tenant-Id": "acme",
+			"X-Plan":      "enterprise",
+		},
+	}
+	k1 := c.LookupKey(req)
+	k2 := c.LookupKey(req)
+	assert.Equal(t, k1, k2, "same input must always produce same key")
+}
+
+func TestLookupKey_EmptyHeaders(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	req := &ExternalRequest{
+		Method:  "GET",
+		Path:    "/health",
+		Headers: map[string]string{},
+	}
+	key := c.LookupKey(req)
+	assert.Equal(t, "GET|/health", key)
+}
+
+func TestLookupKey_OnlyEphemeralHeaders(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	req := &ExternalRequest{
+		Method: "GET",
+		Path:   "/api",
+		Headers: map[string]string{
+			"X-Request-Id":  "req-1",
+			"Traceparent":   "00-trace1-span1-01",
+			"X-B3-Traceid":  "abc",
+			"Uber-Trace-Id": "def",
+		},
+	}
+	assert.Equal(t, "GET|/api", c.LookupKey(req),
+		"request with only ephemeral headers should have key based on method+path only")
+}
+
+func TestLookupKey_CaseInsensitiveEphemeralMatch(t *testing.T) {
+	c := newLookupKeyClient(t)
+
+	base := &ExternalRequest{
+		Method:  "GET",
+		Path:    "/api",
+		Headers: map[string]string{"X-Tenant-Id": "acme"},
+	}
+
+	withMixedCase := &ExternalRequest{
+		Method: "GET",
+		Path:   "/api",
+		Headers: map[string]string{
+			"X-Tenant-Id":  "acme",
+			"x-request-id": "lower-case",
+			"TRACEPARENT":  "upper-case",
+			"X-B3-TraceId": "mixed-case",
+		},
+	}
+
+	assert.Equal(t, c.LookupKey(base), c.LookupKey(withMixedCase),
+		"ephemeral header matching must be case-insensitive")
 }

@@ -166,6 +166,7 @@ rl:edgequota:<extracted_key>
 | `clientIP` | From `10.0.0.1` | `rl:edgequota:10.0.0.1` |
 | `header` | `X-Tenant-Id: acme-corp` | `rl:edgequota:acme-corp` |
 | `composite` | `X-Tenant-Id: acme-corp`, path `/api/v1/users` | `rl:edgequota:acme-corp:api` |
+| `global` | (any) | `rl:edgequota:global` |
 
 ### Key Extraction
 
@@ -174,6 +175,29 @@ rl:edgequota:<extracted_key>
 | `clientIP` | `X-Forwarded-For` (first IP) → `X-Real-IP` → `RemoteAddr` |
 | `header` | Value of the configured header. Returns error if empty/missing. |
 | `composite` | Configured header + optional first path segment (e.g., `tenant:api`). |
+| `global` | Single shared bucket for all requests. All traffic is rate limited together. Suitable for single-tenant or low-cardinality scenarios (e.g., static assets, frontend bundles). |
+
+### Frontend and Static Assets
+
+For frontend bundles, static assets (JS, CSS, images), or single-page applications where all requests share the same effective quota, use the **`global`** key strategy:
+
+```yaml
+rate_limit:
+  static:
+    average: 500
+    burst: 200
+    period: "1s"
+    key_strategy:
+      type: "global"
+```
+
+All traffic shares one bucket. This is appropriate when:
+
+- A CDN or cache sits in front and you want to limit origin hits.
+- You serve a single tenant and need an overall RPS cap.
+- Static asset requests lack tenant identifiers (no `X-Tenant-Id` header).
+
+For path-scoped limits (e.g., different limits for `/api/` vs `/static/`), use the external rate limit service and return `tenant_key` values derived from the path or `Host` header.
 
 ### Redis Cluster Considerations
 
@@ -280,7 +304,7 @@ The recovery loop runs for `passThrough` and `inMemoryFallback` policies. For `f
 
 When `rate_limit.external.enabled` is `true`, EdgeQuota queries an external service for dynamic per-request rate limits. This enables multi-tenant scenarios where different tenants have different quotas defined in a backend database.
 
-The static `rate_limit.average`, `burst`, and `period` from the config file serve as **fallback values** whenever the external service is unreachable.
+When external RL is enabled, the `rate_limit.static` block is **not used** -- EdgeQuota skips local key extraction entirely. The `rate_limit.external.fallback` block (required) defines the safety-net limits applied when the external service is unreachable.
 
 ### Configuration
 
@@ -290,21 +314,30 @@ Exactly one of `external.http` or `external.grpc` must be configured when the fe
 
 ```yaml
 rate_limit:
-  average: 100               # fallback
-  burst: 50
-  period: "1s"
   external:
     enabled: true
     timeout: "5s"
-    cache_ttl: "60s"                 # default TTL when response has no cache hints
-    max_concurrent_requests: 50      # semaphore cap on concurrent external calls
+    max_concurrent_requests: 50
     http:
       url: "http://limits-service:8080/limits"
     header_filter:
-      allow_list:                    # only forward these headers
+      allow_list:
         - "X-Tenant-Id"
         - "X-Plan"
+        - "X-Request-Id"           # forwarded for tracing
+    fallback:
+      backend_url: "http://my-backend:8080"
+      average: 100
+      burst: 50
+      period: "1s"
+      key_strategy:
+        type: "header"
+        header_name: "X-Tenant-Id"
 ```
+
+When external RL is enabled, the `static` block is ignored -- EdgeQuota skips local key extraction and the external service owns quota resolution. The `fallback` block is **required** and defines the safety-net limits used when the external service is unavailable or when its response lacks `backend_url`.
+
+Caching of external service responses is driven by `Cache-Control` headers or body fields (`cache_max_age_seconds`, `cache_no_store`) returned by the service. See [Response Caching](caching.md).
 
 **gRPC example:**
 
@@ -313,25 +346,38 @@ rate_limit:
   external:
     enabled: true
     timeout: "5s"
-    cache_ttl: "60s"
     max_concurrent_requests: 50
     grpc:
       address: "limits-service:50052"
       tls:
         enabled: true
         ca_file: "/etc/edgequota/tls/limits-ca.pem"
+    fallback:
+      backend_url: "http://my-backend:8080"
+      average: 100
+      burst: 50
+      period: "1s"
+      key_strategy:
+        type: "header"
+        header_name: "X-Tenant-Id"
 ```
 
 | Config Field | Type | Default | Description |
 |---|---|---|---|
 | `external.enabled` | bool | `false` | Enable external rate limit resolution |
 | `external.timeout` | duration | `"5s"` | Max wait for external service response |
-| `external.cache_ttl` | duration | `"60s"` | Default cache TTL when response has no cache hints |
 | `external.max_concurrent_requests` | int | `50` | Semaphore cap on concurrent external calls |
 | `external.http.url` | string | — | HTTP endpoint URL |
 | `external.grpc.address` | string | — | gRPC endpoint address |
 | `external.grpc.tls.enabled` | bool | `false` | Enable TLS for gRPC |
 | `external.grpc.tls.ca_file` | string | — | CA certificate for gRPC TLS verification |
+| `external.fallback.backend_url` | string | **(required)** | Backend URL for fallback path. Required when external RL is enabled. |
+| `external.fallback.average` | int64 | **(required)** | Fallback requests per period. Must be > 0. |
+| `external.fallback.burst` | int64 | `1` | Fallback burst capacity |
+| `external.fallback.period` | duration | `"1s"` | Fallback time window |
+| `external.fallback.key_strategy` | object | **(required)** | Key extraction strategy during fallback |
+| `external.cache_key_headers.include` | list | — | **Deprecated.** Ephemeral headers are now stripped automatically. See [Response Caching](caching.md). |
+| `external.cache_key_headers.exclude` | list | — | **Deprecated.** Ephemeral headers are now stripped automatically. See [Response Caching](caching.md). |
 
 ### Protocols
 
@@ -344,18 +390,19 @@ Both protocols use the same request/response schema. The gRPC service uses a JSO
 
 See `api/proto/ratelimit/v1/ratelimit.proto` for the formal gRPC service definition.
 
-### Request
+### Request Format
 
-The external service receives the extracted key along with the original request metadata:
+EdgeQuota sends the request metadata (headers, method, path) to the external service. There is **no `key` field** — the external service derives the tenant/bucket key from the request context (headers, `Host`, path, etc.) and returns it via the `tenant_key` response field.
 
 ```json
 {
-  "key": "tenant-42",
-  "headers": {"X-Tenant-Id": "tenant-42", "X-Plan": "enterprise"},
+  "headers": {"X-Tenant-Id": "tenant-42", "X-Plan": "enterprise", "Host": "api.example.com"},
   "method": "GET",
   "path": "/api/v1/data"
 }
 ```
+
+This keeps key derivation in the external service, which has access to the full request context and can map multiple input dimensions (headers, path, Host) to quota buckets.
 
 Which headers are forwarded is controlled by `external.header_filter`:
 
@@ -387,22 +434,20 @@ The service returns rate limit parameters and optional per-tenant overrides:
 | `average` | int64 | yes | Requests per period (0 = unlimited). Overrides static config. |
 | `burst` | int64 | yes | Maximum burst capacity. Overrides static config. |
 | `period` | string | yes | Duration string (e.g. `"1s"`, `"1m"`). Overrides static config. |
-| `tenant_key` | string | no | Custom Redis bucket key. Replaces the extracted key and is prefixed with `t:` (e.g. `rl:edgequota:t:acme-corp`). Useful when the external service maps multiple input keys to a shared quota. |
+| `tenant_key` | string | no | Custom Redis bucket key. Prefixed with `t:` (e.g. `rl:edgequota:t:acme-corp`). The external service should return this to assign a per-tenant bucket. |
 | `failure_policy` | string | no | Per-tenant Redis-down behavior: `passthrough`, `failclosed`, `inmemoryfallback`. Overrides the global `rate_limit.failure_policy`. |
 | `failure_code` | int | no | HTTP status for `failclosed` rejections. Overrides the global `rate_limit.failure_code`. |
-| `backend_url` | string | no | Per-request backend URL override. EdgeQuota will proxy this request to the specified backend instead of the global `backend.url`. Enables routing different tenants to dedicated clusters. |
+| `backend_url` | string | **yes** | Per-request backend URL. **Required** when external RL is enabled. EdgeQuota proxies to this URL. Responses without `backend_url` trigger the fallback path. Enables routing different tenants to dedicated clusters. |
 | `cache_max_age_seconds` | int64 | no | Cache this response for N seconds. Omit or set to 0 to use `external.cache_ttl`. |
 | `cache_no_store` | bool | no | If `true`, do not cache this response. |
 
 ### Caching
 
-Responses are cached in **Redis**, making the cache shared across all EdgeQuota instances. This provides:
+External service responses and backend responses are cached using EdgeQuota's CDN-style response cache. Cache behavior is driven entirely by the response — via `Cache-Control` headers (HTTP) or body fields like `cache_max_age_seconds` and `cache_no_store` (gRPC). If the external service returns no cache directives, every request hits the service.
 
-- **Distributed consistency** — all instances see the same cached limits, eliminating per-instance divergence.
-- **No background cleanup** — Redis manages key expiration automatically via TTL.
-- **Horizontal scalability** — adding instances does not multiply external service calls.
+Ephemeral headers (tracing IDs, `X-Request-Id`, `X-Forwarded-*`, etc.) are automatically stripped from cache keys. No configuration is needed.
 
-Cache keys follow the pattern `rl:extcache:<rate_limit_key>` (e.g. `rl:extcache:tenant-1`). A parallel **stale cache** is maintained at `rl:extcache:stale:<key>` with a 5-minute TTL, used as a fallback when the circuit breaker is open.
+See [Response Caching](caching.md) for full details on cache key construction, `Cache-Control` semantics, conditional requests, invalidation, and Redis configuration.
 
 #### Concurrency Control
 
@@ -410,64 +455,21 @@ Two mechanisms prevent overloading the external service:
 
 | Mechanism | Scope | Behavior |
 |-----------|-------|----------|
-| **Singleflight** | Per key | Concurrent cache misses for the same key share a single external call. All waiters receive the same result. |
-| **Semaphore** | Global | Caps total concurrent external calls at `max_concurrent_requests` (default: 50). Excess requests block until a slot is available or the timeout expires. |
-
-#### Dedicated Cache Redis (Optional)
-
-By default, cached responses are stored in the same Redis used for rate-limit counters. If you need to separate these workloads — for example, a **replication** topology for the read-heavy cache and a **cluster** topology for the write-heavy counters — configure `cache_redis`:
-
-```yaml
-redis:
-  endpoints: ["rl-0:6379", "rl-1:6379", "rl-2:6379"]
-  mode: "cluster"
-cache_redis:
-  endpoints: ["cache-primary:6379", "cache-replica:6379"]
-  mode: "replication"
-  pool_size: 20
-```
-
-When `cache_redis` is omitted, the main `redis` connection is reused automatically.
-
-#### TTL Resolution (HTTP)
-
-For HTTP responses, the cache TTL is resolved in this priority order:
-
-1. **`Cache-Control: max-age=N` header** — TTL is `N` seconds.
-2. **`Cache-Control: no-cache` or `no-store` header** — response is **not cached** (TTL = 0).
-3. **`Expires` header** — TTL is the duration until the specified timestamp.
-4. **Body `cache_no_store: true`** — response is **not cached** (TTL = 0).
-5. **Body `cache_max_age_seconds: N`** (when present and > 0) — TTL is `N` seconds.
-6. **None of the above** — the configured default TTL is used (`rate_limit.external.cache_ttl`, default: 60s).
-
-HTTP cache headers always take precedence over body fields. The body fields serve as a fallback, ensuring consistent behaviour with gRPC.
-
-#### TTL Resolution (gRPC)
-
-gRPC responses do not carry HTTP cache headers. TTL is resolved from the response body:
-
-1. **`cache_no_store: true`** — response is **not cached** (TTL = 0).
-2. **`cache_max_age_seconds: N`** (when present and > 0) — TTL is `N` seconds.
-3. **Neither field set** — the configured default TTL is used (`rate_limit.external.cache_ttl`, default: 60s).
-
-This gives the external service full control over per-response cache lifetimes regardless of the transport protocol.
-
-#### No Redis Available
-
-If the Redis client is not available when the external rate limit feature is initialized (e.g. Redis is down at startup with a passthrough failure policy), caching is disabled and every request triggers an external service call.
+| **Singleflight** | Per lookup key | Concurrent cache misses for the same lookup key share a single external call. All waiters receive the same result. |
+| **Semaphore** | Global | Caps total concurrent external calls at `max_concurrent_requests` (default: 50). Excess requests fall back to stale cache when available. |
 
 ### Failure Handling and Circuit Breaker
 
 When the external service is unreachable, times out, or the circuit breaker is open, EdgeQuota falls back through this chain:
 
 1. **Stale cache** — if a previous response for this key exists in `rl:extcache:stale:<key>`, use it.
-2. **Static config** — use `rate_limit.average`, `burst`, and `period` from the config file.
+2. **Fallback config** — use `rate_limit.external.fallback` (`average`, `burst`, `period`, and `key_strategy`). This block is **required** when external RL is enabled.
 
-There is no separate "failure policy" for the external service — it only affects which limits are applied. Rate limiting itself continues using whichever limits are resolved.
+There is no separate "failure policy" for the external service — it only affects which limits are applied. Rate limiting itself continues using the fallback limits.
 
 #### Per-Key Circuit Breaker
 
-The circuit breaker is **per-tenant** (one breaker per extracted key), preventing a single tenant's slow external lookups from affecting others:
+The circuit breaker is **per-request-signature** (one breaker per unique combination of headers, method, and path), preventing a single tenant's slow external lookups from affecting others:
 
 | Parameter | Value |
 |-----------|-------|
@@ -487,6 +489,7 @@ The circuit breaker is **per-tenant** (one breaker per extracted key), preventin
 ## See Also
 
 - [Configuration Reference](configuration.md) -- Full `rate_limit` config section.
+- [Response Caching](caching.md) -- CDN-style response caching semantics, cache keys, and invalidation.
 - [API Reference](api-reference.md) -- Proto and OpenAPI definitions for the external rate limit service.
 - [Go SDK](go-sdk.md) -- Server-side helpers for building rate limit services.
 - [Architecture](architecture.md) -- Data flow and failure modes.

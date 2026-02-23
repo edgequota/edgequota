@@ -172,25 +172,35 @@ backend:
 
 # ─── Rate Limiting ────────────────────────────────────────────────────
 rate_limit:
-  average: 100          # Requests per period (0 = disabled).
-  burst: 50             # Maximum burst capacity.
-  period: "1s"
   failure_policy: "passThrough"  # passThrough | failClosed | inMemoryFallback
   # failure_code: 429   # HTTP status for failClosed rejections (must be 4xx/5xx).
   # min_ttl: ""         # Optional floor for Redis key TTL (e.g. "10s"). Reduces EXPIRE churn.
-  key_strategy:
-    type: "clientIP"    # clientIP | header | composite
-    # header_name: "X-Tenant-Id"
-    # path_prefix: false
-    # trusted_proxies:   # CIDRs whose X-Forwarded-For / X-Real-IP are trusted.
-    #   - "10.0.0.0/8"  # When empty (default), only RemoteAddr is used.
-    # trusted_ip_depth: 0  # Which XFF entry to use: 0=leftmost, N=Nth from right.
+  static:
+    backend_url: "http://my-backend:8080"  # Required when external RL is disabled.
+    average: 100          # Requests per period (0 = disabled).
+    burst: 50             # Maximum burst capacity.
+    period: "1s"
+    key_strategy:
+      type: "clientIP"    # clientIP | header | composite | global
+      # type: "global"    # All requests share one bucket (single tenant / low cardinality).
+      # header_name: "X-Tenant-Id"
+      # path_prefix: false
+      # trusted_proxies:   # CIDRs whose X-Forwarded-For / X-Real-IP are trusted.
+      #   - "10.0.0.0/8"  # When empty (default), only RemoteAddr is used.
+      # trusted_ip_depth: 0  # Which XFF entry to use: 0=leftmost, N=Nth from right.
 
   # ─── External Rate Limit Service (optional) ───────────────────────
   # Queries an external service for per-request rate limits. Enables
   # multi-tenant scenarios where different tenants have different quotas
-  # stored in a backend database. Static config values (average/burst/period)
-  # are used as fallback when the external service is unreachable.
+  # stored in a backend database.
+  #
+  # When enabled, EdgeQuota skips local key extraction. The request sent
+  # to the external service contains only headers, method, and path (no
+  # key field). The external service derives keys from these.
+  #
+  # The static block above is IGNORED when external RL is enabled.
+  # The fallback block below is REQUIRED and defines safety-net limits
+  # used when the external service is unreachable.
   #
   # Exactly one of external.http or external.grpc must be configured.
 
@@ -198,7 +208,6 @@ rate_limit:
   # external:
   #   enabled: true
   #   timeout: "5s"
-  #   cache_ttl: "60s"                # Default cache TTL when response has no cache hints
   #   max_concurrent_requests: 50     # Semaphore cap on concurrent external calls
   #   http:
   #     url: "http://limits-service:8080/limits"
@@ -206,20 +215,42 @@ rate_limit:
   #     allow_list:                   # Only forward these headers to the limits service
   #       - "X-Tenant-Id"
   #       - "X-Plan"
+  #       - "X-Request-Id"           # Forwarded for tracing
+  #
+  #   # Caching of external service responses is driven by Cache-Control headers
+  #   # or body fields (cache_max_age_seconds, cache_no_store) returned by the
+  #   # service. Ephemeral headers (tracing IDs, X-Request-Id, etc.) are
+  #   # automatically excluded from cache keys. See docs/caching.md.
+  #
+  #   fallback:                       # REQUIRED when external is enabled
+  #     backend_url: "http://my-backend:8080"  # Required; used when ext RL response lacks backend_url
+  #     average: 100
+  #     burst: 50
+  #     period: "1s"
+  #     key_strategy:
+  #       type: "header"
+  #       header_name: "X-Tenant-Id"
 
   # Example B — gRPC external limits service
   #             (uses edgequota.ratelimit.v1.RateLimitService/GetLimits):
   # external:
   #   enabled: true
   #   timeout: "5s"
-  #   cache_ttl: "60s"
   #   max_concurrent_requests: 50
   #   grpc:
   #     address: "limits-service:50052"
-#     tls:
-#       enabled: true
-#       ca_file: "/etc/edgequota/tls/limits-ca.pem"
-#       server_name: ""  # Override TLS server name verification. Empty = use hostname from address.
+  #     tls:
+  #       enabled: true
+  #       ca_file: "/etc/edgequota/tls/limits-ca.pem"
+  #       server_name: ""  # Override TLS server name verification. Empty = use hostname from address.
+  #   fallback:                       # REQUIRED when external is enabled
+  #     backend_url: "http://my-backend:8080"  # Required; used when ext RL response lacks backend_url
+  #     average: 100
+  #     burst: 50
+  #     period: "1s"
+  #     key_strategy:
+  #       type: "global"
+  #       global_key: "fe-fallback"
 
 # ─── Redis ────────────────────────────────────────────────────────────
 redis:
@@ -239,6 +270,24 @@ redis:
 #     - "cache-replica-1:6379"
 #   mode: "replication"
 #   pool_size: 20
+
+# ─── Response Cache (CDN) ─────────────────────────────────────────────
+# CDN-style response caching. Backends opt in by returning Cache-Control
+# headers (HTTP) or body fields (gRPC). Only 200 and 301 responses are
+# cached. No implicit caching — if no Cache-Control, no caching.
+# See docs/caching.md for full semantics.
+# cache:
+#   enabled: true
+#   max_body_size: 1048576           # Max response body size to cache (default: 1 MB)
+
+# Optional dedicated Redis for the response cache.
+# Fallback chain: response_cache_redis > cache_redis > redis.
+# response_cache_redis:
+#   endpoints:
+#     - "cdn-cache-primary:6379"
+#     - "cdn-cache-replica:6379"
+#   mode: "replication"
+#   pool_size: 30
 
 logging:
   level: "info"

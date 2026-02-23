@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/middleware"
 	"github.com/edgequota/edgequota/internal/observability"
@@ -75,7 +76,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger)
+	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger, chain.ResponseCache)
 
 	return &Server{
 		cfg:         cfg,
@@ -100,12 +101,20 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 		maxIdleConns = 100
 	}
 
+	// Resolve the default backend URL. In static mode it comes from
+	// rate_limit.static.backend_url; in external mode the proxy starts with
+	// the fallback URL (per-request URLs come from the external service).
+	defaultBackendURL := cfg.RateLimit.Static.BackendURL
+	if cfg.RateLimit.External.Enabled {
+		defaultBackendURL = cfg.RateLimit.External.Fallback.BackendURL
+	}
+
 	var proxyOpts []proxy.Option
 	if cfg.Backend.TLSInsecureVerify {
 		logger.Warn("backend TLS certificate verification is disabled (tls_insecure_skip_verify=true). "+
 			"This is acceptable for cluster-internal backends with self-signed certificates, "+
 			"but should not be used when proxying to external services over untrusted networks.",
-			"backend_url", cfg.Backend.URL)
+			"backend_url", defaultBackendURL)
 		proxyOpts = append(proxyOpts, proxy.WithBackendTLSInsecure())
 	}
 	if cfg.Server.MaxWebSocketConnsPerKey > 0 {
@@ -129,7 +138,7 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	}
 
 	rp, err := proxy.New(
-		cfg.Backend.URL,
+		defaultBackendURL,
 		backendTimeout,
 		maxIdleConns,
 		idleConnTimeout,
@@ -220,6 +229,82 @@ type adminRateLimiter struct {
 	done    chan struct{}
 }
 
+type purgeRequest struct {
+	Key    string `json:"key"`
+	URL    string `json:"url"`
+	Method string `json:"method"`
+}
+
+type purgeTagsRequest struct {
+	Tags []string `json:"tags"`
+}
+
+func cachePurgeHandler(getStore func() *cache.Store, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		store := getStore()
+		if store == nil {
+			http.Error(w, "response cache not configured", http.StatusServiceUnavailable)
+			return
+		}
+		var req purgeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		key := req.Key
+		if key == "" && req.URL != "" {
+			method := req.Method
+			if method == "" {
+				method = "GET"
+			}
+			key = method + "|" + req.URL
+		}
+		if key == "" {
+			http.Error(w, "key or url required", http.StatusBadRequest)
+			return
+		}
+		if store.Delete(r.Context(), key) {
+			logger.Debug("admin: cache purge", "key", key)
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			http.Error(w, "key not found", http.StatusNotFound)
+		}
+	})
+}
+
+func cachePurgeTagsHandler(getStore func() *cache.Store, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		store := getStore()
+		if store == nil {
+			http.Error(w, "response cache not configured", http.StatusServiceUnavailable)
+			return
+		}
+		var req purgeTagsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if len(req.Tags) == 0 {
+			http.Error(w, "tags required", http.StatusBadRequest)
+			return
+		}
+		total := 0
+		for _, tag := range req.Tags {
+			total += store.DeleteByTag(r.Context(), tag)
+		}
+		logger.Debug("admin: cache purge by tags", "tags", req.Tags, "deleted", total)
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func newAdminRateLimiter(handler http.Handler, burst int64) *adminRateLimiter {
 	rl := &adminRateLimiter{handler: handler, burst: burst, done: make(chan struct{})}
 	rl.tokens.Store(burst)
@@ -277,7 +362,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger) (*http.Server, *adminRateLimiter) {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger, cacheStore func() *cache.Store) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -319,6 +404,8 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 
 	adminMux.Handle("/v1/config", configHandler)
 	adminMux.Handle("/v1/stats", statsHandler)
+	adminMux.Handle("/v1/cache/purge", cachePurgeHandler(cacheStore, logger))
+	adminMux.Handle("/v1/cache/purge/tags", cachePurgeTagsHandler(cacheStore, logger))
 
 	// Wrap the admin mux in a rate limiter (100 req/s burst).
 	rl := newAdminRateLimiter(adminMux, 100)
@@ -458,9 +545,13 @@ func (s *Server) startAdminServer(errCh chan<- error) {
 }
 
 func (s *Server) startMainServerWithReady(errCh chan<- error, readyCh chan struct{}) {
+	backendURL := s.cfg.RateLimit.Static.BackendURL
+	if s.cfg.RateLimit.External.Enabled {
+		backendURL = s.cfg.RateLimit.External.Fallback.BackendURL
+	}
 	s.logger.Info("proxy server starting",
 		"address", s.cfg.Server.Address,
-		"backend", s.cfg.Backend.URL,
+		"backend", backendURL,
 		"tls", s.cfg.Server.TLS.Enabled,
 		"http3", s.cfg.Server.TLS.HTTP3Enabled)
 
@@ -532,7 +623,16 @@ func (s *Server) Reload(newCfg *config.Config) error {
 }
 
 func backendChanged(old, new_ *config.Config) bool {
-	return !old.Backend.Equal(new_.Backend)
+	if !old.Backend.Equal(new_.Backend) {
+		return true
+	}
+	if old.RateLimit.Static.BackendURL != new_.RateLimit.Static.BackendURL {
+		return true
+	}
+	if old.RateLimit.External.Fallback.BackendURL != new_.RateLimit.External.Fallback.BackendURL {
+		return true
+	}
+	return false
 }
 
 // ReloadCerts hot-swaps TLS certificates from the given files without

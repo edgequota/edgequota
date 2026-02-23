@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/edgequota/edgequota/internal/auth"
+	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/events"
 	"github.com/edgequota/edgequota/internal/observability"
@@ -174,7 +175,8 @@ type Chain struct {
 	authClient atomic.Pointer[auth.Client]
 	externalRL atomic.Pointer[ratelimit.ExternalClient]
 
-	keyStrategy atomic.Pointer[ratelimit.KeyStrategy]
+	keyStrategy         atomic.Pointer[ratelimit.KeyStrategy]
+	fallbackKeyStrategy atomic.Pointer[ratelimit.KeyStrategy]
 
 	mu             sync.RWMutex
 	limiter        *ratelimit.Limiter
@@ -184,6 +186,14 @@ type Chain struct {
 	// responses. When cache_redis is configured, this is a separate connection;
 	// otherwise it is nil and the main rate-limit Redis client is reused.
 	cacheRedis redis.Client
+
+	// responseCache is the CDN-style response cache store, backed by Redis.
+	// When nil, response caching is disabled.
+	responseCache      *cache.Store
+	responseCacheRedis redis.Client
+
+	// proxyRef holds a typed reference to the proxy for cache injection.
+	proxyRef *proxy.Proxy
 
 	fallback       *ratelimit.InMemoryLimiter
 	globalBackstop *ratelimit.InMemoryLimiter // optional global RPS safety valve for passthrough mode
@@ -195,6 +205,12 @@ type Chain struct {
 	failurePolicy config.FailurePolicy
 	failureCode   int
 	average       int64
+
+	fallbackRatePerSec float64
+	fallbackBurst      int64
+	fallbackTTL        int
+	fallbackAverage    int64
+	fallbackLimiter    *ratelimit.InMemoryLimiter
 
 	// requestTimeout, urlPolicy, and accessLog are read from ServeHTTP
 	// (hot path) without holding mu, and written by Reload. Using atomic
@@ -232,7 +248,37 @@ type rateLimitParams struct {
 	failureCode   int
 }
 
-// parseRateLimitParams normalizes and computes derived rate limit parameters.
+// parseBucketParams computes rate-per-second, burst, TTL, and period from a
+// set of average/burst/period values and an optional minTTL override.
+func parseBucketParams(average, burst int64, periodStr, minTTL string) (ratePerSecond float64, resolvedBurst int64, ttl int, period time.Duration) {
+	period, _ = time.ParseDuration(periodStr)
+	if period <= 0 {
+		period = time.Second
+	}
+
+	resolvedBurst = max(burst, 1)
+
+	if average > 0 {
+		ratePerSecond = float64(average) * float64(time.Second) / float64(period)
+	}
+
+	periodSec := int(math.Ceil(period.Seconds()))
+	ttl = max(2, periodSec*2)
+	if ratePerSecond > 0 && ratePerSecond < 1 {
+		ttl = min(int(1/ratePerSecond)+2, maxTTL)
+	}
+
+	if minTTL != "" {
+		if minTTLDur, err := time.ParseDuration(minTTL); err == nil && minTTLDur > 0 {
+			ttl = max(ttl, int(math.Ceil(minTTLDur.Seconds())))
+		}
+	}
+
+	return ratePerSecond, resolvedBurst, ttl, period
+}
+
+// parseRateLimitParams normalizes and computes derived rate limit parameters
+// from the static bucket config and the top-level failure policy settings.
 func parseRateLimitParams(cfg *config.RateLimitConfig) rateLimitParams {
 	fp := cfg.FailurePolicy
 	if fp == "" {
@@ -244,33 +290,9 @@ func parseRateLimitParams(cfg *config.RateLimitConfig) rateLimitParams {
 		fc = 429
 	}
 
-	period, _ := time.ParseDuration(cfg.Period)
-	if period <= 0 {
-		period = time.Second
-	}
-
-	burst := max(cfg.Burst, 1)
-
-	var ratePerSecond float64
-	if cfg.Average > 0 {
-		ratePerSecond = float64(cfg.Average) * float64(time.Second) / float64(period)
-	}
-
-	// Compute TTL for Redis keys. The TTL is tied to the configured period
-	// to avoid excessive EXPIRE churn for high-cardinality keys at high rates.
-	// For sub-1-rps rates, TTL is scaled to the replenishment time instead.
-	periodSec := int(math.Ceil(period.Seconds()))
-	ttl := max(2, periodSec*2)
-	if ratePerSecond > 0 && ratePerSecond < 1 {
-		ttl = min(int(1/ratePerSecond)+2, maxTTL)
-	}
-
-	// Apply optional minimum TTL floor from config.
-	if cfg.MinTTL != "" {
-		if minTTLDur, err := time.ParseDuration(cfg.MinTTL); err == nil && minTTLDur > 0 {
-			ttl = max(ttl, int(math.Ceil(minTTLDur.Seconds())))
-		}
-	}
+	ratePerSecond, burst, ttl, period := parseBucketParams(
+		cfg.Static.Average, cfg.Static.Burst, cfg.Static.Period, cfg.MinTTL,
+	)
 
 	return rateLimitParams{
 		ratePerSecond: ratePerSecond,
@@ -307,7 +329,7 @@ func NewChain(
 ) (*Chain, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	ks, err := ratelimit.NewKeyStrategy(cfg.RateLimit.KeyStrategy)
+	ks, err := ratelimit.NewKeyStrategy(cfg.RateLimit.Static.KeyStrategy)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("key strategy: %w", err)
@@ -331,7 +353,7 @@ func NewChain(
 		prefix:              prefix,
 		failurePolicy:       p.failurePolicy,
 		failureCode:         p.failureCode,
-		average:             cfg.RateLimit.Average,
+		average:             cfg.RateLimit.Static.Average,
 		ctx:                 ctx,
 		cancel:              cancel,
 		recoveryBackoffBase: defaultRecoveryBackoffBase,
@@ -342,6 +364,9 @@ func NewChain(
 		o(chain)
 	}
 	chain.next.Store(&next)
+	if pp, ok := next.(*proxy.Proxy); ok {
+		chain.proxyRef = pp
+	}
 	chain.requestTimeout.Store(reqTimeout)
 	chain.urlPolicy.Store(proxy.BackendURLPolicy{
 		AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
@@ -349,6 +374,21 @@ func NewChain(
 		AllowedHosts:        cfg.Backend.URLPolicy.AllowedHosts,
 	})
 	chain.keyStrategy.Store(&ks)
+	if cfg.RateLimit.External.Enabled {
+		fbKS, fbErr := ratelimit.NewKeyStrategy(cfg.RateLimit.External.Fallback.KeyStrategy)
+		if fbErr != nil {
+			cancel()
+			return nil, fmt.Errorf("fallback key strategy: %w", fbErr)
+		}
+		chain.fallbackKeyStrategy.Store(&fbKS)
+		fb := cfg.RateLimit.External.Fallback
+		fbRPS, fbBurst, fbTTL, _ := parseBucketParams(fb.Average, fb.Burst, fb.Period, "")
+		chain.fallbackRatePerSec = fbRPS
+		chain.fallbackBurst = fbBurst
+		chain.fallbackTTL = fbTTL
+		chain.fallbackAverage = fb.Average
+		chain.fallbackLimiter = ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second)
+	}
 	chain.accessLog.Store(cfg.Logging.AccessLogEnabled())
 	chain.cfg.Store(cfg)
 	if cfg.RateLimit.GlobalPassthroughRPS > 0 {
@@ -380,7 +420,7 @@ func NewChain(
 	}
 
 	logger.Info("middleware chain ready",
-		"average", cfg.RateLimit.Average, "burst", p.burst,
+		"average", cfg.RateLimit.Static.Average, "burst", p.burst,
 		"period", p.period, "policy", p.failurePolicy)
 
 	if p.failurePolicy == policyInMemoryFallback {
@@ -405,7 +445,7 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 	if cfg.RateLimit.External.Enabled {
 		cacheClient := c.resolveCacheRedis(cfg, logger)
 
-		extClient, extErr := ratelimit.NewExternalClient(cfg.RateLimit.External, cacheClient)
+		extClient, extErr := ratelimit.NewExternalClient(cfg.RateLimit.External, cacheClient, logger)
 		if extErr != nil {
 			if c.cacheRedis != nil {
 				_ = c.cacheRedis.Close()
@@ -417,13 +457,100 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			c.metrics.PromExtRLSemaphoreRejected.Inc,
 			c.metrics.PromExtRLSingleflightShared.Inc,
 		)
+		extClient.SetCacheMetricHooks(
+			c.metrics.PromExtRLCacheHit.Inc,
+			c.metrics.PromExtRLCacheMiss.Inc,
+			c.metrics.PromExtRLCacheStaleHit.Inc,
+		)
 		c.externalRL.Store(extClient)
 		logger.Info("external rate limit service enabled",
 			"cache_backend", cacheBackendName(cacheClient),
 			"dedicated_cache_redis", cfg.CacheRedis != nil && len(cfg.CacheRedis.Endpoints) > 0)
 	}
 
+	if cfg.Cache.Enabled {
+		c.initResponseCache(cfg, logger)
+	}
+
 	return nil
+}
+
+// initResponseCache creates the CDN-style response cache store backed by Redis.
+func (c *Chain) initResponseCache(cfg *config.Config, logger *slog.Logger) {
+	redisCfg := cfg.ResponseCacheRedisConfig()
+	client, err := redis.NewClient(redisCfg)
+	if err != nil {
+		logger.Warn("response cache redis unavailable, retrying in background", "error", err)
+		go c.responseCacheRecoveryLoop(cfg, logger, redisCfg)
+		return
+	}
+	c.installResponseCache(cfg, logger, client)
+}
+
+func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, client redis.Client) {
+	c.responseCacheRedis = client
+
+	maxBody := cfg.Cache.ParseMaxBodySize()
+	store := cache.NewStore(client,
+		cache.WithMaxBodySize(maxBody),
+		cache.WithLogger(logger),
+	)
+	store.OnHit = c.metrics.PromRespCacheHit.Inc
+	store.OnMiss = c.metrics.PromRespCacheMiss.Inc
+	store.OnStaleHit = c.metrics.PromRespCacheStaleHit.Inc
+	store.OnStore = c.metrics.PromRespCacheStore.Inc
+	store.OnSkip = c.metrics.PromRespCacheSkip.Inc
+	store.OnPurge = c.metrics.PromRespCachePurge.Inc
+	store.OnBodySize = c.metrics.PromRespCacheBodySize.Observe
+
+	c.responseCache = store
+	if c.proxyRef != nil {
+		c.proxyRef.SetCache(store)
+	}
+	logger.Info("response cache enabled",
+		"max_body_size", maxBody,
+		"dedicated_redis", cfg.ResponseCacheRedis != nil && len(cfg.ResponseCacheRedis.Endpoints) > 0)
+}
+
+func (c *Chain) responseCacheRecoveryLoop(
+	cfg *config.Config, logger *slog.Logger, redisCfg config.RedisConfig,
+) {
+	backoff := c.recoveryBackoffBase
+	attempt := 0
+	for {
+		if c.ctx.Err() != nil {
+			return
+		}
+
+		sleep := c.backoffJitter(backoff)
+		timer := time.NewTimer(sleep)
+		select {
+		case <-c.ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, c.recoveryBackoffMax)
+
+		attempt++
+		client, err := redis.NewClient(redisCfg)
+		if err != nil {
+			if attempt <= 5 || attempt%10 == 0 {
+				logger.Warn("response cache redis recovery attempt failed",
+					"attempt", attempt, "error", err, "next_in", sleep)
+			}
+			continue
+		}
+
+		c.installResponseCache(cfg, logger, client)
+		logger.Info("response cache redis recovered", "attempt", attempt)
+		return
+	}
 }
 
 // resolveCacheRedis returns a Redis client for caching external rate limit
@@ -466,7 +593,7 @@ func cacheBackendName(c redis.Client) string {
 }
 
 func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitParams) error {
-	if cfg.RateLimit.Average == 0 && !cfg.RateLimit.External.Enabled {
+	if cfg.RateLimit.Static.Average == 0 && !cfg.RateLimit.External.Enabled {
 		logger.Info("rate limiting disabled (average=0)")
 		return nil
 	}
@@ -549,8 +676,12 @@ func (c *Chain) emitAccessLog(r *http.Request, sw *statusWriter, originalHost, r
 	if !c.accessLog.Load() {
 		return
 	}
-	resolvedBackendURL := c.cfg.Load().Backend.URL
-	resolvedBackendProto := c.cfg.Load().Backend.Transport.ResolvedBackendProtocol()
+	cfg := c.cfg.Load()
+	resolvedBackendURL := cfg.RateLimit.Static.BackendURL
+	if cfg.RateLimit.External.Enabled {
+		resolvedBackendURL = cfg.RateLimit.External.Fallback.BackendURL
+	}
+	resolvedBackendProto := cfg.Backend.Transport.ResolvedBackendProtocol()
 	if u := proxy.BackendURLFromContext(r.Context()); u != nil {
 		resolvedBackendURL = u.String()
 	}
@@ -698,12 +829,20 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, err := (*c.keyStrategy.Load()).Extract(r)
-	if err != nil {
-		c.metrics.IncKeyExtractErrors()
-		c.logger.Warn("key extraction failed", "error", err)
-		writeJSONError(sw, http.StatusInternalServerError, "key_extraction_failed", "could not extract rate-limit key", 0)
-		return
+	var key string
+	if c.externalRL.Load() != nil {
+		// When external RL is active, skip local key extraction entirely.
+		// The external service owns key derivation from headers/path/Host.
+		key = ""
+	} else {
+		var err error
+		key, err = (*c.keyStrategy.Load()).Extract(r)
+		if err != nil {
+			c.metrics.IncKeyExtractErrors()
+			c.logger.Warn("key extraction failed", "error", err)
+			writeJSONError(sw, http.StatusInternalServerError, "key_extraction_failed", "could not extract rate-limit key", 0)
+			return
+		}
 	}
 
 	ctx := context.WithValue(r.Context(), ratelimit.KeyContextKey, key)
@@ -750,9 +889,11 @@ func (c *Chain) applyRequestTimeout(ctx context.Context, extLimits *ratelimit.Ex
 	return ctx, nil
 }
 
-// injectBackendURL sets a per-tenant backend URL in the request context when
-// the external service provides one. Falls back to the static backend URL on
-// parse or policy validation failure.
+// injectBackendURL sets the per-request backend URL from the external service
+// response into the request context. When extLimits is nil (static mode or
+// fallback), no override is applied and the proxy uses the static/fallback URL.
+// Parse or policy validation failures are logged and the request proceeds
+// without a URL override (the proxy uses its startup default).
 func (c *Chain) injectBackendURL(r *http.Request, extLimits *ratelimit.ExternalLimits) *http.Request {
 	if extLimits == nil || extLimits.BackendURL == "" {
 		return r
@@ -915,7 +1056,6 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 	}
 
 	extReq := &ratelimit.ExternalRequest{
-		Key:     key,
 		Headers: headers,
 		Method:  r.Method,
 		Path:    r.URL.Path,
@@ -928,7 +1068,44 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 			c.logger.Error("external rate limit service error, fail-closed", "error", extErr)
 			return &ratelimit.ExternalLimits{Average: -1}, resolvedKey
 		}
+		// Fallback: use fallback key strategy and fallback limits.
+		if fbKS := c.fallbackKeyStrategy.Load(); fbKS != nil {
+			fbKey, fbErr := (*fbKS).Extract(r)
+			if fbErr != nil {
+				c.logger.Warn("fallback key extraction failed, using static config", "error", fbErr)
+				return nil, resolvedKey
+			}
+			c.logger.Warn("external rate limit service error, using fallback config",
+				"error", extErr, "fallback_key", fbKey)
+			return &ratelimit.ExternalLimits{
+				Average: c.fallbackAverage,
+				Burst:   c.fallbackBurst,
+			}, fbKey
+		}
 		c.logger.Warn("external rate limit service error, using static config", "error", extErr)
+		return nil, resolvedKey
+	}
+
+	// When external RL is active, the external service MUST return
+	// backend_url — there is no implicit fallback to a static URL.
+	// A missing backend_url is treated as a malformed response.
+	if extLimits.BackendURL == "" {
+		c.logger.Error("external service response missing required backend_url")
+		cfg := c.cfg.Load()
+		if cfg.RateLimit.External.FailurePolicy == config.ExternalRLFailurePolicyFailClosed {
+			return &ratelimit.ExternalLimits{Average: -1}, resolvedKey
+		}
+		if fbKS := c.fallbackKeyStrategy.Load(); fbKS != nil {
+			fbKey, fbErr := (*fbKS).Extract(r)
+			if fbErr != nil {
+				c.logger.Warn("fallback key extraction failed after missing backend_url", "error", fbErr)
+				return nil, resolvedKey
+			}
+			return &ratelimit.ExternalLimits{
+				Average: c.fallbackAverage,
+				Burst:   c.fallbackBurst,
+			}, fbKey
+		}
 		return nil, resolvedKey
 	}
 
@@ -1328,6 +1505,16 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		_ = old.Close()
 	}
 
+	// When the external RL client uses the main Redis for caching (no
+	// dedicated cache_redis), inject the recovered client so ext RL caching
+	// starts working even if Redis was unavailable at startup.
+	if c.cacheRedis == nil {
+		if ext := c.externalRL.Load(); ext != nil {
+			ext.SetRedisClient(limiter.Client())
+			c.logger.Info("external RL cache redis updated via main recovery")
+		}
+	}
+
 	c.metrics.PromRedisHealthy.Set(1)
 	c.logger.Info("redis connection recovered")
 }
@@ -1370,6 +1557,14 @@ func (c *Chain) RedisPinger() observability.Pinger {
 	return &redisPingerAdapter{client: c.limiter.Client()}
 }
 
+// ResponseCache returns the current response cache store, or nil if
+// response caching is disabled. Used by the admin PURGE endpoints.
+func (c *Chain) ResponseCache() *cache.Store {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.responseCache
+}
+
 // Close shuts down the middleware chain and releases all resources.
 // Reload hot-swaps the rate-limit parameters, key strategy, failure policy,
 // auth client, and external RL client from a new config. Components that
@@ -1382,12 +1577,32 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	}
 
 	// Rebuild key strategy if it changed.
-	newKS, err := ratelimit.NewKeyStrategy(newCfg.RateLimit.KeyStrategy)
+	newKS, err := ratelimit.NewKeyStrategy(newCfg.RateLimit.Static.KeyStrategy)
 	if err != nil {
 		return fmt.Errorf("reload key strategy: %w", err)
 	}
 
 	c.keyStrategy.Store(&newKS) // Atomic store — read by ServeHTTP without holding mu.
+
+	// Rebuild fallback key strategy when external RL is enabled.
+	if newCfg.RateLimit.External.Enabled {
+		fbKS, fbErr := ratelimit.NewKeyStrategy(newCfg.RateLimit.External.Fallback.KeyStrategy)
+		if fbErr != nil {
+			return fmt.Errorf("reload fallback key strategy: %w", fbErr)
+		}
+		c.fallbackKeyStrategy.Store(&fbKS)
+		fb := newCfg.RateLimit.External.Fallback
+		fbRPS, fbBurst, fbTTL, _ := parseBucketParams(fb.Average, fb.Burst, fb.Period, "")
+		c.fallbackRatePerSec = fbRPS
+		c.fallbackBurst = fbBurst
+		c.fallbackTTL = fbTTL
+		c.fallbackAverage = fb.Average
+		oldFBL := c.fallbackLimiter
+		c.fallbackLimiter = ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second)
+		if oldFBL != nil {
+			oldFBL.Close()
+		}
+	}
 
 	c.mu.Lock()
 	prevCfg := c.cfg.Load() // Capture previous config before overwriting.
@@ -1397,7 +1612,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.prefix = prefix
 	c.failurePolicy = p.failurePolicy
 	c.failureCode = p.failureCode
-	c.average = newCfg.RateLimit.Average
+	c.average = newCfg.RateLimit.Static.Average
 	c.cfg.Store(newCfg) // Atomic store — recoveryLoop reads c.cfg without the mutex.
 
 	// Rebuild limiter with new params but same Redis client if available.
@@ -1440,7 +1655,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	}
 
 	c.logger.Info("middleware chain reloaded",
-		"average", newCfg.RateLimit.Average, "burst", p.burst,
+		"average", newCfg.RateLimit.Static.Average, "burst", p.burst,
 		"period", p.period, "policy", p.failurePolicy)
 
 	return nil
@@ -1487,7 +1702,7 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 	}
 
 	cacheClient := c.resolveCacheRedis(newCfg, c.logger)
-	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient)
+	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient, c.logger)
 	if extErr != nil {
 		c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
 		return
@@ -1495,6 +1710,11 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 	newExt.SetMetricHooks(
 		c.metrics.PromExtRLSemaphoreRejected.Inc,
 		c.metrics.PromExtRLSingleflightShared.Inc,
+	)
+	newExt.SetCacheMetricHooks(
+		c.metrics.PromExtRLCacheHit.Inc,
+		c.metrics.PromExtRLCacheMiss.Inc,
+		c.metrics.PromExtRLCacheStaleHit.Inc,
 	)
 	oldExt := c.externalRL.Swap(newExt)
 	if oldExt != nil {
@@ -1537,6 +1757,9 @@ func (c *Chain) closeResources(redisClient redis.Client) error {
 	}
 	if c.cacheRedis != nil {
 		collect(c.cacheRedis.Close())
+	}
+	if c.responseCacheRedis != nil {
+		collect(c.responseCacheRedis.Close())
 	}
 	if ac := c.authClient.Load(); ac != nil {
 		collect(ac.Close())

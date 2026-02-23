@@ -24,11 +24,11 @@ func benchMetrics() *observability.Metrics {
 
 func benchConfig(redisAddr string) *config.Config {
 	cfg := config.Defaults()
-	cfg.Backend.URL = "http://127.0.0.1:65535" // won't be hit in bench
+	cfg.RateLimit.Static.BackendURL = "http://127.0.0.1:65535" // won't be hit in bench
 	cfg.Redis.Endpoints = []string{redisAddr}
 	cfg.Redis.Mode = config.RedisModeSingle
-	cfg.RateLimit.Average = 1000000 // Very high limit so RL doesn't interfere.
-	cfg.RateLimit.Burst = 1000000
+	cfg.RateLimit.Static.Average = 1000000 // Very high limit so RL doesn't interfere.
+	cfg.RateLimit.Static.Burst = 1000000
 	return cfg
 }
 
@@ -48,7 +48,7 @@ func BenchmarkServeHTTP(b *testing.B) {
 	defer backend.Close()
 
 	cfg := benchConfig(mr.Addr())
-	cfg.Backend.URL = backend.URL
+	cfg.RateLimit.Static.BackendURL = backend.URL
 
 	chain, err := NewChain(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

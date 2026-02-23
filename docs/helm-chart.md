@@ -19,9 +19,9 @@ helm repo add edgequota https://edgequota.github.io/edgequota-helm
 helm repo update
 
 helm install edgequota edgequota/edgequota \
-  --set edgequota.backend.url=http://my-backend:8080 \
-  --set edgequota.rateLimit.average=100 \
-  --set edgequota.rateLimit.burst=50 \
+  --set edgequota.rateLimit.static.backendUrl=http://my-backend:8080 \
+  --set edgequota.rateLimit.static.average=100 \
+  --set edgequota.rateLimit.static.burst=50 \
   --set edgequota.redis.endpoints[0]=redis:6379
 ```
 
@@ -66,18 +66,19 @@ edgequota:
     address: ":9090"
 
   backend:
-    url: "http://my-backend:8080"
     timeout: "30s"
     maxIdleConns: 100
 
   rateLimit:
-    average: 100
-    burst: 50
-    period: "1s"
+    static:
+      backendUrl: "http://my-backend:8080"
+      average: 100
+      burst: 50
+      period: "1s"
+      keyStrategy:
+        type: "header"
+        headerName: "X-Tenant-Id"
     failurePolicy: "passThrough"
-    keyStrategy:
-      type: "header"
-      headerName: "X-Tenant-Id"
 
   redis:
     endpoints:
@@ -114,15 +115,63 @@ edgequota:
 
 ### External Rate Limiting
 
+When external RL is enabled, EdgeQuota delegates key derivation and quota resolution entirely to the external service. The `static` block is only used when external RL is **disabled**. The `external.fallback` block defines the safety-net limits applied when the external service is unavailable.
+
 ```yaml
 edgequota:
   rateLimit:
     external:
       enabled: true
       timeout: "5s"
-      cacheTtl: "60s"
       http:
         url: "http://limits-service:8080/limits"
+      headerFilter:
+        allowList:
+          - "Host"
+          - "X-Tenant-Id"
+          - "X-Request-Id"       # forwarded for tracing
+      fallback:
+        backendUrl: "http://my-backend:8080"
+        average: 5000
+        burst: 2000
+        period: "1s"
+        keyStrategy:
+          type: "global"
+          globalKey: "fe-fallback"
+```
+
+The `fallback` block is **required** when external RL is enabled. It defines what happens if the external service is down:
+
+- `fallback.average` / `burst` / `period` -- the rate-limit bucket dimensions.
+- `fallback.keyStrategy` -- how the rate-limit key is extracted during fallback. The `global` type is recommended for FE/static assets (all requests share one bucket); use `header` or `clientIP` for backend APIs.
+
+Caching of external service responses is driven by `Cache-Control` headers or body fields returned by the service. Ephemeral headers (tracing IDs, `X-Request-Id`, etc.) are automatically excluded from cache keys. See [Response Caching](caching.md).
+
+You do **not** need to configure the `static` block when using external RL. It is completely ignored while `external.enabled` is `true`.
+
+### Response Cache (CDN)
+
+Enable CDN-style response caching to cache backend responses in Redis. Backends opt in by returning `Cache-Control` headers. See [Response Caching](caching.md).
+
+```yaml
+edgequota:
+  cache:
+    enabled: true
+    maxBodySize: 5242880  # 5 MB
+```
+
+### Response Cache Redis (Optional)
+
+Dedicated Redis for the response cache. Falls back to `cacheRedis`, then `redis` when omitted.
+
+```yaml
+edgequota:
+  responseCacheRedis:
+    endpoints:
+      - "cdn-cache-primary:6379"
+      - "cdn-cache-replica:6379"
+    mode: "replication"
+    poolSize: 30
 ```
 
 ### Events

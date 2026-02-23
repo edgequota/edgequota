@@ -45,6 +45,12 @@ variable "extra_ports" {
   default = []
 }
 
+variable "admin_node_port" {
+  description = "Optional: expose admin port via NodePort (for cache purge tests)"
+  type        = number
+  default     = 0
+}
+
 # --- ConfigMap ---
 
 resource "kubernetes_config_map_v1" "config" {
@@ -236,7 +242,7 @@ resource "kubernetes_service_v1" "edgequota" {
   }
 }
 
-# --- Admin Service (ClusterIP, for internal health checks) ---
+# --- Admin Service (ClusterIP or NodePort for cache purge tests) ---
 
 resource "kubernetes_service_v1" "admin" {
   metadata {
@@ -245,6 +251,8 @@ resource "kubernetes_service_v1" "admin" {
   }
 
   spec {
+    type = var.admin_node_port > 0 ? "NodePort" : "ClusterIP"
+
     selector = {
       app                  = "edgequota"
       "edgequota-scenario" = var.scenario
@@ -254,6 +262,7 @@ resource "kubernetes_service_v1" "admin" {
       name        = "admin"
       port        = 9090
       target_port = 9090
+      node_port   = var.admin_node_port > 0 ? var.admin_node_port : null
     }
   }
 }

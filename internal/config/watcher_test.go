@@ -18,12 +18,12 @@ import (
 // validConfig returns minimal valid YAML that passes Load+Validate.
 func validConfig(average int64) string {
 	return fmt.Sprintf(`
-backend:
-  url: "http://127.0.0.1:8080"
 rate_limit:
-  average: %d
-  burst: 10
-  period: "1s"
+  static:
+    average: %d
+    burst: 10
+    period: "1s"
+    backend_url: "http://127.0.0.1:8080"
 `, average)
 }
 

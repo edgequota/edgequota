@@ -34,9 +34,6 @@ type GetLimitsRequest struct {
 	// Headers Flattened request headers for context.
 	Headers map[string]string `json:"headers"`
 
-	// Key Rate limit bucket key (e.g. tenant ID, client IP).
-	Key string `json:"key"`
-
 	// Method HTTP method.
 	Method string `json:"method"`
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,9 +32,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			if n <= 1 {
 				// First call succeeds — seeds the cache.
 				json.NewEncoder(w).Encode(ExternalLimits{
-					Average: 100,
-					Burst:   50,
-					Period:  "1s",
+					Average:    100,
+					Burst:      50,
+					Period:     "1s",
+					BackendURL: "http://backend:8080",
 				})
 				return
 			}
@@ -46,7 +48,6 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       0, // no primary cache (force re-fetch)
 			redisClient:    redisClient,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
@@ -57,20 +58,20 @@ func TestCircuitBreakerConformance(t *testing.T) {
 		}
 
 		// First call succeeds, seeding stale cache.
-		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cb-test"})
+		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/cb-test"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(100), limits.Average)
 
 		// Trigger failures to open the circuit breaker.
 		for i := 0; i < 3; i++ {
-			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "cb-fail"})
+			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/cb-fail"})
 		}
 
 		// Circuit should be open now.
-		assert.True(t, c.isCircuitOpen("cb-fail"), "circuit breaker should be open after threshold failures")
+		assert.True(t, c.isCircuitOpen("GET|/cb-fail"), "circuit breaker should be open after threshold failures")
 
 		// With circuit open, stale cache should be returned for the seeded key.
-		staleLimits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "cb-test"})
+		staleLimits, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/cb-test"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(100), staleLimits.Average)
 	})
@@ -90,10 +91,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 
 		// Trip the circuit breaker.
 		for i := 0; i < 3; i++ {
-			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "no-stale"})
+			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/no-stale"})
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "no-stale"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/no-stale"})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "circuit breaker open")
 	})
@@ -108,9 +109,10 @@ func TestCircuitBreakerConformance(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(ExternalLimits{
-				Average: 200,
-				Burst:   100,
-				Period:  "1s",
+				Average:    200,
+				Burst:      100,
+				Period:     "1s",
+				BackendURL: "http://backend:8080",
 			})
 		}))
 		defer srv.Close()
@@ -119,7 +121,6 @@ func TestCircuitBreakerConformance(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       0,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
 			maxBreakers:    defaultMaxCircuitBreakers,
@@ -130,20 +131,20 @@ func TestCircuitBreakerConformance(t *testing.T) {
 
 		// Trip the circuit breaker.
 		for i := 0; i < 3; i++ {
-			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Key: "reset-test"})
+			_, _ = c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/reset-test"})
 		}
-		assert.True(t, c.isCircuitOpen("reset-test"))
+		assert.True(t, c.isCircuitOpen("GET|/reset-test"))
 
 		// Wait for circuit to enter half-open state.
 		time.Sleep(20 * time.Millisecond)
 
 		// Next call should probe and succeed, resetting the circuit.
-		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "reset-test"})
+		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/reset-test"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(200), limits.Average)
 
 		// Circuit should be closed now.
-		assert.False(t, c.isCircuitOpen("reset-test"))
+		assert.False(t, c.isCircuitOpen("GET|/reset-test"))
 	})
 }
 
@@ -161,9 +162,10 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			if n == 1 {
 				w.Header().Set("Cache-Control", "max-age=1") // Very short TTL.
 				json.NewEncoder(w).Encode(ExternalLimits{
-					Average: 500,
-					Burst:   250,
-					Period:  "1s",
+					Average:    500,
+					Burst:      250,
+					Period:     "1s",
+					BackendURL: "http://backend:8080",
 				})
 				return
 			}
@@ -175,7 +177,6 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
@@ -186,7 +187,7 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 		}
 
 		// Seed the cache.
-		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "swr-test"})
+		limits, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/swr-test"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(500), limits.Average)
 
@@ -194,7 +195,7 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 		time.Sleep(2 * time.Second)
 
 		// Fetch should fail, but stale cache should return the seeded value.
-		staleLimits, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "swr-test"})
+		staleLimits, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/swr-test"})
 		require.NoError(t, err)
 		assert.Equal(t, int64(500), staleLimits.Average)
 	})
@@ -204,9 +205,10 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Cache-Control", "max-age=10")
 			json.NewEncoder(w).Encode(ExternalLimits{
-				Average: 100,
-				Burst:   50,
-				Period:  "1s",
+				Average:    100,
+				Burst:      50,
+				Period:     "1s",
+				BackendURL: "http://backend:8080",
 			})
 		}))
 		defer srv.Close()
@@ -215,7 +217,6 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       10e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
@@ -225,13 +226,13 @@ func TestStaleWhileRevalidateConformance(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		_, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "ttl-test"})
+		_, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/ttl-test"})
 		require.NoError(t, err)
 
 		// Primary cache TTL should be ~10s (from Cache-Control header).
-		primaryTTL := mr.TTL(cacheKeyPrefix + "ttl-test")
+		primaryTTL := mr.TTL(cacheKeyPrefix + "GET|/ttl-test")
 		// Stale cache TTL should be ~5m (staleCacheTTL constant).
-		staleTTL := mr.TTL(staleCachePrefix + "ttl-test")
+		staleTTL := mr.TTL(staleCachePrefix + "GET|/ttl-test")
 
 		assert.True(t, primaryTTL.Seconds() <= 10, "primary TTL should be ~10s, got %v", primaryTTL)
 		assert.True(t, staleTTL.Seconds() > 60, "stale TTL should be ~5m, got %v", staleTTL)
@@ -252,11 +253,15 @@ func TestCacheIsolationConformance(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			calls.Add(1)
 
+			// Derive tenant from path (e.g. "/tenant-a" -> "tenant-a")
+			tenant := strings.TrimPrefix(req.Path, "/")
+
 			resp := ExternalLimits{
-				Average:   100,
-				Burst:     50,
-				Period:    "1s",
-				TenantKey: "tenant:" + req.Key,
+				Average:    100,
+				Burst:      50,
+				Period:     "1s",
+				BackendURL: "http://backend:8080",
+				TenantKey:  "tenant:" + tenant,
 			}
 			w.Header().Set("Cache-Control", "max-age=300")
 			json.NewEncoder(w).Encode(resp)
@@ -267,7 +272,6 @@ func TestCacheIsolationConformance(t *testing.T) {
 			httpURL:        srv.URL,
 			httpClient:     http.DefaultClient,
 			timeout:        5e9,
-			cacheTTL:       60e9,
 			headerFilter:   config.NewHeaderFilter(config.HeaderFilterConfig{}),
 			redisClient:    redisClient,
 			fetchSem:       semaphore.NewWeighted(defaultMaxConcurrentFetches),
@@ -277,13 +281,13 @@ func TestCacheIsolationConformance(t *testing.T) {
 			done:           make(chan struct{}),
 		}
 
-		// Request for tenant A.
-		limitsA, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "tenant-a"})
+		// Request for tenant A (Path differentiates tenants for cache isolation).
+		limitsA, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/tenant-a"})
 		require.NoError(t, err)
 		assert.Equal(t, "tenant:tenant-a", limitsA.TenantKey)
 
 		// Request for tenant B.
-		limitsB, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "tenant-b"})
+		limitsB, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/tenant-b"})
 		require.NoError(t, err)
 		assert.Equal(t, "tenant:tenant-b", limitsB.TenantKey)
 
@@ -291,7 +295,7 @@ func TestCacheIsolationConformance(t *testing.T) {
 		assert.Equal(t, int32(2), calls.Load())
 
 		// Repeat for tenant A — should come from cache.
-		limitsA2, err := c.GetLimits(context.Background(), &ExternalRequest{Key: "tenant-a"})
+		limitsA2, err := c.GetLimits(context.Background(), &ExternalRequest{Method: "GET", Path: "/tenant-a"})
 		require.NoError(t, err)
 		assert.Equal(t, "tenant:tenant-a", limitsA2.TenantKey)
 		assert.Equal(t, int32(2), calls.Load()) // No extra server call.
@@ -376,7 +380,7 @@ func TestCacheGobFallback(t *testing.T) {
 	t.Run("JSON takes priority over gob on ambiguous data", func(t *testing.T) {
 		redisClient, _ := newTestCacheRedis(t)
 
-		limits := &ExternalLimits{Average: 999, Burst: 500, Period: "1s"}
+		limits := &ExternalLimits{Average: 999, Burst: 500, Period: "1s", BackendURL: "http://backend:8080"}
 		data, err := json.Marshal(limits)
 		require.NoError(t, err)
 		require.NoError(t, redisClient.Set(context.Background(),

@@ -21,9 +21,11 @@ service RateLimitService {
 }
 
 // GetLimitsRequest identifies the client and context for limit lookup.
+// The external service derives the tenant/bucket key from headers, method,
+// and path — EdgeQuota does not send a pre-extracted key.
 message GetLimitsRequest {
-  // Rate limit bucket key (e.g. tenant ID, client IP).
-  string key = 1;
+  reserved 1;
+  reserved "key";
   // Flattened request headers for context.
   map<string, string> headers = 2;
   // HTTP method.
@@ -103,10 +105,11 @@ message GetLimitsResponse {
   // static config.
   int32 failure_code = 8;
 
-  // Backend URL override (optional). When non-empty, EdgeQuota proxies this
-  // request to the given URL instead of the static backend.url from config.
-  // This enables per-tenant backend routing — the external service can direct
-  // each tenant's traffic to a different upstream.
+  // Backend URL (required). EdgeQuota proxies this request to the given URL.
+  // When external RL is active, the external service is the sole source of
+  // truth for backend routing — there is no implicit fallback to a static URL.
+  // Responses with an empty backend_url are treated as malformed and trigger
+  // the fallback path (fallback.backend_url + fallback rate limits).
   string backend_url = 9;
 
   // Per-request timeout override (optional). Duration string (e.g. "10s").

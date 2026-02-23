@@ -21,8 +21,8 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -56,8 +56,8 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -80,8 +80,8 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 
 	t.Run("returns 503 when auth service is unreachable", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = "http://127.0.0.1:1/auth" // unreachable
 		cfg.Auth.Timeout = "100ms"
@@ -117,8 +117,8 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -145,8 +145,8 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0 // no rate limit
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0 // no rate limit
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -186,8 +186,8 @@ func TestChainAuthInjectsRequestHeaders(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -225,8 +225,8 @@ func TestChainAuthInjectsRequestHeaders(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -267,9 +267,9 @@ func TestChainAuthInjectsRequestHeaders(t *testing.T) {
 		cfg := testConfig(mr.Addr())
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
-		cfg.RateLimit.Average = 100
-		cfg.RateLimit.Burst = 100
-		cfg.RateLimit.KeyStrategy = config.KeyStrategyConfig{
+		cfg.RateLimit.Static.Average = 100
+		cfg.RateLimit.Static.Burst = 100
+		cfg.RateLimit.Static.KeyStrategy = config.KeyStrategyConfig{
 			Type:       config.KeyStrategyHeader,
 			HeaderName: "X-Tenant-Id",
 		}
@@ -300,8 +300,8 @@ func TestChainAuthInjectsRequestHeaders(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		metrics := testMetrics()
@@ -343,8 +343,8 @@ func TestChainAuthReceivesHostHeader(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,8 +370,8 @@ func TestChainServeHTTPFailClosed(t *testing.T) {
 		cfg := testConfig("127.0.0.1:1")
 		cfg.Redis.DialTimeout = "100ms"
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
-		cfg.RateLimit.Average = 1
-		cfg.RateLimit.Burst = 1
+		cfg.RateLimit.Static.Average = 1
+		cfg.RateLimit.Static.Burst = 1
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)

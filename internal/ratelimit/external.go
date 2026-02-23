@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,8 +80,10 @@ type ExternalLimits struct {
 }
 
 // ExternalRequest is sent to the external rate limit service.
+// The request intentionally does NOT include a key field — when external RL is
+// enabled, EdgeQuota delegates key derivation entirely to the external service.
+// The service determines the tenant/bucket from headers, method, and path.
 type ExternalRequest struct {
-	Key     string            `json:"key"`
 	Headers map[string]string `json:"headers"`
 	Method  string            `json:"method"`
 	Path    string            `json:"path"`
@@ -99,11 +103,16 @@ type ExternalClient struct {
 	grpcConn     *grpc.ClientConn
 	httpClient   *http.Client
 	timeout      time.Duration
-	cacheTTL     time.Duration // default TTL when response has no cache headers
 	headerFilter *config.HeaderFilter
 
-	redisClient redis.Client // may be nil (no caching)
-	maxLatency  time.Duration
+	// cacheKeyExclude is the set of lower-cased header names excluded from
+	// the lookup key. Always contains at least the built-in ephemeral
+	// headers (tracing, correlation, request IDs).
+	cacheKeyExclude map[string]struct{}
+
+	redisClientMu sync.RWMutex
+	redisClient   redis.Client // may be nil (no caching)
+	maxLatency    time.Duration
 
 	// singleflight collapses concurrent cache misses for the same key into
 	// one external call, preventing thundering herd on the control plane.
@@ -126,9 +135,88 @@ type ExternalClient struct {
 	// done is closed by Close() to stop the background eviction goroutine.
 	done chan struct{}
 
-	// Optional metric hooks — set via WithExternalMetrics.
+	logger *slog.Logger
+
+	// Optional metric hooks — set via SetMetricHooks / SetCacheMetricHooks.
 	onSemaphoreReject   func()
 	onSingleflightShare func()
+	onCacheHit          func()
+	onCacheMiss         func()
+	onCacheStaleHit     func()
+}
+
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+func (ec *ExternalClient) log() *slog.Logger {
+	if ec.logger != nil {
+		return ec.logger
+	}
+	return discardLogger
+}
+
+func (ec *ExternalClient) emitCacheHit() {
+	if ec.onCacheHit != nil {
+		ec.onCacheHit()
+	}
+}
+
+func (ec *ExternalClient) emitCacheMiss() {
+	if ec.onCacheMiss != nil {
+		ec.onCacheMiss()
+	}
+}
+
+func (ec *ExternalClient) emitSemaphoreReject() {
+	if ec.onSemaphoreReject != nil {
+		ec.onSemaphoreReject()
+	}
+}
+
+// tryStaleCache tries to return a stale cache entry, emitting the
+// appropriate metric if found. Returns nil when no stale entry exists.
+func (ec *ExternalClient) tryStaleCache(ctx context.Context, lk, reason string) *ExternalLimits {
+	stale := ec.getStaleFromCache(ctx, lk)
+	if stale == nil {
+		return nil
+	}
+	if ec.onCacheStaleHit != nil {
+		ec.onCacheStaleHit()
+	}
+	ec.log().Debug("external RL stale cache hit", "lookup_key", lk, "reason", reason)
+	return stale
+}
+
+// lookupKey computes a deterministic key from the request's stable attributes
+// (method, path, and all headers minus ephemeral ones). This key is used for
+// Redis caching, singleflight deduplication, and per-key circuit breakers —
+// it is never sent over the wire.
+//
+// Per-request ephemeral headers (tracing IDs, correlation IDs, X-Forwarded-*,
+// etc.) are excluded so that requests from different traces but the same
+// logical tenant produce the same key and share cache entries. See
+// config.DefaultEphemeralHeaders for the full built-in exclusion list.
+func (ec *ExternalClient) lookupKey(req *ExternalRequest) string {
+	var b strings.Builder
+	b.WriteString(req.Method)
+	b.WriteByte('|')
+	b.WriteString(req.Path)
+
+	keys := make([]string, 0, len(req.Headers))
+	for k := range req.Headers {
+		lower := strings.ToLower(k)
+		if _, skip := ec.cacheKeyExclude[lower]; skip {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		b.WriteByte('|')
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(req.Headers[k])
+	}
+	return b.String()
 }
 
 // Circuit breaker and concurrency defaults.
@@ -234,15 +322,13 @@ func resolveCBResetTimeout(configured string) time.Duration {
 
 // NewExternalClient creates a client for the external rate limit service.
 // The redisClient is used for distributed caching; pass nil to disable caching.
-func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*ExternalClient, error) {
+func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, logger *slog.Logger) (*ExternalClient, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil {
 		timeout = 5 * time.Second
-	}
-
-	cacheTTL, err := time.ParseDuration(cfg.CacheTTL)
-	if err != nil {
-		cacheTTL = 60 * time.Second
 	}
 
 	// Tuned HTTP transport with high per-host connection pool for
@@ -274,19 +360,22 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client) (*
 		maxLatency, _ = time.ParseDuration(cfg.MaxLatency)
 	}
 
+	cacheKeyExclude := config.BuildEphemeralSet()
+
 	ec := &ExternalClient{
-		httpURL:        cfg.HTTP.URL,
-		httpClient:     &http.Client{Timeout: timeout, Transport: transport},
-		timeout:        timeout,
-		cacheTTL:       cacheTTL,
-		headerFilter:   config.NewHeaderFilter(cfg.HeaderFilter),
-		redisClient:    redisClient,
-		maxLatency:     maxLatency,
-		fetchSem:       semaphore.NewWeighted(maxConcurrent),
-		maxBreakers:    maxBreakers,
-		cbThreshold:    resolveCBThreshold(cfg.CircuitBreaker.Threshold),
-		cbResetTimeout: resolveCBResetTimeout(cfg.CircuitBreaker.ResetTimeout),
-		done:           make(chan struct{}),
+		httpURL:         cfg.HTTP.URL,
+		httpClient:      &http.Client{Timeout: timeout, Transport: transport},
+		timeout:         timeout,
+		headerFilter:    config.NewHeaderFilter(cfg.HeaderFilter),
+		cacheKeyExclude: cacheKeyExclude,
+		redisClient:     redisClient,
+		maxLatency:      maxLatency,
+		fetchSem:        semaphore.NewWeighted(maxConcurrent),
+		maxBreakers:     maxBreakers,
+		cbThreshold:     resolveCBThreshold(cfg.CircuitBreaker.Threshold),
+		cbResetTimeout:  resolveCBResetTimeout(cfg.CircuitBreaker.ResetTimeout),
+		done:            make(chan struct{}),
+		logger:          logger,
 	}
 
 	// Establish gRPC connection if configured.
@@ -340,6 +429,14 @@ func (ec *ExternalClient) SetMetricHooks(onSemReject, onSFShare func()) {
 	ec.onSingleflightShare = onSFShare
 }
 
+// SetCacheMetricHooks configures optional callbacks for cache hit/miss/stale
+// events. Must be called before the client is used.
+func (ec *ExternalClient) SetCacheMetricHooks(onHit, onMiss, onStaleHit func()) {
+	ec.onCacheHit = onHit
+	ec.onCacheMiss = onMiss
+	ec.onCacheStaleHit = onStaleHit
+}
+
 // GetLimits fetches rate limits for the given key. Returns cached results from
 // Redis if available. On cache miss, calls the external service and caches the
 // response. Cache TTL is resolved as follows:
@@ -355,59 +452,56 @@ func (ec *ExternalClient) SetMetricHooks(onSemReject, onSFShare func()) {
 // When the circuit breaker is open (external service unhealthy), stale cached
 // data is served if available, avoiding latency spikes on the hot path.
 func (ec *ExternalClient) GetLimits(ctx context.Context, req *ExternalRequest) (*ExternalLimits, error) {
-	// Try Redis cache first.
-	if cached := ec.getFromCache(ctx, req.Key); cached != nil {
+	lk := ec.lookupKey(req)
+
+	if cached := ec.getFromCache(ctx, lk); cached != nil {
+		ec.emitCacheHit()
+		ec.log().Debug("external RL cache hit", "lookup_key", lk)
 		return cached, nil
 	}
 
-	// If per-tenant circuit breaker is open, try stale cache before failing.
-	if ec.isCircuitOpen(req.Key) {
-		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
+	if ec.isCircuitOpen(lk) {
+		if stale := ec.tryStaleCache(ctx, lk, "circuit open"); stale != nil {
 			return stale, nil
 		}
-		return nil, fmt.Errorf("external rate limit service circuit breaker open for key %q", req.Key)
+		return nil, fmt.Errorf("external rate limit service circuit breaker open for key %q", lk)
 	}
 
-	// Acquire concurrency permit BEFORE singleflight. If the semaphore is
-	// full, fall back to stale cache instead of queuing — this prevents
-	// cascading latency when thousands of distinct keys miss simultaneously
-	// (e.g. after a Redis flush).
 	if !ec.fetchSem.TryAcquire(1) {
-		if ec.onSemaphoreReject != nil {
-			ec.onSemaphoreReject()
-		}
-		if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
+		ec.emitSemaphoreReject()
+		if stale := ec.tryStaleCache(ctx, lk, "semaphore full"); stale != nil {
 			return stale, nil
 		}
-		return nil, fmt.Errorf("external rate limit service semaphore full for key %q", req.Key)
+		return nil, fmt.Errorf("external rate limit service semaphore full for key %q", lk)
 	}
 	defer ec.fetchSem.Release(1)
 
-	// Use singleflight to collapse concurrent cache misses for the same key
-	// into one external call, preventing thundering herd on the control plane.
 	type sfResult struct {
 		limits *ExternalLimits
 		ttl    time.Duration
 	}
 
-	v, err, shared := ec.sfGroup.Do(req.Key, func() (any, error) {
-		// Double-check cache inside singleflight — another goroutine may
-		// have populated it while we were waiting.
-		if cached := ec.getFromCache(ctx, req.Key); cached != nil {
+	v, err, shared := ec.sfGroup.Do(lk, func() (any, error) {
+		if cached := ec.getFromCache(ctx, lk); cached != nil {
+			ec.emitCacheHit()
+			ec.log().Debug("external RL cache hit (singleflight recheck)", "lookup_key", lk)
 			return &sfResult{limits: cached}, nil
 		}
 
+		ec.emitCacheMiss()
+		ec.log().Debug("external RL cache miss, calling service", "lookup_key", lk)
+
 		limits, ttl, fetchErr := ec.fetchFromService(ctx, req)
 		if fetchErr != nil {
-			ec.recordFailure(req.Key)
-			if stale := ec.getStaleFromCache(ctx, req.Key); stale != nil {
+			ec.recordFailure(lk)
+			if stale := ec.tryStaleCache(ctx, lk, "fetch error"); stale != nil {
 				return &sfResult{limits: stale}, nil
 			}
 			return nil, fetchErr
 		}
-		ec.recordSuccess(req.Key)
-		ec.setInCache(ctx, req.Key, limits, ttl)
-		ec.setStaleInCache(ctx, req.Key, limits)
+		ec.recordSuccess(lk)
+		ec.setInCache(ctx, lk, limits, ttl)
+		ec.setStaleInCache(ctx, lk, limits)
 		return &sfResult{limits: limits, ttl: ttl}, nil
 	})
 
@@ -513,10 +607,11 @@ func (ec *ExternalClient) evictStaleBreakers() {
 // ---------------------------------------------------------------------------
 
 func (ec *ExternalClient) getStaleFromCache(ctx context.Context, key string) *ExternalLimits {
-	if ec.redisClient == nil {
+	rc := ec.redis()
+	if rc == nil {
 		return nil
 	}
-	data, err := ec.redisClient.Get(ctx, staleCachePrefix+key).Bytes()
+	data, err := rc.Get(ctx, staleCachePrefix+key).Bytes()
 	if err != nil {
 		return nil
 	}
@@ -532,25 +627,27 @@ func (ec *ExternalClient) getStaleFromCache(ctx context.Context, key string) *Ex
 }
 
 func (ec *ExternalClient) setStaleInCache(ctx context.Context, key string, limits *ExternalLimits) {
-	if ec.redisClient == nil {
+	rc := ec.redis()
+	if rc == nil {
 		return
 	}
 	data, err := json.Marshal(limits)
 	if err != nil {
 		return
 	}
-	_ = ec.redisClient.Set(ctx, staleCachePrefix+key, data, staleCacheTTL).Err()
+	_ = rc.Set(ctx, staleCachePrefix+key, data, staleCacheTTL).Err()
 }
 
 // getFromCache attempts to read cached limits from Redis.
 // Tries JSON first (current format), falls back to gob for rolling-deploy
 // compatibility with older versions that wrote gob.
 func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *ExternalLimits {
-	if ec.redisClient == nil {
+	rc := ec.redis()
+	if rc == nil {
 		return nil
 	}
 
-	data, err := ec.redisClient.Get(ctx, cacheKeyPrefix+key).Bytes()
+	data, err := rc.Get(ctx, cacheKeyPrefix+key).Bytes()
 	if err != nil {
 		return nil
 	}
@@ -568,7 +665,8 @@ func (ec *ExternalClient) getFromCache(ctx context.Context, key string) *Externa
 
 // setInCache stores limits in Redis with the given TTL using JSON encoding.
 func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *ExternalLimits, ttl time.Duration) {
-	if ec.redisClient == nil || ttl <= 0 {
+	rc := ec.redis()
+	if rc == nil || ttl <= 0 {
 		return
 	}
 
@@ -577,7 +675,7 @@ func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *Ex
 		return
 	}
 
-	_ = ec.redisClient.Set(ctx, cacheKeyPrefix+key, data, ttl).Err()
+	_ = rc.Set(ctx, cacheKeyPrefix+key, data, ttl).Err()
 }
 
 // getLimitsHTTP fetches limits via HTTP using the generated OpenAPI types
@@ -585,7 +683,6 @@ func (ec *ExternalClient) setInCache(ctx context.Context, key string, limits *Ex
 // TTL priority: HTTP cache headers > body cache fields > default TTL.
 func (ec *ExternalClient) getLimitsHTTP(ctx context.Context, req *ExternalRequest) (*ExternalLimits, time.Duration, error) {
 	wireReq := ratelimitv1http.GetLimitsRequest{
-		Key:     req.Key,
 		Headers: req.Headers,
 		Method:  req.Method,
 		Path:    req.Path,
@@ -691,7 +788,9 @@ func (ec *ExternalClient) resolveHTTPCacheTTL(h http.Header, limits *ExternalLim
 
 // resolveBodyCacheTTL determines the cache TTL from the response body's cache
 // control fields. This is the primary resolution path for gRPC and the fallback
-// path for HTTP (when no cache headers are present).
+// path for HTTP (when no cache headers are present). Returns 0 (don't cache)
+// when the response has no explicit cache directives — the external service
+// must opt in to caching via Cache-Control or body fields.
 func (ec *ExternalClient) resolveBodyCacheTTL(limits *ExternalLimits) time.Duration {
 	if limits.CacheNoStore {
 		return 0
@@ -699,7 +798,7 @@ func (ec *ExternalClient) resolveBodyCacheTTL(limits *ExternalLimits) time.Durat
 	if limits.CacheMaxAgeSec != nil && *limits.CacheMaxAgeSec > 0 {
 		return time.Duration(*limits.CacheMaxAgeSec) * time.Second
 	}
-	return ec.cacheTTL
+	return 0
 }
 
 // parseMaxAge extracts the max-age value from a Cache-Control header.
@@ -723,7 +822,6 @@ func (ec *ExternalClient) getLimitsGRPC(ctx context.Context, req *ExternalReques
 	defer cancel()
 
 	pbReq := &ratelimitv1.GetLimitsRequest{
-		Key:     req.Key,
 		Headers: req.Headers,
 		Method:  req.Method,
 		Path:    req.Path,
@@ -793,6 +891,12 @@ func backendProtocolFromProto(v ratelimitv1.BackendProtocol) string {
 	}
 }
 
+// LookupKey returns the cache/singleflight/circuit-breaker key for the given
+// request, applying the ephemeral header exclusion logic. Exported for testing.
+func (ec *ExternalClient) LookupKey(req *ExternalRequest) string {
+	return ec.lookupKey(req)
+}
+
 // FilterHeaders applies the configured header allow/deny list to the given
 // map in place, removing entries that should not be forwarded to the external
 // rate-limit service.
@@ -808,6 +912,21 @@ func (ec *ExternalClient) FilterHeaders(headers map[string]string) {
 // in a single pass, avoiding the allocate-then-delete pattern.
 func (ec *ExternalClient) BuildFilteredHeaders(h http.Header) map[string]string {
 	return ec.headerFilter.BuildFilteredHeaderMap(h)
+}
+
+// SetRedisClient replaces the Redis client used for caching. This is called
+// when Redis recovers after being unavailable at startup.
+func (ec *ExternalClient) SetRedisClient(client redis.Client) {
+	ec.redisClientMu.Lock()
+	ec.redisClient = client
+	ec.redisClientMu.Unlock()
+}
+
+func (ec *ExternalClient) redis() redis.Client {
+	ec.redisClientMu.RLock()
+	c := ec.redisClient
+	ec.redisClientMu.RUnlock()
+	return c
 }
 
 // Close shuts down the external client and releases resources, including

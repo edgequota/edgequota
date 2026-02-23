@@ -46,10 +46,10 @@ func findAccessLog(t *testing.T, data []byte) map[string]any {
 
 func testConfig(redisAddr string) *config.Config {
 	cfg := config.Defaults()
-	cfg.Backend.URL = "http://backend:8080"
-	cfg.RateLimit.Average = 10
-	cfg.RateLimit.Burst = 5
-	cfg.RateLimit.Period = "1s"
+	cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+	cfg.RateLimit.Static.Average = 10
+	cfg.RateLimit.Static.Burst = 5
+	cfg.RateLimit.Static.Period = "1s"
 	cfg.RateLimit.FailurePolicy = config.FailurePolicyPassThrough
 	cfg.Redis.Endpoints = []string{redisAddr}
 	cfg.Redis.Mode = config.RedisModeSingle
@@ -72,8 +72,8 @@ func TestNewChain(t *testing.T) {
 
 	t.Run("creates chain with no rate limit (average=0)", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
@@ -135,8 +135,8 @@ func TestChainServeHTTP(t *testing.T) {
 	t.Run("rate limits after burst exhaustion", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
-		cfg.RateLimit.Average = 2
-		cfg.RateLimit.Burst = 3
+		cfg.RateLimit.Static.Average = 2
+		cfg.RateLimit.Static.Burst = 3
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -168,8 +168,8 @@ func TestChainServeHTTP(t *testing.T) {
 
 	t.Run("passes through when rate limit disabled (average=0)", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -215,8 +215,8 @@ func TestChainServeHTTP(t *testing.T) {
 		cfg := testConfig("127.0.0.1:1")
 		cfg.Redis.DialTimeout = "100ms"
 		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
-		cfg.RateLimit.Average = 2
-		cfg.RateLimit.Burst = 2
+		cfg.RateLimit.Static.Average = 2
+		cfg.RateLimit.Static.Burst = 2
 		metrics := testMetrics()
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -254,7 +254,7 @@ func TestChainServeHTTP(t *testing.T) {
 	t.Run("returns 500 on key extraction failure", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 		cfg := testConfig(mr.Addr())
-		cfg.RateLimit.KeyStrategy = config.KeyStrategyConfig{
+		cfg.RateLimit.Static.KeyStrategy = config.KeyStrategyConfig{
 			Type:       config.KeyStrategyHeader,
 			HeaderName: "X-Tenant-Id",
 		}
@@ -292,8 +292,8 @@ func TestChainClose(t *testing.T) {
 
 	t.Run("closes with no limiter", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 		chain, err := NewChain(context.Background(), next, cfg, testLogger(), testMetrics())
@@ -514,8 +514,8 @@ func TestStatusWriterBytesWritten(t *testing.T) {
 func TestAccessLog(t *testing.T) {
 	t.Run("emits structured access log entry", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -554,8 +554,8 @@ func TestAccessLog(t *testing.T) {
 
 	t.Run("no access log when disabled", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		disabled := false
 		cfg.Logging.AccessLog = &disabled
 
@@ -620,8 +620,8 @@ func TestAccessLog(t *testing.T) {
 
 	t.Run("access log includes enriched fields", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -657,8 +657,8 @@ func TestAccessLog(t *testing.T) {
 func TestConcurrencySemaphore(t *testing.T) {
 	t.Run("returns 503 when max concurrent requests exceeded", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Server.MaxConcurrentRequests = 1
 
 		blocked := make(chan struct{})
@@ -692,8 +692,8 @@ func TestConcurrencySemaphore(t *testing.T) {
 
 	t.Run("allows request when under limit", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Server.MaxConcurrentRequests = 10
 
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -711,8 +711,8 @@ func TestConcurrencySemaphore(t *testing.T) {
 
 	t.Run("no limit when max_concurrent_requests is 0", func(t *testing.T) {
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Server.MaxConcurrentRequests = 0
 
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -743,8 +743,8 @@ func TestAllowedInjectionHeaders(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		cfg.Auth.AllowedInjectionHeaders = []string{"X-Forwarded-For"}
@@ -781,8 +781,8 @@ func TestAllowedInjectionHeaders(t *testing.T) {
 		defer authServer.Close()
 
 		cfg := config.Defaults()
-		cfg.Backend.URL = "http://backend:8080"
-		cfg.RateLimit.Average = 0
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
 		cfg.Auth.Enabled = true
 		cfg.Auth.HTTP.URL = authServer.URL
 		// AllowedInjectionHeaders is NOT set, so deny-list applies.

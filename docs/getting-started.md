@@ -36,9 +36,9 @@ EDGEQUOTA_CONFIG_FILE=config.example.yaml ./bin/edgequota
 ### With Environment Variables Only
 
 ```bash
-EDGEQUOTA_BACKEND_URL=http://localhost:3000 \
-EDGEQUOTA_RATE_LIMIT_AVERAGE=100 \
-EDGEQUOTA_RATE_LIMIT_BURST=50 \
+EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL=http://localhost:3000 \
+EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE=100 \
+EDGEQUOTA_RATE_LIMIT_STATIC_BURST=50 \
 EDGEQUOTA_REDIS_ENDPOINTS=localhost:6379 \
 ./bin/edgequota
 ```
@@ -68,9 +68,9 @@ make docker
 
 # Run
 docker run --rm -p 8080:8080 -p 9090:9090 \
-  -e EDGEQUOTA_BACKEND_URL=http://host.docker.internal:3000 \
-  -e EDGEQUOTA_RATE_LIMIT_AVERAGE=100 \
-  -e EDGEQUOTA_RATE_LIMIT_BURST=50 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL=http://host.docker.internal:3000 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE=100 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_BURST=50 \
   -e EDGEQUOTA_REDIS_ENDPOINTS=host.docker.internal:6379 \
   edgequota:dev
 ```
@@ -94,15 +94,15 @@ data:
       address: ":8080"
     admin:
       address: ":9090"
-    backend:
-      url: "http://my-backend-service:8080"
     rate_limit:
-      average: 100
-      burst: 50
-      period: "1s"
-      key_strategy:
-        type: "header"
-        header_name: "X-Tenant-Id"
+      static:
+        backend_url: "http://my-backend-service:8080"
+        average: 100
+        burst: 50
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
     redis:
       endpoints:
         - "redis:6379"
@@ -241,24 +241,25 @@ All other configuration is done through the config file or `EDGEQUOTA_*` environ
 
 ## Minimal Configuration
 
-The only required field is `backend.url`:
+The only required field is `rate_limit.static.backend_url`:
 
 ```yaml
-backend:
-  url: "http://my-backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://my-backend:8080"
 ```
 
-Everything else has sensible defaults. Rate limiting is disabled when `rate_limit.average` is `0` (the default).
+Everything else has sensible defaults. Rate limiting is disabled when `rate_limit.static.average` is `0` (the default).
 
 ### Enable Rate Limiting
 
 ```yaml
-backend:
-  url: "http://my-backend:8080"
 rate_limit:
-  average: 100
-  burst: 50
-  period: "1s"
+  static:
+    backend_url: "http://my-backend:8080"
+    average: 100
+    burst: 50
+    period: "1s"
 redis:
   endpoints:
     - "redis:6379"
@@ -267,8 +268,9 @@ redis:
 ### Enable Authentication
 
 ```yaml
-backend:
-  url: "http://my-backend:8080"
+rate_limit:
+  static:
+    backend_url: "http://my-backend:8080"
 auth:
   enabled: true
   timeout: "5s"

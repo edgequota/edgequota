@@ -34,16 +34,15 @@ components:
   schemas:
     GetLimitsRequest:
       type: object
-      description: Identifies the client and context for limit lookup.
+      description: |
+        Identifies the client and context for limit lookup. The external service
+        derives the tenant/bucket key from headers, method, and path — EdgeQuota
+        does not send a pre-extracted key.
       required:
-        - key
         - headers
         - method
         - path
       properties:
-        key:
-          type: string
-          description: Rate limit bucket key (e.g. tenant ID, client IP).
         headers:
           type: object
           description: Flattened request headers for context.
@@ -87,6 +86,7 @@ components:
         - average
         - burst
         - period
+        - backend_url
       properties:
         average:
           type: integer
@@ -115,8 +115,10 @@ components:
         backend_url:
           type: string
           description: |
-            Backend URL override (optional). When non-empty, EdgeQuota proxies
-            this request to the given URL instead of the static backend.url.
+            Backend URL (required). EdgeQuota proxies this request to the given
+            URL. When external RL is active, the service must always return this
+            field. Responses with an empty backend_url are treated as malformed
+            and trigger the fallback path.
         request_timeout:
           type: string
           description: |

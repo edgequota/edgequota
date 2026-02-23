@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
@@ -56,6 +57,13 @@ func main() {
 
 	// WebSocket: echo server.
 	mux.Handle("/ws", websocket.Handler(handleWebSocket))
+
+	// Cache-test endpoints: each returns a unique call counter so the
+	// e2e tests can distinguish cached vs. fresh responses.
+	mux.HandleFunc("/cache/static", handleCacheStatic)
+	mux.HandleFunc("/cache/no-store", handleCacheNoStore)
+	mux.HandleFunc("/cache/tagged", handleCacheTagged)
+	mux.HandleFunc("/cache/large", handleCacheLarge)
 
 	// gRPC: register an echo service.
 	grpcServer := grpc.NewServer()
@@ -148,6 +156,56 @@ func main() {
 	}()
 
 	log.Fatalf("server: %v", <-errCh)
+}
+
+// ---------------------------------------------------------------------------
+// Cache-test handlers — each has an atomic counter to verify backend hits
+// ---------------------------------------------------------------------------
+
+var (
+	cacheStaticCounter  atomic.Int64
+	cacheNoStoreCounter atomic.Int64
+	cacheTaggedCounter  atomic.Int64
+	cacheLargeCounter   atomic.Int64
+)
+
+func handleCacheStatic(w http.ResponseWriter, _ *http.Request) {
+	n := cacheStaticCounter.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Backend", "testbackend")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"call": n, "endpoint": "cache-static"})
+}
+
+func handleCacheNoStore(w http.ResponseWriter, _ *http.Request) {
+	n := cacheNoStoreCounter.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Backend", "testbackend")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"call": n, "endpoint": "cache-no-store"})
+}
+
+func handleCacheTagged(w http.ResponseWriter, _ *http.Request) {
+	n := cacheTaggedCounter.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Backend", "testbackend")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Surrogate-Key", "product-123 category-electronics")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"call": n, "endpoint": "cache-tagged"})
+}
+
+func handleCacheLarge(w http.ResponseWriter, _ *http.Request) {
+	n := cacheLargeCounter.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Backend", "testbackend")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	// ~2 MB payload: well above the default 1 MB max_body_size.
+	padding := strings.Repeat("X", 2*1024*1024)
+	json.NewEncoder(w).Encode(map[string]any{"call": n, "endpoint": "cache-large", "padding": padding})
 }
 
 // ---------------------------------------------------------------------------

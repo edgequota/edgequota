@@ -14,6 +14,7 @@ const (
 	ksClientIP  = config.KeyStrategyClientIP
 	ksHeader    = config.KeyStrategyHeader
 	ksComposite = config.KeyStrategyComposite
+	ksGlobal    = config.KeyStrategyGlobal
 )
 
 // contextKey is an unexported type used for context value keys to prevent
@@ -178,6 +179,18 @@ func parseTrustedProxies(cidrs []string) ([]*net.IPNet, error) {
 	return nets, nil
 }
 
+// GlobalStrategy uses a fixed key for all requests, putting every request
+// into the same rate-limit bucket. Useful for FE/static assets or as a
+// fallback strategy when the external RL service is unavailable.
+type GlobalStrategy struct {
+	Key string
+}
+
+// Extract always returns the fixed global key.
+func (s *GlobalStrategy) Extract(_ *http.Request) (string, error) {
+	return s.Key, nil
+}
+
 // NewKeyStrategy creates a KeyStrategy from the configuration.
 func NewKeyStrategy(cfg config.KeyStrategyConfig) (KeyStrategy, error) {
 	switch cfg.Type {
@@ -203,7 +216,13 @@ func NewKeyStrategy(cfg config.KeyStrategyConfig) (KeyStrategy, error) {
 			HeaderName: http.CanonicalHeaderKey(cfg.HeaderName),
 			PathPrefix: cfg.PathPrefix,
 		}, nil
+	case ksGlobal:
+		key := cfg.GlobalKey
+		if key == "" {
+			key = "global"
+		}
+		return &GlobalStrategy{Key: key}, nil
 	default:
-		return nil, fmt.Errorf("unknown key strategy type %q: must be clientip, header, or composite", cfg.Type)
+		return nil, fmt.Errorf("unknown key strategy type %q: must be clientip, header, composite, or global", cfg.Type)
 	}
 }

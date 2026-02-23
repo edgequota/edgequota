@@ -67,6 +67,20 @@ type Metrics struct {
 	PromExtRLSemaphoreRejected  prometheus.Counter
 	PromExtRLSingleflightShared prometheus.Counter
 
+	// External RL cache metrics.
+	PromExtRLCacheHit      prometheus.Counter
+	PromExtRLCacheMiss     prometheus.Counter
+	PromExtRLCacheStaleHit prometheus.Counter
+
+	// Response cache metrics (CDN-style backend response caching).
+	PromRespCacheHit      prometheus.Counter
+	PromRespCacheMiss     prometheus.Counter
+	PromRespCacheStaleHit prometheus.Counter
+	PromRespCacheStore    prometheus.Counter
+	PromRespCacheSkip     prometheus.Counter
+	PromRespCachePurge    prometheus.Counter
+	PromRespCacheBodySize prometheus.Histogram
+
 	// Global concurrency limiter.
 	PromConcurrencyRejected prometheus.Counter
 
@@ -194,6 +208,57 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Namespace: "edgequota",
 			Name:      "external_rl_singleflight_shared_total",
 			Help:      "Number of external RL requests that shared a singleflight result.",
+		}),
+		PromExtRLCacheHit: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_cache_hits_total",
+			Help:      "Number of external RL lookups served from fresh Redis cache.",
+		}),
+		PromExtRLCacheMiss: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_cache_misses_total",
+			Help:      "Number of external RL lookups that required a service call (cache miss).",
+		}),
+		PromExtRLCacheStaleHit: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "external_rl_cache_stale_hits_total",
+			Help:      "Number of external RL lookups served from stale cache (circuit open, semaphore full, or fetch error).",
+		}),
+		PromRespCacheHit: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_hits_total",
+			Help:      "Number of backend responses served from response cache.",
+		}),
+		PromRespCacheMiss: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_misses_total",
+			Help:      "Number of response cache misses that required proxying to backend.",
+		}),
+		PromRespCacheStaleHit: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_stale_hits_total",
+			Help:      "Number of stale cache entries revalidated via conditional request (304).",
+		}),
+		PromRespCacheStore: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_stores_total",
+			Help:      "Number of backend responses stored in the response cache.",
+		}),
+		PromRespCacheSkip: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_skips_total",
+			Help:      "Number of backend responses skipped for caching (no-store, too large, streaming).",
+		}),
+		PromRespCachePurge: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_purges_total",
+			Help:      "Number of response cache purge operations.",
+		}),
+		PromRespCacheBodySize: factory.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "edgequota",
+			Name:      "response_cache_body_size_bytes",
+			Help:      "Distribution of cached response body sizes in bytes.",
+			Buckets:   []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304},
 		}),
 		PromConcurrencyRejected: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",

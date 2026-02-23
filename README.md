@@ -10,6 +10,7 @@ It is purpose-built for multi-tenant systems that require:
 
 - **Distributed rate limiting** with Redis-backed atomic token buckets.
 - **Dynamic quota resolution** via an optional external service.
+- **CDN-style response caching** honoring `Cache-Control` from any upstream origin — with tag-based invalidation, conditional requests, and configurable body size limits.
 - **Pluggable authentication** forwarding to external auth services.
 - **Multi-protocol proxying** over HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, and WebSocket — all on a single port.
 - **Horizontal scalability** with fully stateless instances coordinated through Redis.
@@ -26,6 +27,7 @@ EdgeQuota is written in Go with zero CGO dependencies, ships as a distroless con
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Rate Limiting](#rate-limiting)
+- [Response Caching](#response-caching-cdn)
 - [Authentication](#authentication)
 - [Protocol Support](#protocol-support)
 - [Observability](#observability)
@@ -79,8 +81,17 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 
 - Query an external service for per-request rate limits based on the extracted key.
 - Supports multi-tenant use cases where different tenants have different quotas.
-- **Tenant-aware backend routing:** the external service can return a `backend_url` per tenant, directing each tenant's traffic to a different upstream — no static backend required.
+- **Tenant-aware backend routing:** the external service must return `backend_url` in every response (required when external RL is enabled). Responses without it trigger the fallback path. Configurable `fallback.backend_url` for when the external service is unreachable.
 - Responses are cached locally with a configurable TTL to minimize external calls.
+
+### Response Caching (CDN)
+
+- Cache backend responses in Redis, honoring standard `Cache-Control` semantics (`max-age`, `no-store`, `no-cache`, `private`, `public`).
+- Purely response-driven — backends opt in via `Cache-Control` headers. No implicit caching.
+- Tag-based invalidation via `Surrogate-Key` / `Cache-Tag` headers and `POST /v1/cache/purge/tags`.
+- Conditional request support with `ETag` / `Last-Modified` (304 revalidation).
+- Configurable body size limits (`max_body_size`, default 1 MB).
+- Optional dedicated `response_cache_redis` for separating cache workloads from rate-limit counters.
 
 ### Multi-Protocol Reverse Proxy
 
@@ -153,9 +164,9 @@ make build
 EDGEQUOTA_CONFIG_FILE=config.example.yaml ./bin/edgequota
 
 # Run with environment variables only
-EDGEQUOTA_BACKEND_URL=http://my-backend:8080 \
-EDGEQUOTA_RATE_LIMIT_AVERAGE=100 \
-EDGEQUOTA_RATE_LIMIT_BURST=50 \
+EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL=http://my-backend:8080 \
+EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE=100 \
+EDGEQUOTA_RATE_LIMIT_STATIC_BURST=50 \
 ./bin/edgequota
 ```
 
@@ -167,8 +178,9 @@ make docker
 
 # Run
 docker run --rm -p 8080:8080 -p 9090:9090 \
-  -e EDGEQUOTA_BACKEND_URL=http://backend:8080 \
-  -e EDGEQUOTA_RATE_LIMIT_AVERAGE=100 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL=http://backend:8080 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE=100 \
+  -e EDGEQUOTA_RATE_LIMIT_STATIC_BURST=50 \
   edgequota:dev
 ```
 
@@ -186,14 +198,17 @@ data:
     admin:
       address: ":9090"
     backend:
-      url: "http://my-backend-service:8080"
+      timeout: "30s"
+      max_idle_conns: 100
     rate_limit:
-      average: 100
-      burst: 50
-      period: "1s"
-      key_strategy:
-        type: "header"
-        header_name: "X-Tenant-Id"
+      static:
+        backend_url: "http://my-backend-service:8080"
+        average: 100
+        burst: 50
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
     redis:
       endpoints:
         - "redis:6379"
@@ -268,9 +283,10 @@ EdgeQuota is configured via a YAML file (default: `/etc/edgequota/config.yaml`) 
 | YAML Path | Environment Variable | Default |
 |---|---|---|
 | `server.address` | `EDGEQUOTA_SERVER_ADDRESS` | `:8080` |
-| `backend.url` | `EDGEQUOTA_BACKEND_URL` | *(required unless `rate_limit.external` is enabled)* |
-| `rate_limit.average` | `EDGEQUOTA_RATE_LIMIT_AVERAGE` | `0` (disabled) |
-| `rate_limit.burst` | `EDGEQUOTA_RATE_LIMIT_BURST` | `1` |
+| `rate_limit.static.backend_url` | `EDGEQUOTA_RATE_LIMIT_STATIC_BACKEND_URL` | *(required when external RL disabled)* |
+| `rate_limit.external.fallback.backend_url` | `EDGEQUOTA_RATE_LIMIT_EXTERNAL_FALLBACK_BACKEND_URL` | *(required when external RL enabled)* |
+| `rate_limit.static.average` | `EDGEQUOTA_RATE_LIMIT_STATIC_AVERAGE` | `0` (disabled) |
+| `rate_limit.static.burst` | `EDGEQUOTA_RATE_LIMIT_STATIC_BURST` | `1` |
 | `rate_limit.failure_policy` | `EDGEQUOTA_RATE_LIMIT_FAILURE_POLICY` | `passThrough` |
 | `redis.endpoints` | `EDGEQUOTA_REDIS_ENDPOINTS` | `localhost:6379` |
 | `redis.mode` | `EDGEQUOTA_REDIS_MODE` | `single` |
@@ -292,6 +308,7 @@ EdgeQuota uses a **distributed token bucket** algorithm executed as a single ato
 | `clientIP` | X-Forwarded-For, X-Real-IP, RemoteAddr | `10.0.0.1` | `type: "clientIP"` |
 | `header` | Named request header | `tenant-123` | `type: "header"`, `header_name: "X-Tenant-Id"` |
 | `composite` | Header + first path segment | `tenant-123:api` | `type: "composite"`, `header_name: "X-Tenant-Id"`, `path_prefix: true` |
+| `global` | Fixed key (all requests share one bucket) | `global` | `type: "global"` (optionally `global_key: "custom"`) |
 
 ### Failure Policies
 
@@ -314,15 +331,16 @@ A background recovery loop automatically reconnects to Redis with exponential ba
 
 ### External Rate Limit Service
 
-When `rate_limit.external.enabled` is `true`, EdgeQuota queries an external service for **per-request** rate limits instead of using the static `average`/`burst`/`period` values. This enables multi-tenant scenarios where each tenant has different quotas managed in a backend database.
+When `rate_limit.external.enabled` is `true`, EdgeQuota queries an external service for **per-request** rate limits instead of using the static `rate_limit.static` values. This enables multi-tenant scenarios where each tenant has different quotas managed in a backend database.
+
+**No key in request:** When external RL is enabled, EdgeQuota skips local key extraction and does not send a `key` field. The request contains only `headers`, `method`, and `path`. The external service derives tenant keys from these — for example, from `X-Tenant-Id`, path segments, or host-based routing.
+
+**Fallback block:** When the external service is unreachable (timeout, circuit open, etc.), EdgeQuota uses `rate_limit.external.fallback` — a required block with `average`, `burst`, `period`, and `key_strategy`. This ensures predictable behavior during outages.
 
 **HTTP example:**
 
 ```yaml
 rate_limit:
-  average: 100        # fallback when external service is unreachable
-  burst: 50
-  period: "1s"
   external:
     enabled: true
     timeout: "5s"
@@ -330,6 +348,18 @@ rate_limit:
     max_concurrent_requests: 50
     http:
       url: "http://limits-service:8080/limits"
+    header_filter:
+      allow_list:
+        - "X-Tenant-Id"
+        - "X-Plan"
+    fallback:
+      backend_url: "http://my-backend:8080"
+      average: 100
+      burst: 50
+      period: "1s"
+      key_strategy:
+        type: "header"
+        header_name: "X-Tenant-Id"
 ```
 
 **gRPC example:**
@@ -345,21 +375,31 @@ rate_limit:
       tls:
         enabled: true
         ca_file: "/etc/edgequota/tls/limits-ca.pem"
+    fallback:
+      backend_url: "http://my-backend:8080"
+      average: 5000
+      burst: 2000
+      period: "1s"
+      key_strategy:
+        type: "global"
+        global_key: "fe-assets"
 ```
+
+When external RL is enabled, the `static` block is not used. Configure only `external` with its required `fallback`.
 
 The external service receives the extracted key, request headers, method, and path, and returns dynamic limits:
 
 | Response Field | Description |
 |---|---|
-| `average`, `burst`, `period` | Override static rate-limit parameters |
+| `average`, `burst`, `period` | Override `rate_limit.static` parameters |
 | `tenant_key` | Custom Redis bucket key (replaces the extracted key) |
-| `backend_url` | Per-request backend override (e.g. route tenant to dedicated cluster) |
+| `backend_url` | Per-request backend URL (required; responses without it use fallback) |
 | `failure_policy`, `failure_code` | Per-tenant Redis-down behavior |
 | `cache_max_age_seconds`, `cache_no_store` | Response-level cache control |
 
-Responses are cached in Redis (shared across all instances) with singleflight deduplication. A per-key **circuit breaker** opens after 5 consecutive failures and falls back to stale cache, then to the static config values.
+Responses are cached in Redis (shared across all instances) with singleflight deduplication. A per-key **circuit breaker** opens after 5 consecutive failures and falls back to stale cache, then to the `rate_limit.external.fallback` values (or `rate_limit.static` when fallback is not used).
 
-See [docs/rate-limiting.md](docs/rate-limiting.md) for algorithm details, the full external service protocol, caching semantics, and distributed correctness analysis.
+See [docs/rate-limiting.md](docs/rate-limiting.md) for algorithm details, the full external service protocol, caching semantics, and distributed correctness analysis. See [docs/deployment.md](docs/deployment.md) for production topology and deployment scenarios.
 
 ---
 
@@ -498,6 +538,7 @@ Browse the full documentation at [docs/index.md](docs/index.md) or use the table
 | [docs/getting-started.md](docs/getting-started.md) | Quick start guide for binary, Docker, and Kubernetes |
 | [docs/configuration.md](docs/configuration.md) | Full configuration reference with every field documented |
 | [docs/rate-limiting.md](docs/rate-limiting.md) | Algorithm, distributed correctness, Redis atomicity, key naming |
+| [docs/caching.md](docs/caching.md) | CDN-style response caching, Cache-Control, invalidation, conditional requests |
 | [docs/authentication.md](docs/authentication.md) | Auth flow, security model, timeout and retry strategy |
 | [docs/proxy.md](docs/proxy.md) | Multi-protocol proxy: HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, WebSocket |
 | [docs/events.md](docs/events.md) | Async usage event emission via HTTP/gRPC webhooks |

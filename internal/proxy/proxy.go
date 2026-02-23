@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/quic-go/quic-go"
@@ -144,6 +145,22 @@ func WithDenyPrivateNetworks() Option {
 // for WebSocket upgrade requests. When non-empty, the proxy rejects upgrades
 // whose Origin does not match any entry (case-insensitive scheme+host
 // comparison). An empty list allows all origins (backward compatible).
+// WithCache enables CDN-style response caching. When set, cacheable
+// backend responses (with Cache-Control: max-age) are stored and served
+// from cache on subsequent matching requests.
+func WithCache(store *cache.Store) Option {
+	return func(p *Proxy) {
+		p.cache = store
+	}
+}
+
+// SetCache sets the response cache store. Thread-safe for use during
+// hot-reload, but callers should ensure no in-flight requests reference
+// a stale store.
+func (p *Proxy) SetCache(store *cache.Store) {
+	p.cache = store
+}
+
 func WithAllowedWSOrigins(origins []string) Option {
 	return func(p *Proxy) {
 		if len(origins) > 0 {
@@ -274,6 +291,7 @@ type Proxy struct {
 	maxWSTransferBytes  int64               // 0 = unlimited per-direction
 	wsIdleTimeout       time.Duration       // 0 = no idle timeout
 	allowedWSOrigins    map[string]struct{} // nil = allow all origins
+	cache               *cache.Store        // nil when response caching is disabled
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -650,9 +668,73 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// that httputil.ReverseProxy would normally strip).
 	if isGRPC(r) {
 		r.Header.Set("TE", "trailers")
+		p.httpProxy.ServeHTTP(w, r)
+		return
+	}
+
+	if p.cache != nil && r.Method == http.MethodGet && !IsSSE(r) {
+		if p.serveCached(w, r) {
+			return
+		}
+		p.proxyWithCache(w, r)
+		return
 	}
 
 	p.httpProxy.ServeHTTP(w, r)
+}
+
+// proxyWithCache wraps the upstream call with a CachingResponseWriter so that
+// cacheable backend responses are stored. It also handles conditional requests:
+// if the client didn't send If-None-Match/If-Modified-Since but we have a
+// stale cache entry, we inject those headers so the backend can return 304.
+func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
+	cacheKey := p.cache.KeyFromRequest(r, nil)
+	if p.cache.OnMiss != nil {
+		p.cache.OnMiss()
+	}
+	p.logger.Debug("response cache miss", "key", cacheKey)
+
+	cw := cache.NewCachingResponseWriter(w, p.cache, r)
+	p.httpProxy.ServeHTTP(cw, r)
+	cw.Finish(r.Context(), cacheKey)
+}
+
+// serveCached checks the response cache and serves a cached entry if available.
+// Returns true if the response was served from cache, false on miss.
+func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request) bool {
+	cacheKey := p.cache.KeyFromRequest(r, nil)
+
+	entry, ok := p.cache.Get(r.Context(), cacheKey)
+	if !ok {
+		return false
+	}
+
+	// If the entry has a Vary header, recompute the cache key with
+	// the Vary headers and re-check.
+	if len(entry.Vary) > 0 {
+		varyKey := p.cache.KeyFromRequest(r, entry.Vary)
+		if varyKey != cacheKey {
+			entry, ok = p.cache.Get(r.Context(), varyKey)
+			if !ok {
+				return false
+			}
+		}
+	}
+
+	if p.cache.OnHit != nil {
+		p.cache.OnHit()
+	}
+	p.logger.Debug("response cache hit", "key", cacheKey)
+
+	for k, vals := range entry.Headers {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Cache", "HIT")
+	w.WriteHeader(entry.StatusCode)
+	_, _ = w.Write(entry.Body) //nolint:gosec // body is from our own cache, not user input
+	return true
 }
 
 // handleWebSocket performs a WebSocket upgrade and bidirectional relay.

@@ -123,13 +123,14 @@ data:
       timeout: "30s"
       max_idle_conns: 200
     rate_limit:
-      average: 100
-      burst: 50
-      period: "1s"
+      static:
+        average: 100
+        burst: 50
+        period: "1s"
+        key_strategy:
+          type: "header"
+          header_name: "X-Tenant-Id"
       failure_policy: "passThrough"
-      key_strategy:
-        type: "header"
-        header_name: "X-Tenant-Id"
     redis:
       endpoints:
         - "redis-master:6379"
