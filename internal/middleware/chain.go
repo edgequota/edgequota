@@ -388,6 +388,10 @@ func NewChain(
 		chain.fallbackTTL = fbTTL
 		chain.fallbackAverage = fb.Average
 		chain.fallbackLimiter = ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second)
+		logger.Info("external RL fallback config ready",
+			"fallback_average", fb.Average, "fallback_burst", fbBurst,
+			"fallback_period", fb.Period, "fallback_backend_url", fb.BackendURL,
+			"fallback_key_strategy", fb.KeyStrategy.Type)
 	}
 	chain.accessLog.Store(cfg.Logging.AccessLogEnabled())
 	chain.cfg.Store(cfg)
@@ -603,7 +607,12 @@ func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitPa
 		return c.handleRedisStartupFailure(redisErr, p.failurePolicy, logger)
 	}
 
-	if p.ratePerSecond > 0 {
+	// Keep the Redis client and create a limiter whenever either static rate limiting
+	// or external RL is active. In external RL mode (static.Average=0), the limiter
+	// is created with ratePerSecond=0 so the Lua script's "rate <= 0 → always allow"
+	// path is taken for the base Allow call, while AllowWithOverrides is used for
+	// per-request limits supplied by the external service.
+	if p.ratePerSecond > 0 || cfg.RateLimit.External.Enabled {
 		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix, logger)
 	} else if client != nil {
 		_ = client.Close()
@@ -1072,11 +1081,17 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 		if fbKS := c.fallbackKeyStrategy.Load(); fbKS != nil {
 			fbKey, fbErr := (*fbKS).Extract(r)
 			if fbErr != nil {
-				c.logger.Warn("fallback key extraction failed, using static config", "error", fbErr)
+				c.logger.Warn("fallback key extraction failed, using static config",
+					"error", fbErr, "ext_error", extErr)
 				return nil, resolvedKey
 			}
+			fb := c.cfg.Load().RateLimit.External.Fallback
 			c.logger.Warn("external rate limit service error, using fallback config",
-				"error", extErr, "fallback_key", fbKey)
+				"error", extErr,
+				"fallback_key", fbKey,
+				"fallback_average", c.fallbackAverage,
+				"fallback_burst", c.fallbackBurst,
+				"fallback_backend_url", fb.BackendURL)
 			return &ratelimit.ExternalLimits{
 				Average: c.fallbackAverage,
 				Burst:   c.fallbackBurst,
@@ -1101,6 +1116,12 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 				c.logger.Warn("fallback key extraction failed after missing backend_url", "error", fbErr)
 				return nil, resolvedKey
 			}
+			fb := c.cfg.Load().RateLimit.External.Fallback
+			c.logger.Warn("external service response missing backend_url, using fallback config",
+				"fallback_key", fbKey,
+				"fallback_average", c.fallbackAverage,
+				"fallback_burst", c.fallbackBurst,
+				"fallback_backend_url", fb.BackendURL)
 			return &ratelimit.ExternalLimits{
 				Average: c.fallbackAverage,
 				Burst:   c.fallbackBurst,
@@ -1344,11 +1365,15 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		c.metrics.IncFallbackUsed()
 		if c.fallback.Allow(key) {
 			c.metrics.IncAllowed()
+			c.logger.Debug("in-memory fallback: request allowed",
+				"key", key, "average", c.ratePerSecond, "burst", c.burst)
 			backendStart := time.Now()
 			(*c.next.Load()).ServeHTTP(w, r)
 			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 		} else {
 			c.metrics.IncLimited()
+			c.logger.Debug("in-memory fallback: request rate-limited",
+				"key", key, "average", c.ratePerSecond, "burst", c.burst)
 			c.serveRateLimited(w, &ratelimit.Result{
 				RetryAfter: time.Second,
 				Limit:      c.burst,
@@ -1481,7 +1506,10 @@ func (c *Chain) recoveryRetry(backoff *time.Duration, attempt, maxAttempts int, 
 }
 
 func (c *Chain) recoveryInstall(client redis.Client) {
-	if c.ratePerSecond <= 0 {
+	// In external RL mode, a limiter is required even when ratePerSecond=0 so that
+	// tryRedisLimit can apply per-request limits from the external service. Only skip
+	// limiter creation when neither static rate limiting nor external RL is active.
+	if c.ratePerSecond <= 0 && !c.cfg.Load().RateLimit.External.Enabled {
 		c.mu.Lock()
 		old := c.swapLimiterLocked(nil)
 		c.redisUnhealthy = false
