@@ -157,6 +157,14 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	writeTimeout, _ := config.ParseDuration(cfg.Server.WriteTimeout, 30*time.Second)
 	idleTimeout, _ := config.ParseDuration(cfg.Server.IdleTimeout, 120*time.Second)
 
+	// Store the write timeout in the chain so it can apply per-request
+	// deadlines via ResponseController. We do NOT set http.Server.WriteTimeout
+	// because it is an absolute wall-clock deadline from when the request
+	// headers are read — it kills SSE, WebSocket, and gRPC streams that
+	// legitimately outlive the timeout. Instead, the chain sets write
+	// deadlines only on non-streaming responses.
+	chain.SetWriteTimeout(writeTimeout)
+
 	// When TLS is enabled, Go's native HTTP/2 (via NextProtos in tls.Config)
 	// handles h2 negotiation. h2c.NewHandler is only needed for cleartext
 	// HTTP/2 upgrades (e.g. gRPC without TLS).
@@ -205,7 +213,6 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		Addr:              cfg.Server.Address,
 		Handler:           mainHandler,
 		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB — explicit default to prevent large-header DoS.

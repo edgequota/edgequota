@@ -659,14 +659,14 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 // Request body size enforcement is handled by the streamingTransport layer,
 // which counts bytes during streaming rather than buffering the entire body.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if isWebSocketUpgrade(r) {
+	if IsWebSocketUpgrade(r) {
 		p.handleWebSocket(w, r)
 		return
 	}
 
 	// For gRPC, ensure TE: trailers is preserved (it's a hop-by-hop header
 	// that httputil.ReverseProxy would normally strip).
-	if isGRPC(r) {
+	if IsGRPC(r) {
 		r.Header.Set("TE", "trailers")
 		p.httpProxy.ServeHTTP(w, r)
 		return
@@ -947,13 +947,13 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 // Protocol detection
 // ---------------------------------------------------------------------------
 
-// isGRPC returns true if the request appears to be a gRPC call.
-func isGRPC(r *http.Request) bool {
+// IsGRPC returns true if the request appears to be a gRPC call.
+func IsGRPC(r *http.Request) bool {
 	return strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 }
 
-// isWebSocketUpgrade returns true if the request is a WebSocket upgrade.
-func isWebSocketUpgrade(r *http.Request) bool {
+// IsWebSocketUpgrade returns true if the request is a WebSocket upgrade.
+func IsWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
@@ -988,7 +988,7 @@ type protocolAwareTransport struct {
 }
 
 func (t *protocolAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if isGRPC(req) {
+	if IsGRPC(req) {
 		return t.h2.RoundTrip(req)
 	}
 	if proto := backendProtocolFromContext(req.Context()); proto != "" {

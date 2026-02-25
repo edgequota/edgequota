@@ -315,19 +315,19 @@ func TestIsGRPC(t *testing.T) {
 	t.Run("detects gRPC request", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "/", nil)
 		req.Header.Set("Content-Type", "application/grpc")
-		assert.True(t, isGRPC(req))
+		assert.True(t, IsGRPC(req))
 	})
 
 	t.Run("detects gRPC+proto request", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "/", nil)
 		req.Header.Set("Content-Type", "application/grpc+proto")
-		assert.True(t, isGRPC(req))
+		assert.True(t, IsGRPC(req))
 	})
 
 	t.Run("rejects non-gRPC request", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Content-Type", "application/json")
-		assert.False(t, isGRPC(req))
+		assert.False(t, IsGRPC(req))
 	})
 }
 
@@ -336,25 +336,25 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Upgrade", "websocket")
 		req.Header.Set("Connection", "Upgrade")
-		assert.True(t, isWebSocketUpgrade(req))
+		assert.True(t, IsWebSocketUpgrade(req))
 	})
 
 	t.Run("case insensitive", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Upgrade", "WebSocket")
 		req.Header.Set("Connection", "upgrade")
-		assert.True(t, isWebSocketUpgrade(req))
+		assert.True(t, IsWebSocketUpgrade(req))
 	})
 
 	t.Run("rejects non-WebSocket", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
-		assert.False(t, isWebSocketUpgrade(req))
+		assert.False(t, IsWebSocketUpgrade(req))
 	})
 
 	t.Run("rejects upgrade without connection header", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Upgrade", "websocket")
-		assert.False(t, isWebSocketUpgrade(req))
+		assert.False(t, IsWebSocketUpgrade(req))
 	})
 }
 

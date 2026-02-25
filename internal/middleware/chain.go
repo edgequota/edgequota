@@ -216,6 +216,7 @@ type Chain struct {
 	// (hot path) without holding mu, and written by Reload. Using atomic
 	// types avoids a data race without adding lock contention.
 	requestTimeout atomic.Value // time.Duration
+	writeTimeout   atomic.Value // time.Duration — per-request write deadline for non-streaming responses
 	urlPolicy      atomic.Value // proxy.BackendURLPolicy
 	accessLog      atomic.Bool
 
@@ -368,6 +369,7 @@ func NewChain(
 		chain.proxyRef = pp
 	}
 	chain.requestTimeout.Store(reqTimeout)
+	chain.writeTimeout.Store(time.Duration(0))
 	chain.urlPolicy.Store(proxy.BackendURLPolicy{
 		AllowedSchemes:      cfg.Backend.URLPolicy.AllowedSchemes,
 		DenyPrivateNetworks: cfg.Backend.URLPolicy.DenyPrivateNetworksEnabled(),
@@ -794,6 +796,12 @@ func ensureRequestID(r *http.Request) string {
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	// Apply per-request write deadline early, before any response bytes.
+	// Streaming requests (SSE, WebSocket, gRPC) get an unlimited deadline;
+	// regular requests get the configured write_timeout.
+	c.applyWriteDeadline(w, r)
+
 	sw := statusWriterPool.Get().(*statusWriter)
 	sw.ResponseWriter = w
 	sw.code = http.StatusOK
@@ -840,8 +848,6 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var key string
 	if c.externalRL.Load() != nil {
-		// When external RL is active, skip local key extraction entirely.
-		// The external service owns key derivation from headers/path/Host.
 		key = ""
 	} else {
 		var err error
@@ -862,7 +868,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logRLKey = resolvedKey
 	logTenantID = extractTenantID(resolvedKey)
 
-	ctx, cancel := c.applyRequestTimeout(ctx, extLimits)
+	ctx, cancel := c.applyRequestTimeout(ctx, r, extLimits)
 	if cancel != nil {
 		defer cancel()
 	}
@@ -882,10 +888,29 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.handleRedisFailurePolicy(sw, r, resolvedKey, extLimits)
 }
 
+// SetWriteTimeout stores the per-request write deadline applied to
+// non-streaming responses via http.ResponseController. Called by
+// buildMainServer after parsing the config.
+func (c *Chain) SetWriteTimeout(d time.Duration) {
+	c.writeTimeout.Store(d)
+}
+
+// isStreamingRequest returns true for SSE, WebSocket upgrades, and gRPC
+// streams — protocols that are inherently long-lived and must not be
+// subject to the server's write timeout or per-request context deadline.
+func isStreamingRequest(r *http.Request) bool {
+	return proxy.IsSSE(r) || proxy.IsWebSocketUpgrade(r) || proxy.IsGRPC(r)
+}
+
 // applyRequestTimeout returns a context with a timeout derived from the global
 // config and optionally overridden by the external rate-limit response. The
 // caller must defer the returned cancel func when non-nil.
-func (c *Chain) applyRequestTimeout(ctx context.Context, extLimits *ratelimit.ExternalLimits) (context.Context, context.CancelFunc) {
+// Streaming requests (SSE, WebSocket, gRPC) are exempt — they are long-lived
+// by design and must not be killed by a request-scoped deadline.
+func (c *Chain) applyRequestTimeout(ctx context.Context, r *http.Request, extLimits *ratelimit.ExternalLimits) (context.Context, context.CancelFunc) {
+	if isStreamingRequest(r) {
+		return ctx, nil
+	}
 	timeout := c.requestTimeout.Load().(time.Duration)
 	if extLimits != nil && extLimits.RequestTimeout != "" {
 		if d, parseErr := time.ParseDuration(extLimits.RequestTimeout); parseErr == nil && d > 0 {
@@ -896,6 +921,25 @@ func (c *Chain) applyRequestTimeout(ctx context.Context, extLimits *ratelimit.Ex
 		return context.WithTimeout(ctx, timeout)
 	}
 	return ctx, nil
+}
+
+// applyWriteDeadline sets a per-request write deadline on non-streaming
+// responses using http.ResponseController. Streaming requests (SSE,
+// WebSocket, gRPC) get an unlimited deadline so the server's idle timeout
+// (not a hard wall-clock cap) governs their lifetime.
+func (c *Chain) applyWriteDeadline(w http.ResponseWriter, r *http.Request) {
+	wt, _ := c.writeTimeout.Load().(time.Duration)
+	if wt <= 0 {
+		return
+	}
+	rc := http.NewResponseController(w)
+	if isStreamingRequest(r) {
+		// Extend the deadline to effectively unlimited; the connection's
+		// idle timeout and client-side close still apply.
+		_ = rc.SetWriteDeadline(time.Time{})
+	} else {
+		_ = rc.SetWriteDeadline(time.Now().Add(wt))
+	}
 }
 
 // injectBackendURL sets the per-request backend URL from the external service
@@ -1671,6 +1715,11 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	// Update per-request timeout (atomic — read from ServeHTTP without holding mu).
 	if d, parseErr := time.ParseDuration(newCfg.Server.RequestTimeout); parseErr == nil {
 		c.requestTimeout.Store(d)
+	}
+
+	// Update write timeout for per-request deadline enforcement.
+	if d, parseErr := config.ParseDuration(newCfg.Server.WriteTimeout, 30*time.Second); parseErr == nil {
+		c.writeTimeout.Store(d)
 	}
 
 	c.accessLog.Store(newCfg.Logging.AccessLogEnabled())
