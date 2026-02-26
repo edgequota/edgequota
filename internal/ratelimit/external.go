@@ -737,8 +737,8 @@ func limitsFromHTTPResponse(r *ratelimitv1http.GetLimitsResponse) *ExternalLimit
 	if r.FailureCode != nil {
 		limits.FailureCode = int(*r.FailureCode)
 	}
-	if r.BackendUrl != nil {
-		limits.BackendURL = *r.BackendUrl
+	if r.BackendUrl != "" {
+		limits.BackendURL = r.BackendUrl
 	}
 	if r.BackendProtocol != nil {
 		limits.BackendProtocol = string(*r.BackendProtocol)

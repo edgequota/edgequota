@@ -29,7 +29,9 @@ type BackendProtocol string
 // per-request basis by returning one of these values.
 type FailurePolicy string
 
-// GetLimitsRequest Identifies the client and context for limit lookup.
+// GetLimitsRequest Identifies the client and context for limit lookup. The external service
+// derives the tenant/bucket key from headers, method, and path — EdgeQuota
+// does not send a pre-extracted key.
 type GetLimitsRequest struct {
 	// Headers Flattened request headers for context.
 	Headers map[string]string `json:"headers"`
@@ -51,9 +53,11 @@ type GetLimitsResponse struct {
 	// gRPC traffic always uses h2 regardless of this setting.
 	BackendProtocol *BackendProtocol `json:"backend_protocol,omitempty"`
 
-	// BackendUrl Backend URL override (optional). When non-empty, EdgeQuota proxies
-	// this request to the given URL instead of the static backend.url.
-	BackendUrl *string `json:"backend_url,omitempty"`
+	// BackendUrl Backend URL (required). EdgeQuota proxies this request to the given
+	// URL. When external RL is active, the service must always return this
+	// field. Responses with an empty backend_url are treated as malformed
+	// and trigger the fallback path.
+	BackendUrl string `json:"backend_url"`
 
 	// Burst Maximum burst size.
 	Burst int64 `json:"burst"`

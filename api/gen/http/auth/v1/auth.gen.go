@@ -28,6 +28,15 @@ type CheckResponse struct {
 	// Allowed Whether the request is allowed to proceed.
 	Allowed bool `json:"allowed"`
 
+	// CacheMaxAgeSeconds Cache duration in seconds. When present and > 0, overrides the default
+	// cache TTL. A value of 0 is treated as "not set". Set this to the
+	// remaining token TTL so EdgeQuota skips redundant auth calls for the
+	// same credential until the token expires.
+	CacheMaxAgeSeconds *int64 `json:"cache_max_age_seconds,omitempty"`
+
+	// CacheNoStore If true, the response must not be cached.
+	CacheNoStore *bool `json:"cache_no_store,omitempty"`
+
 	// DenyBody Response body to send when denied.
 	DenyBody *string `json:"deny_body,omitempty"`
 

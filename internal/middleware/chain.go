@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -17,7 +18,9 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -153,6 +156,9 @@ var (
 // maxTTL caps Redis key TTL to 7 days.
 const maxTTL = 7 * 24 * 3600
 
+// authCacheKeyPrefix is the Redis key prefix for cached auth responses.
+const authCacheKeyPrefix = "auth:cache:"
+
 // Failure policy constants — re-exported from config for local readability.
 const (
 	policyPassthrough      = config.FailurePolicyPassThrough
@@ -186,6 +192,11 @@ type Chain struct {
 	// responses. When cache_redis is configured, this is a separate connection;
 	// otherwise it is nil and the main rate-limit Redis client is reused.
 	cacheRedis redis.Client
+
+	// authCacheRedis is the Redis client used to cache auth responses. It
+	// reuses cacheRedis when available, falling back to the main limiter client.
+	// Nil when no Redis is configured (auth caching silently disabled).
+	authCacheRedis redis.Client
 
 	// responseCache is the CDN-style response cache store, backed by Redis.
 	// When nil, response caching is disabled.
@@ -445,7 +456,12 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("auth client: %w", authErr)
 		}
 		c.authClient.Store(authClient)
-		logger.Info("authentication enabled")
+		c.authCacheRedis = c.resolveAuthCacheRedis()
+		if c.authCacheRedis != nil {
+			logger.Info("authentication enabled with response caching")
+		} else {
+			logger.Info("authentication enabled")
+		}
 	}
 
 	if cfg.RateLimit.External.Enabled {
@@ -596,6 +612,105 @@ func cacheBackendName(c redis.Client) string {
 		return "redis"
 	}
 	return "none"
+}
+
+// resolveAuthCacheRedis returns the Redis client to use for auth response
+// caching. Reuses the dedicated cache_redis client when available, otherwise
+// falls back to the main rate-limit limiter client. Returns nil when no Redis
+// is configured (auth caching is silently disabled).
+func (c *Chain) resolveAuthCacheRedis() redis.Client {
+	if c.cacheRedis != nil {
+		return c.cacheRedis
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.limiter != nil {
+		return c.limiter.Client()
+	}
+	return nil
+}
+
+// authCacheKeyExclude is the set of per-request headers that must NOT
+// contribute to the auth cache key. These headers change on every request
+// (tracing IDs, request correlation IDs) and would cause every request to
+// produce a unique key, making caching useless. Mirrored from the external
+// rate-limit service's cacheKeyExclude logic.
+var authCacheKeyExclude = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(config.DefaultEphemeralHeaders))
+	for _, h := range config.DefaultEphemeralHeaders {
+		m[strings.ToLower(h)] = struct{}{}
+	}
+	return m
+}()
+
+// authCacheKey returns a Redis key derived from the original (unfiltered)
+// request headers, excluding only ephemeral per-request headers
+// (X-Request-Id, tracing headers, etc.). Using the original headers — not
+// the filtered ones sent to the auth service — ensures that credential
+// headers like Authorization contribute to the key so that different tokens
+// produce distinct cache entries. The headers are SHA-256 hashed so no raw
+// credential values are stored in Redis key names.
+func authCacheKey(r *http.Request) string {
+	keys := make([]string, 0, len(r.Header))
+	for k := range r.Header {
+		if _, skip := authCacheKeyExclude[strings.ToLower(k)]; skip {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	// Also consider the Host from r.Host (Go promotes it out of r.Header).
+	if r.Host != "" {
+		if _, skip := authCacheKeyExclude[strings.ToLower("Host")]; !skip {
+			keys = append(keys, "Host")
+		}
+	}
+	sort.Strings(keys)
+
+	h := sha256.New()
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte("="))
+		if k == "Host" {
+			h.Write([]byte(r.Host))
+		} else {
+			for _, v := range r.Header[k] {
+				h.Write([]byte(v))
+				h.Write([]byte(","))
+			}
+		}
+		h.Write([]byte("|"))
+	}
+	return authCacheKeyPrefix + hex.EncodeToString(h.Sum(nil))
+}
+
+// getAuthFromCache retrieves a cached auth response from Redis.
+// Returns nil on cache miss or when Redis is unavailable.
+func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckResponse {
+	if c.authCacheRedis == nil {
+		return nil
+	}
+	data, err := c.authCacheRedis.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil
+	}
+	var resp auth.CheckResponse
+	if json.Unmarshal(data, &resp) != nil {
+		return nil
+	}
+	return &resp
+}
+
+// setAuthInCache stores an auth response in Redis with the given TTL.
+// No-ops when Redis is unavailable or TTL is zero.
+func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.CheckResponse, ttl time.Duration) {
+	if c.authCacheRedis == nil || ttl <= 0 {
+		return
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	_ = c.authCacheRedis.Set(ctx, key, data, ttl).Err()
 }
 
 func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitParams) error {
@@ -989,6 +1104,9 @@ func (c *Chain) injectBackendProtocol(r *http.Request, extLimits *ratelimit.Exte
 // (the caller already loaded it to check for nil).
 // When allowed, any request_headers from the auth response are injected into
 // the request so that downstream stages (rate limiting, backend) can read them.
+// Responses with cache_max_age_seconds > 0 are stored in Redis keyed on a
+// SHA-256 hash of the forwarded headers so subsequent requests carrying the
+// same credential skip the external auth call entirely.
 func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Client) bool {
 	// When body propagation is enabled, buffer the body up to the configured
 	// limit so it can be included in the auth request AND still forwarded to
@@ -1007,6 +1125,21 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
+	// Compute the cache key from the original (unfiltered) request headers so
+	// that credential headers (e.g. Authorization) are included in the key.
+	// This must happen before ensureRequestID mutates r.Header, but since
+	// ServeHTTP calls ensureRequestID before checkAuth, X-Request-Id is
+	// already in r.Header at this point. It is excluded via authCacheKeyExclude
+	// (DefaultEphemeralHeaders), so it does not pollute the key.
+	cacheKey := authCacheKey(r)
+
+	// Cache hit: serve the previously cached auth decision without calling
+	// the external service.
+	if cached := c.getAuthFromCache(r.Context(), cacheKey); cached != nil {
+		c.logger.Debug("auth cache hit, skipping external auth call")
+		return c.applyAuthResponse(w, r, cached)
+	}
+
 	authReq := ac.BuildCheckRequest(r, bodyBytes)
 	resp, err := ac.Check(r.Context(), authReq)
 	if err != nil {
@@ -1023,6 +1156,29 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 		return false
 	}
 
+	// Cache the response before applying it so subsequent requests carrying
+	// the same credential skip the upstream auth call within the TTL.
+	ttl := resp.ResolveCacheTTL()
+	switch {
+	case ttl > 0:
+		c.logger.Debug("auth response cached",
+			"ttl", ttl.String(),
+			"source", resp.CacheTTLSource,
+		)
+		c.setAuthInCache(r.Context(), cacheKey, resp, ttl)
+	case resp.CacheTTLSource != "":
+		c.logger.Debug("auth response not cached",
+			"source", resp.CacheTTLSource,
+		)
+	}
+
+	return c.applyAuthResponse(w, r, resp)
+}
+
+// applyAuthResponse applies a (possibly cached) auth decision to the request.
+// Writes the deny response and returns false when the request is denied,
+// injects request_headers and returns true when the request is allowed.
+func (c *Chain) applyAuthResponse(w http.ResponseWriter, r *http.Request, resp *auth.CheckResponse) bool {
 	if !resp.Allowed {
 		c.metrics.IncAuthDenied()
 		for k, v := range resp.ResponseHeaders {
@@ -1761,6 +1917,9 @@ func (c *Chain) reloadAuth(prevCfg, newCfg *config.Config) {
 	if oldAuth != nil {
 		_ = oldAuth.Close()
 	}
+	// Refresh the cache client reference in case cacheRedis was re-created
+	// by a concurrent reloadExternalRL call.
+	c.authCacheRedis = c.resolveAuthCacheRedis()
 }
 
 // reloadExternalRL rebuilds the external rate-limit client if enabled.

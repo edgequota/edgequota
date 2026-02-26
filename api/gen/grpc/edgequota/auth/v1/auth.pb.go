@@ -131,8 +131,13 @@ type CheckResponse struct {
 	DenyBody string `protobuf:"bytes,4,opt,name=deny_body,json=denyBody,proto3" json:"deny_body,omitempty"`
 	// Additional headers to set on the deny response.
 	ResponseHeaders map[string]string `protobuf:"bytes,3,rep,name=response_headers,json=responseHeaders,proto3" json:"response_headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Cache duration in seconds. When present and > 0, overrides the default
+	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
+	CacheMaxAgeSeconds *int64 `protobuf:"varint,6,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
+	// If true, the response must not be cached.
+	CacheNoStore  bool `protobuf:"varint,7,opt,name=cache_no_store,json=cacheNoStore,proto3" json:"cache_no_store,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CheckResponse) Reset() {
@@ -200,6 +205,20 @@ func (x *CheckResponse) GetResponseHeaders() map[string]string {
 	return nil
 }
 
+func (x *CheckResponse) GetCacheMaxAgeSeconds() int64 {
+	if x != nil && x.CacheMaxAgeSeconds != nil {
+		return *x.CacheMaxAgeSeconds
+	}
+	return 0
+}
+
+func (x *CheckResponse) GetCacheNoStore() bool {
+	if x != nil {
+		return x.CacheNoStore
+	}
+	return false
+}
+
 var File_edgequota_auth_v1_auth_proto protoreflect.FileDescriptor
 
 const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
@@ -214,20 +233,23 @@ const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\x04body\x18\x05 \x01(\fR\x04body\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaf\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x04\n" +
 	"\rCheckResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x1f\n" +
 	"\vstatus_code\x18\x02 \x01(\x05R\n" +
 	"statusCode\x12]\n" +
 	"\x0frequest_headers\x18\x05 \x03(\v24.edgequota.auth.v1.CheckResponse.RequestHeadersEntryR\x0erequestHeaders\x12\x1b\n" +
 	"\tdeny_body\x18\x04 \x01(\tR\bdenyBody\x12`\n" +
-	"\x10response_headers\x18\x03 \x03(\v25.edgequota.auth.v1.CheckResponse.ResponseHeadersEntryR\x0fresponseHeaders\x1aA\n" +
+	"\x10response_headers\x18\x03 \x03(\v25.edgequota.auth.v1.CheckResponse.ResponseHeadersEntryR\x0fresponseHeaders\x126\n" +
+	"\x15cache_max_age_seconds\x18\x06 \x01(\x03H\x00R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
+	"\x0ecache_no_store\x18\a \x01(\bR\fcacheNoStore\x1aA\n" +
 	"\x13RequestHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aB\n" +
 	"\x14ResponseHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012Y\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x18\n" +
+	"\x16_cache_max_age_seconds2Y\n" +
 	"\vAuthService\x12J\n" +
 	"\x05Check\x12\x1f.edgequota.auth.v1.CheckRequest\x1a .edgequota.auth.v1.CheckResponseB\xce\x01\n" +
 	"\x15com.edgequota.auth.v1B\tAuthProtoP\x01ZDgithub.com/edgequota/edgequota/api/gen/grpc/edgequota/auth/v1;authv1\xa2\x02\x03EAX\xaa\x02\x11Edgequota.Auth.V1\xca\x02\x11Edgequota\\Auth\\V1\xe2\x02\x1dEdgequota\\Auth\\V1\\GPBMetadata\xea\x02\x13Edgequota::Auth::V1b\x06proto3"
@@ -270,6 +292,7 @@ func file_edgequota_auth_v1_auth_proto_init() {
 	if File_edgequota_auth_v1_auth_proto != nil {
 		return
 	}
+	file_edgequota_auth_v1_auth_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

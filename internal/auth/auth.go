@@ -19,6 +19,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +121,109 @@ type CheckResponse struct {
 	// Auth services use this to pass decoded metadata (e.g. tenant ID) to
 	// downstream stages like rate limiting and the backend.
 	RequestHeaders map[string]string `json:"request_headers,omitempty"`
+
+	// CacheMaxAgeSec controls how long EdgeQuota caches this auth response.
+	// nil = not set (no caching); > 0 = cache for N seconds. Typically set
+	// to the remaining token TTL so auth is not re-checked until expiry.
+	// For HTTP responses the field is normalised to reflect the winning TTL
+	// source (HTTP headers take precedence over body values).
+	CacheMaxAgeSec *int64 `json:"cache_max_age_seconds,omitempty"`
+	// CacheNoStore prevents caching when true, even if CacheMaxAgeSec is set.
+	CacheNoStore bool `json:"cache_no_store,omitempty"`
+
+	// CacheTTLSource describes where the cache TTL decision came from.
+	// Set during TTL resolution; not serialized (json:"-") because it is only
+	// needed for logging at the time of the initial response before storing.
+	CacheTTLSource string `json:"-"`
+}
+
+// ResolveCacheTTL returns the duration the auth response should be cached.
+// Returns 0 when caching is disabled (CacheNoStore=true or no TTL set).
+func (r *CheckResponse) ResolveCacheTTL() time.Duration {
+	if r.CacheNoStore {
+		return 0
+	}
+	if r.CacheMaxAgeSec != nil && *r.CacheMaxAgeSec > 0 {
+		return time.Duration(*r.CacheMaxAgeSec) * time.Second
+	}
+	return 0
+}
+
+// resolveHTTPCacheTTL applies the same precedence rules as the external rate-
+// limit service: HTTP response headers (Cache-Control, Expires) take priority
+// over the body fields (cache_max_age_seconds, cache_no_store).  The winning
+// directive is normalised back into resp so that ResolveCacheTTL() always
+// returns the correct value regardless of transport.  CacheTTLSource is set
+// to a human-readable description of the winning source for debug logging.
+//
+// Priority order:
+//  1. Cache-Control: max-age=N  →  cache for N seconds
+//  2. Cache-Control: no-cache | no-store  →  do not cache
+//  3. Expires: <RFC1123>  →  cache until that date
+//  4. Body: cache_max_age_seconds / cache_no_store  →  body-driven caching
+func resolveHTTPCacheTTL(h http.Header, resp *CheckResponse) {
+	// 1. Cache-Control header.
+	if cc := h.Get("Cache-Control"); cc != "" {
+		if secs := parseAuthMaxAge(cc); secs > 0 {
+			resp.CacheMaxAgeSec = &secs
+			resp.CacheNoStore = false
+			resp.CacheTTLSource = fmt.Sprintf("Cache-Control: max-age=%d", secs)
+			return
+		}
+		lower := strings.ToLower(cc)
+		if strings.Contains(lower, "no-cache") || strings.Contains(lower, "no-store") {
+			resp.CacheMaxAgeSec = nil
+			resp.CacheNoStore = true
+			resp.CacheTTLSource = "Cache-Control: " + lower
+			return
+		}
+	}
+
+	// 2. Expires header.
+	if expires := h.Get("Expires"); expires != "" {
+		expTime, err := http.ParseTime(expires)
+		if err == nil {
+			ttl := time.Until(expTime)
+			if ttl > 0 {
+				secs := int64(ttl.Seconds())
+				resp.CacheMaxAgeSec = &secs
+				resp.CacheNoStore = false
+				resp.CacheTTLSource = fmt.Sprintf("Expires: %s", expires)
+				return
+			}
+			// Already expired — treat as no-store.
+			resp.CacheMaxAgeSec = nil
+			resp.CacheNoStore = true
+			resp.CacheTTLSource = fmt.Sprintf("Expires: %s (already expired)", expires)
+			return
+		}
+	}
+
+	// 3. Body fields (fallback, consistent with gRPC path).
+	if resp.CacheNoStore {
+		resp.CacheTTLSource = "body: cache_no_store=true"
+		return
+	}
+	if resp.CacheMaxAgeSec != nil && *resp.CacheMaxAgeSec > 0 {
+		resp.CacheTTLSource = fmt.Sprintf("body: cache_max_age_seconds=%d", *resp.CacheMaxAgeSec)
+		return
+	}
+	// No directives — source remains empty ("" means no caching requested).
+}
+
+// parseAuthMaxAge extracts max-age seconds from a Cache-Control header value.
+// Returns 0 when not found or invalid. Case-insensitive per RFC 7234.
+func parseAuthMaxAge(cc string) int64 {
+	for _, directive := range strings.Split(cc, ",") {
+		directive = strings.TrimSpace(directive)
+		lower := strings.ToLower(directive)
+		if after, found := strings.CutPrefix(lower, "max-age="); found {
+			if n, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // defaultMaxAuthBodySize is the default maximum request body size (64 KiB)
@@ -273,13 +378,24 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 		var parsed authv1http.CheckResponse
 		if len(respBody) > 0 && json.Unmarshal(respBody, &parsed) == nil {
 			result.RequestHeaders = derefStringMap(parsed.RequestHeaders)
+			if parsed.CacheMaxAgeSeconds != nil {
+				v := *parsed.CacheMaxAgeSeconds
+				result.CacheMaxAgeSec = &v
+			}
+			if parsed.CacheNoStore != nil {
+				result.CacheNoStore = *parsed.CacheNoStore
+			}
 		}
+		// HTTP headers take precedence over body fields; source is tracked for logging.
+		resolveHTTPCacheTTL(resp.Header, result)
 		return result, nil
 	}
 
 	var wireResp authv1http.CheckResponse
 	if err := json.Unmarshal(respBody, &wireResp); err == nil && wireResp.StatusCode != 0 {
-		return checkResponseFromHTTP(&wireResp), nil
+		result := checkResponseFromHTTP(&wireResp)
+		resolveHTTPCacheTTL(resp.Header, result)
+		return result, nil
 	}
 
 	return &CheckResponse{
@@ -301,6 +417,13 @@ func checkResponseFromHTTP(r *authv1http.CheckResponse) *CheckResponse {
 	}
 	resp.ResponseHeaders = derefStringMap(r.ResponseHeaders)
 	resp.RequestHeaders = derefStringMap(r.RequestHeaders)
+	if r.CacheMaxAgeSeconds != nil {
+		v := *r.CacheMaxAgeSeconds
+		resp.CacheMaxAgeSec = &v
+	}
+	if r.CacheNoStore != nil {
+		resp.CacheNoStore = *r.CacheNoStore
+	}
 	return resp
 }
 
@@ -329,15 +452,27 @@ func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckRespon
 	}
 
 	resp := &CheckResponse{
-		Allowed:    pbResp.GetAllowed(),
-		StatusCode: int(pbResp.GetStatusCode()),
-		DenyBody:   pbResp.GetDenyBody(),
+		Allowed:      pbResp.GetAllowed(),
+		StatusCode:   int(pbResp.GetStatusCode()),
+		DenyBody:     pbResp.GetDenyBody(),
+		CacheNoStore: pbResp.GetCacheNoStore(),
 	}
 	if len(pbResp.GetResponseHeaders()) > 0 {
 		resp.ResponseHeaders = pbResp.GetResponseHeaders()
 	}
 	if len(pbResp.GetRequestHeaders()) > 0 {
 		resp.RequestHeaders = pbResp.GetRequestHeaders()
+	}
+	if pbResp.CacheMaxAgeSeconds != nil {
+		v := pbResp.GetCacheMaxAgeSeconds()
+		resp.CacheMaxAgeSec = &v
+	}
+
+	// gRPC has no HTTP headers — set the source from body fields for logging.
+	if resp.CacheNoStore {
+		resp.CacheTTLSource = "body: cache_no_store=true"
+	} else if resp.CacheMaxAgeSec != nil && *resp.CacheMaxAgeSec > 0 {
+		resp.CacheTTLSource = fmt.Sprintf("body: cache_max_age_seconds=%d", *resp.CacheMaxAgeSec)
 	}
 
 	return resp, nil

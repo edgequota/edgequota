@@ -151,6 +151,8 @@ func (BackendProtocol) EnumDescriptor() ([]byte, []int) {
 }
 
 // GetLimitsRequest identifies the client and context for limit lookup.
+// The external service derives the tenant/bucket key from headers, method,
+// and path — EdgeQuota does not send a pre-extracted key.
 type GetLimitsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Flattened request headers for context.
@@ -248,10 +250,11 @@ type GetLimitsResponse struct {
 	// Override HTTP status code for FAIL_CLOSED policy (e.g. 503). 0 = use
 	// static config.
 	FailureCode int32 `protobuf:"varint,8,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
-	// Backend URL override (optional). When non-empty, EdgeQuota proxies this
-	// request to the given URL instead of the static backend.url from config.
-	// This enables per-tenant backend routing — the external service can direct
-	// each tenant's traffic to a different upstream.
+	// Backend URL (required). EdgeQuota proxies this request to the given URL.
+	// When external RL is active, the external service is the sole source of
+	// truth for backend routing — there is no implicit fallback to a static URL.
+	// Responses with an empty backend_url are treated as malformed and trigger
+	// the fallback path (fallback.backend_url + fallback rate limits).
 	BackendUrl string `protobuf:"bytes,9,opt,name=backend_url,json=backendUrl,proto3" json:"backend_url,omitempty"`
 	// Per-request timeout override (optional). Duration string (e.g. "10s").
 	// When non-empty, overrides the global server.request_timeout for this
@@ -381,15 +384,14 @@ var File_edgequota_ratelimit_v1_ratelimit_proto protoreflect.FileDescriptor
 
 const file_edgequota_ratelimit_v1_ratelimit_proto_rawDesc = "" +
 	"\n" +
-	"&edgequota/ratelimit/v1/ratelimit.proto\x12\x16edgequota.ratelimit.v1\"\xdd\x01\n" +
-	"\x10GetLimitsRequest\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12O\n" +
+	"&edgequota/ratelimit/v1/ratelimit.proto\x12\x16edgequota.ratelimit.v1\"\xd6\x01\n" +
+	"\x10GetLimitsRequest\x12O\n" +
 	"\aheaders\x18\x02 \x03(\v25.edgequota.ratelimit.v1.GetLimitsRequest.HeadersEntryR\aheaders\x12\x16\n" +
 	"\x06method\x18\x03 \x01(\tR\x06method\x12\x12\n" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x01\x10\x02R\x03key\"\x9a\x04\n" +
 	"\x11GetLimitsResponse\x12\x18\n" +
 	"\aaverage\x18\x01 \x01(\x03R\aaverage\x12\x14\n" +
 	"\x05burst\x18\x02 \x01(\x03R\x05burst\x12\x16\n" +

@@ -52,4 +52,23 @@ message CheckResponse {
 
   // Additional headers to set on the deny response.
   map<string, string> response_headers = 3;
+
+  // Cache control (optional). Controls how long EdgeQuota caches this auth
+  // response. Useful for token-based auth where the response is valid until
+  // the token expires — set cache_max_age_seconds to the remaining token TTL
+  // to avoid redundant upstream auth calls for the same token.
+  //
+  // Caching is keyed on the request's auth credential (e.g. Authorization
+  // header). A cached allowed=true response will bypass the external auth call
+  // for subsequent requests carrying the same credential within the TTL.
+  //
+  // For HTTP responses, standard Cache-Control / Expires headers take
+  // precedence over these body fields. For gRPC, these body fields are the
+  // only way to control cache behaviour.
+
+  // Cache duration in seconds. When present and > 0, overrides the default
+  // cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
+  optional int64 cache_max_age_seconds = 6;
+  // If true, the response must not be cached.
+  bool cache_no_store = 7;
 }
