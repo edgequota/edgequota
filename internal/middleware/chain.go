@@ -19,8 +19,8 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -620,12 +620,11 @@ func cacheBackendName(c redis.Client) string {
 	return "none"
 }
 
-// authCacheKeyExclude is the set of per-request headers that must NOT
-// contribute to the auth cache key. These headers change on every request
-// (tracing IDs, request correlation IDs) and would cause every request to
-// produce a unique key, making caching useless. Mirrored from the external
-// rate-limit service's cacheKeyExclude logic.
-var authCacheKeyExclude = func() map[string]struct{} {
+// authCacheKeyEphemeral is the set of headers that must not contribute to the
+// auth cache key even though they pass through the auth header filter. These
+// change on every request (tracing IDs, X-Request-Id, etc.) and would produce
+// a unique cache key per request, defeating caching entirely.
+var authCacheKeyEphemeral = func() map[string]struct{} {
 	m := make(map[string]struct{}, len(config.DefaultEphemeralHeaders))
 	for _, h := range config.DefaultEphemeralHeaders {
 		m[strings.ToLower(h)] = struct{}{}
@@ -633,42 +632,36 @@ var authCacheKeyExclude = func() map[string]struct{} {
 	return m
 }()
 
-// authCacheKey returns a Redis key derived from the original (unfiltered)
-// request headers, excluding only ephemeral per-request headers
-// (X-Request-Id, tracing headers, etc.). Using the original headers — not
-// the filtered ones sent to the auth service — ensures that credential
-// headers like Authorization contribute to the key so that different tokens
-// produce distinct cache entries. The headers are SHA-256 hashed so no raw
-// credential values are stored in Redis key names.
-func authCacheKey(r *http.Request) string {
-	keys := make([]string, 0, len(r.Header))
-	for k := range r.Header {
-		if _, skip := authCacheKeyExclude[strings.ToLower(k)]; skip {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	// Also consider the Host from r.Host (Go promotes it out of r.Header).
-	if r.Host != "" {
-		if _, skip := authCacheKeyExclude[strings.ToLower("Host")]; !skip {
-			keys = append(keys, "Host")
+// authCacheKey returns a Redis key derived from the filtered CheckRequest —
+// the same view of the request the auth service actually receives. Using the
+// filtered headers (not r.Header) means:
+//   - Headers stripped by DefaultAuthDenyHeaders (Cookie, etc.) do not affect
+//     the key: requests that differ only in those headers share a cache entry.
+//   - Method and path are included so path-specific auth decisions are isolated
+//     (consistent with how the external RL service builds its lookup key).
+//   - Ephemeral per-request headers (X-Request-Id, trace IDs, etc.) are
+//     excluded so they don't produce a unique key on every request.
+//
+// Headers are SHA-256 hashed rather than stored plain because the filtered set
+// still contains raw credential values (Authorization, X-Api-Key, etc.).
+func authCacheKey(req *auth.CheckRequest) string {
+	keys := make([]string, 0, len(req.Headers))
+	for k := range req.Headers {
+		if _, skip := authCacheKeyEphemeral[strings.ToLower(k)]; !skip {
+			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
 
 	h := sha256.New()
+	h.Write([]byte(req.Method))
+	h.Write([]byte("|"))
+	h.Write([]byte(req.Path))
 	for _, k := range keys {
+		h.Write([]byte("|"))
 		h.Write([]byte(k))
 		h.Write([]byte("="))
-		if k == "Host" {
-			h.Write([]byte(r.Host))
-		} else {
-			for _, v := range r.Header[k] {
-				h.Write([]byte(v))
-				h.Write([]byte(","))
-			}
-		}
-		h.Write([]byte("|"))
+		h.Write([]byte(req.Headers[k]))
 	}
 	return authCacheKeyPrefix + hex.EncodeToString(h.Sum(nil))
 }
@@ -1115,13 +1108,13 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	// Compute the cache key from the original (unfiltered) request headers so
-	// that credential headers (e.g. Authorization) are included in the key.
-	// This must happen before ensureRequestID mutates r.Header, but since
-	// ServeHTTP calls ensureRequestID before checkAuth, X-Request-Id is
-	// already in r.Header at this point. It is excluded via authCacheKeyExclude
-	// (DefaultEphemeralHeaders), so it does not pollute the key.
-	cacheKey := authCacheKey(r)
+	// Build the check request first so the cache key is derived from the same
+	// filtered header set that the auth service actually receives. This ensures
+	// that headers stripped by DefaultAuthDenyHeaders (Cookie, etc.) do not
+	// pollute the key, and that method + path are included for path-specific
+	// auth decisions.
+	authReq := ac.BuildCheckRequest(r, bodyBytes)
+	cacheKey := authCacheKey(authReq)
 
 	// Cache hit: serve the previously cached auth decision without calling
 	// the external service.
@@ -1129,8 +1122,6 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 		c.logger.Debug("auth cache hit, skipping external auth call")
 		return c.applyAuthResponse(w, r, cached)
 	}
-
-	authReq := ac.BuildCheckRequest(r, bodyBytes)
 	resp, err := ac.Check(r.Context(), authReq)
 	if err != nil {
 		c.logger.Error("auth service error", "error", err)
