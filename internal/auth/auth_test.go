@@ -238,22 +238,107 @@ func TestCheckHTTP(t *testing.T) {
 }
 
 func TestBuildCheckRequest(t *testing.T) {
-	t.Run("builds request from http.Request and filters sensitive headers by default", func(t *testing.T) {
+	// Helper: build a client via New() with zero auth config (no header filter
+	// set) so the DefaultAuthAllowHeaders apply, mirroring production behavior.
+	newDefaultClient := func(t *testing.T, srv string) *Client {
+		t.Helper()
+		cfg := config.AuthConfig{HTTP: config.AuthHTTPConfig{URL: srv}}
+		c, err := NewClient(cfg)
+		require.NoError(t, err)
+		return c
+	}
+
+	t.Run("default allow-list forwards Authorization and X-Api-Key only", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
+		r.Header.Set("Authorization", "Bearer token")
+		r.Header.Set("X-Api-Key", "secret-key")
+		r.Header.Set("X-Tenant-Id", "tenant-1")
+		r.Header.Set("Content-Type", "application/json")
+		r.RemoteAddr = "192.168.1.1:5000"
+
+		c := newDefaultClient(t, srv.URL)
+		cr := c.BuildCheckRequest(r, nil)
+
+		assert.Equal(t, "Bearer token", cr.Headers["Authorization"],
+			"Authorization must reach the auth service by default")
+		assert.Equal(t, "secret-key", cr.Headers["X-Api-Key"],
+			"X-Api-Key must reach the auth service by default")
+		// All other headers are stripped unless the operator widens the list.
+		assert.NotContains(t, cr.Headers, "X-Tenant-Id")
+		assert.NotContains(t, cr.Headers, "Content-Type")
+	})
+
+	t.Run("explicit allow_list overrides the default", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
+		r.Header.Set("Authorization", "Bearer token")
+		r.Header.Set("X-Tenant-Id", "tenant-1")
+		r.RemoteAddr = "192.168.1.1:5000"
+
+		cfg := config.AuthConfig{
+			HTTP:         config.AuthHTTPConfig{URL: srv.URL},
+			HeaderFilter: config.HeaderFilterConfig{AllowList: []string{"X-Tenant-Id"}},
+		}
+		c, err := NewClient(cfg)
+		require.NoError(t, err)
+		cr := c.BuildCheckRequest(r, nil)
+
+		// Operator chose a different allow-list — only that list applies.
+		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
+		assert.NotContains(t, cr.Headers, "Authorization")
+	})
+
+	t.Run("explicit deny_list overrides the default", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
+		r.Header.Set("Authorization", "Bearer token")
+		r.Header.Set("X-Tenant-Id", "tenant-1")
+		r.Header.Set("Cookie", "session=abc")
+		r.RemoteAddr = "192.168.1.1:5000"
+
+		cfg := config.AuthConfig{
+			HTTP:         config.AuthHTTPConfig{URL: srv.URL},
+			HeaderFilter: config.HeaderFilterConfig{DenyList: []string{"Cookie"}},
+		}
+		c, err := NewClient(cfg)
+		require.NoError(t, err)
+		cr := c.BuildCheckRequest(r, nil)
+
+		// Deny-list configured — Authorization passes, Cookie is stripped.
+		assert.Equal(t, "Bearer token", cr.Headers["Authorization"])
+		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
+		assert.NotContains(t, cr.Headers, "Cookie")
+	})
+
+	t.Run("raw filter with empty config still uses DefaultSensitiveHeaders deny-list", func(t *testing.T) {
 		r, _ := http.NewRequest(http.MethodPost, "/api/v1/resource", nil)
 		r.Header.Set("Authorization", "Bearer token")
 		r.Header.Set("X-Tenant-Id", "tenant-1")
 		r.Header.Set("Content-Type", "application/json")
 		r.RemoteAddr = "192.168.1.1:5000"
 
+		// Direct construction bypasses the New() default — useful for rate-limit
+		// service path which still uses the deny-list approach.
 		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
 		cr := c.BuildCheckRequest(r, nil)
 
 		assert.Equal(t, "POST", cr.Method)
 		assert.Equal(t, "/api/v1/resource", cr.Path)
 		assert.Equal(t, "192.168.1.1:5000", cr.RemoteAddr)
-		// Authorization is in DefaultSensitiveHeaders — should be stripped.
 		assert.NotContains(t, cr.Headers, "Authorization")
-		// Non-sensitive headers should pass through.
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
 		assert.Equal(t, "application/json", cr.Headers["Content-Type"])
 	})

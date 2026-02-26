@@ -269,11 +269,20 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		maxBodySize = defaultMaxAuthBodySize
 	}
 
+	// When no header filter is configured, default to an allow-list that
+	// forwards only credential headers. The auth service exists to validate
+	// credentials, so they must reach it; all other headers are dropped
+	// unless the operator explicitly widens the list.
+	hfCfg := cfg.HeaderFilter
+	if len(hfCfg.AllowList) == 0 && len(hfCfg.DenyList) == 0 {
+		hfCfg.AllowList = config.DefaultAuthAllowHeaders
+	}
+
 	c := &Client{
 		httpURL:                cfg.HTTP.URL,
 		httpClient:             &http.Client{Timeout: timeout, Transport: transport},
 		timeout:                timeout,
-		headerFilter:           config.NewHeaderFilter(cfg.HeaderFilter),
+		headerFilter:           config.NewHeaderFilter(hfCfg),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,
 		propagateBody:          cfg.PropagateRequestBody,
 		maxBodySize:            maxBodySize,

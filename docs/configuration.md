@@ -165,8 +165,10 @@ backend:
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `allow_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (deny_list ignored when set) |
-| `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers |
+| `allow_list` | []string | `["Authorization","X-Api-Key"]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (`deny_list` ignored when set). When empty and `deny_list` is also empty, `DefaultAuthAllowHeaders` (`Authorization`, `X-Api-Key`) is used automatically. |
+| `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers. Only applies when `allow_list` is empty. |
+
+The auth service is the credential validator — it needs credential headers, not all request headers. Therefore the auth header filter defaults to a minimal allow-list (`Authorization`, `X-Api-Key`), unlike the external rate-limit filter which defaults to the `DefaultSensitiveHeaders` deny-list.
 
 ### `rate_limit` — Rate Limiting (Top-Level)
 

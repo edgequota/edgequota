@@ -466,6 +466,16 @@ var DefaultSensitiveHeaders = []string{
 	"X-Xsrf-Token",
 }
 
+// DefaultAuthAllowHeaders is the implicit allow-list applied to the auth
+// header filter when neither allow_list nor deny_list is configured. The auth
+// service exists specifically to validate credentials, so credential headers
+// must reach it by default. All other headers are dropped unless the operator
+// explicitly widens the allow-list or switches to a deny-list.
+var DefaultAuthAllowHeaders = []string{
+	"Authorization",
+	"X-Api-Key",
+}
+
 // DefaultEphemeralHeaders lists per-request headers that MUST NOT participate
 // in cache/singleflight/circuit-breaker lookup keys. These headers change on
 // every request (tracing IDs, correlation IDs, timestamps) and would cause

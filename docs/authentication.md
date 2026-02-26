@@ -33,30 +33,20 @@ Client ──► EdgeQuota ──► Auth Service
 
 ### Request Passthrough
 
-The auth service receives the full request context:
+The auth service receives the request context including method, path, remote address, and a filtered set of headers. By default only `Authorization` and `X-Api-Key` are forwarded (see [Header Filtering](#header-filtering) below):
 
 ```json
 {
   "method": "POST",
   "path": "/api/v1/resources",
   "headers": {
-    "Authorization": "Bearer eyJhbGciOi...",
-    "Content-Type": "application/json",
-    "X-Forwarded-For": "203.0.113.42",
-    "X-Request-Id": "abc-123"
+    "Authorization": "Bearer eyJhbGciOi..."
   },
   "remote_addr": "10.244.0.15:34892"
 }
 ```
 
-All headers are forwarded, including:
-
-- `Authorization` (Bearer tokens, API keys, Basic auth)
-- `Cookie` (session tokens)
-- `X-Forwarded-For`, `X-Real-IP` (client identity)
-- Custom headers added by upstream load balancers
-
-This enables the auth service to implement any authentication strategy: JWT validation, API key lookup, session verification, HMAC signature validation, or custom policies.
+This enables the auth service to implement any credential-based strategy: JWT validation, API key lookup, session verification, HMAC signature validation, or custom policies. The `Host` header is also always injected (from `r.Host`) so the auth service can make per-host decisions.
 
 ---
 
@@ -225,29 +215,86 @@ The circuit breaker is transparent to clients — the `failure_policy` determine
 
 ### Header Filtering
 
-By default, all request headers — including sensitive ones like `Authorization`, `Cookie`, and `X-Api-Key` — are forwarded to the auth service (the auth service needs them to make auth decisions).
+The auth service exists specifically to validate credentials, so EdgeQuota's default is an **allow-list** that forwards only credential headers:
 
-You can customize which headers are forwarded:
+| Default forwarded headers | Rationale |
+|---|---|
+| `Authorization` | Bearer tokens, Basic auth |
+| `X-Api-Key` | API key authentication |
+
+All other headers are **dropped by default**. This is a safe, minimal-footprint default — the auth service receives exactly what it needs and nothing else.
+
+**Widening the default.** To forward additional headers, set an explicit `allow_list`:
 
 ```yaml
 auth:
   header_filter:
-    deny_list:               # never forward these headers
+    allow_list:
+      - "Authorization"
+      - "X-Tenant-Id"   # forwarded in addition
+      - "X-Api-Key"
+```
+
+**Switching to a deny-list.** When `deny_list` is set (and `allow_list` is empty), EdgeQuota forwards all headers except those listed. This is useful when the auth service needs broad access to request context:
+
+```yaml
+auth:
+  header_filter:
+    deny_list:               # forward everything except these
       - "Cookie"
       - "Set-Cookie"
 ```
 
-Or use an exclusive allow list (when set, `deny_list` is ignored):
+> **Note:** When `allow_list` is set, `deny_list` is ignored. When both are empty, the `DefaultAuthAllowHeaders` allow-list (`Authorization`, `X-Api-Key`) applies automatically.
 
-```yaml
-auth:
-  header_filter:
-    allow_list:              # only forward these headers
-      - "Authorization"
-      - "X-Tenant-Id"
+### Auth Response Caching
+
+EdgeQuota can cache allow/deny decisions in Redis so repeated requests with the same credential skip the external auth call entirely. The auth service opts in by returning cache directives — there is no implicit caching.
+
+#### How the TTL is resolved
+
+The same priority order as the external rate-limit service applies:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | HTTP `Cache-Control: max-age=N` | Auth service sets `Cache-Control: max-age=3600` |
+| 2 | HTTP `Expires: <RFC1123 date>` | Auth service sets `Expires: Thu, 01 Jan 2026 12:00:00 GMT` |
+| 3 | Body field `cache_max_age_seconds` | gRPC or JSON body `"cache_max_age_seconds": 3600` |
+| 4 | Body field `cache_no_store: true` | Prevent caching regardless of other fields |
+
+**HTTP headers always win.** If `Cache-Control: max-age=600` is returned alongside `"cache_max_age_seconds": 30` in the body, EdgeQuota caches for 600 seconds.
+
+**The auth service must explicitly opt in.** If no cache directive is present, every request hits the auth service.
+
+#### Cache key
+
+The cache key is a SHA-256 hash of the forwarded request headers (after filtering). Requests with different credentials produce different keys. Ephemeral headers (`X-Request-Id`, trace IDs, etc.) are excluded from the key automatically.
+
+#### Typical use: token expiry
+
+JWT auth services commonly set `cache_max_age_seconds` to the token's remaining TTL, so EdgeQuota caches the auth decision until the token expires:
+
+**HTTP response:**
+```http
+HTTP/1.1 200 OK
+Cache-Control: max-age=3543
 ```
 
-**Default sensitive headers** (forwarded by default, can be denied): `Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `X-Api-Key`, `X-Csrf-Token`, `X-Xsrf-Token`.
+**gRPC response (protobuf):**
+```json
+{
+  "allowed": true,
+  "cache_max_age_seconds": 3543
+}
+```
+
+EdgeQuota logs the cache decision at `DEBUG` level on every request, including the TTL and which source drove it:
+
+```
+auth response cached  ttl=59m3s  source="Cache-Control: max-age=3543"
+auth cache hit, skipping external auth call
+auth response not cached  source="Cache-Control: no-store"
+```
 
 ### Forward Original Headers
 

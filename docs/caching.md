@@ -176,18 +176,33 @@ The `response_cache_redis` section has the same schema as `redis`. See [Configur
 
 ## External RL/Auth Response Caching
 
-The same CDN-style cache semantics apply to responses from external rate-limit and auth services. These services can control their own cache behavior:
+External rate-limit and auth services can control their own caching behavior. EdgeQuota applies the same priority order for both:
 
-**HTTP responses** — The `Cache-Control` header on the external service response drives TTL, following the same rules as backend responses.
+| Priority | Source | Applies to |
+|----------|--------|-----------|
+| 1 | HTTP `Cache-Control: max-age=N` | HTTP backends only |
+| 2 | HTTP `Expires: <RFC1123>` | HTTP backends only |
+| 3 | Body `cache_max_age_seconds` | HTTP and gRPC |
+| 4 | Body `cache_no_store: true` | HTTP and gRPC |
 
-**gRPC / JSON body responses** — Two body fields serve as cache directives:
+**HTTP headers always take precedence over body fields.** If the response carries `Cache-Control: max-age=600` and the body also sets `"cache_max_age_seconds": 30`, EdgeQuota caches for 600 seconds. Body fields are the only option for gRPC services (which have no HTTP headers).
+
+**Body cache fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `cache_max_age_seconds` | int64 | Cache the response for N seconds. |
 | `cache_no_store` | bool | If `true`, do not cache this response. |
 
-If an external service response contains **no cache directives** (no `Cache-Control` header, no body fields), EdgeQuota does not cache it — every request hits the external service. This is the safe default; services must explicitly opt in to caching.
+If an external service response contains **no cache directives** (no `Cache-Control` header, no `Expires` header, no body fields), EdgeQuota does not cache it — every request hits the external service. This is the safe default; services must explicitly opt in to caching.
+
+EdgeQuota logs the cache decision at `DEBUG` level on every auth and external-RL call:
+
+```
+auth response cached     ttl=5m0s   source="Cache-Control: max-age=300"
+auth cache hit, skipping external auth call
+auth response not cached source="body: cache_no_store=true"
+```
 
 ---
 
