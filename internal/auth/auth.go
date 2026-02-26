@@ -269,13 +269,14 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		maxBodySize = defaultMaxAuthBodySize
 	}
 
-	// When no header filter is configured, default to an allow-list that
-	// forwards only credential headers. The auth service exists to validate
-	// credentials, so they must reach it; all other headers are dropped
-	// unless the operator explicitly widens the list.
+	// When no header filter is configured, default to a deny-list that strips
+	// session/CSRF tokens but keeps Authorization and X-Api-Key (unlike
+	// DefaultSensitiveHeaders which strips them). This preserves full request
+	// context for the auth service while still preventing cookie-based session
+	// tokens from leaking to an external service unnecessarily.
 	hfCfg := cfg.HeaderFilter
 	if len(hfCfg.AllowList) == 0 && len(hfCfg.DenyList) == 0 {
-		hfCfg.AllowList = config.DefaultAuthAllowHeaders
+		hfCfg.DenyList = config.DefaultAuthDenyHeaders
 	}
 
 	c := &Client{

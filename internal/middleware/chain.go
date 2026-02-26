@@ -456,9 +456,10 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("auth client: %w", authErr)
 		}
 		c.authClient.Store(authClient)
-		c.authCacheRedis = c.resolveAuthCacheRedis()
+		c.authCacheRedis = c.resolveCacheRedis(cfg, logger)
 		if c.authCacheRedis != nil {
-			logger.Info("authentication enabled with response caching")
+			logger.Info("authentication enabled with response caching",
+				"cache_backend", cacheBackendName(c.authCacheRedis))
 		} else {
 			logger.Info("authentication enabled")
 		}
@@ -579,32 +580,37 @@ func (c *Chain) responseCacheRecoveryLoop(
 // responses. If cache_redis is explicitly configured, a dedicated client is
 // created and stored in c.cacheRedis so it can be closed separately. Otherwise,
 // the main rate-limit Redis client is reused.
+// resolveCacheRedis is idempotent: the first call connects to (or falls back
+// from) the dedicated cache_redis and stores the result in c.cacheRedis;
+// every subsequent call returns that same client immediately.
 func (c *Chain) resolveCacheRedis(cfg *config.Config, logger *slog.Logger) redis.Client {
+	if c.cacheRedis != nil {
+		return c.cacheRedis
+	}
+
 	// Dedicated cache_redis configured — create a separate connection.
 	if cfg.CacheRedis != nil && len(cfg.CacheRedis.Endpoints) > 0 {
 		cacheClient, err := redis.NewClient(*cfg.CacheRedis)
 		if err != nil {
 			logger.Warn("dedicated cache redis unavailable, falling back to main redis",
 				"error", err)
-			// Fall through to reuse main redis.
 		} else {
 			c.cacheRedis = cacheClient
 			logger.Info("dedicated cache redis connected",
 				"mode", cfg.CacheRedis.Mode,
 				"endpoints", cfg.CacheRedis.Endpoints)
-			return cacheClient
+			return c.cacheRedis
 		}
 	}
 
-	// Reuse the main rate-limit Redis client.
+	// Fall back to the main rate-limit Redis client.
 	c.mu.RLock()
-	var client redis.Client
 	if c.limiter != nil {
-		client = c.limiter.Client()
+		c.cacheRedis = c.limiter.Client()
 	}
 	c.mu.RUnlock()
 
-	return client
+	return c.cacheRedis
 }
 
 func cacheBackendName(c redis.Client) string {
@@ -612,22 +618,6 @@ func cacheBackendName(c redis.Client) string {
 		return "redis"
 	}
 	return "none"
-}
-
-// resolveAuthCacheRedis returns the Redis client to use for auth response
-// caching. Reuses the dedicated cache_redis client when available, otherwise
-// falls back to the main rate-limit limiter client. Returns nil when no Redis
-// is configured (auth caching is silently disabled).
-func (c *Chain) resolveAuthCacheRedis() redis.Client {
-	if c.cacheRedis != nil {
-		return c.cacheRedis
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.limiter != nil {
-		return c.limiter.Client()
-	}
-	return nil
 }
 
 // authCacheKeyExclude is the set of per-request headers that must NOT
@@ -1917,9 +1907,7 @@ func (c *Chain) reloadAuth(prevCfg, newCfg *config.Config) {
 	if oldAuth != nil {
 		_ = oldAuth.Close()
 	}
-	// Refresh the cache client reference in case cacheRedis was re-created
-	// by a concurrent reloadExternalRL call.
-	c.authCacheRedis = c.resolveAuthCacheRedis()
+	c.authCacheRedis = c.cacheRedis
 }
 
 // reloadExternalRL rebuilds the external rate-limit client if enabled.

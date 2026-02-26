@@ -466,14 +466,20 @@ var DefaultSensitiveHeaders = []string{
 	"X-Xsrf-Token",
 }
 
-// DefaultAuthAllowHeaders is the implicit allow-list applied to the auth
-// header filter when neither allow_list nor deny_list is configured. The auth
-// service exists specifically to validate credentials, so credential headers
-// must reach it by default. All other headers are dropped unless the operator
-// explicitly widens the allow-list or switches to a deny-list.
-var DefaultAuthAllowHeaders = []string{
-	"Authorization",
-	"X-Api-Key",
+// DefaultAuthDenyHeaders is the implicit deny-list applied to the auth header
+// filter when neither allow_list nor deny_list is configured. It is a subset
+// of DefaultSensitiveHeaders, with Authorization and X-Api-Key removed because
+// the auth service exists specifically to validate credentials and must
+// receive them. Session and CSRF tokens are still stripped because the auth
+// service has no use for them and forwarding them unnecessarily increases
+// attack surface.
+var DefaultAuthDenyHeaders = []string{
+	"Cookie",
+	"Set-Cookie",
+	"Proxy-Authorization",
+	"Proxy-Authenticate",
+	"X-Csrf-Token",
+	"X-Xsrf-Token",
 }
 
 // DefaultEphemeralHeaders lists per-request headers that MUST NOT participate

@@ -215,27 +215,27 @@ The circuit breaker is transparent to clients — the `failure_policy` determine
 
 ### Header Filtering
 
-The auth service exists specifically to validate credentials, so EdgeQuota's default is an **allow-list** that forwards only credential headers:
+EdgeQuota uses a **deny-list** for the auth header filter. By default, all headers are forwarded to the auth service **except** session and CSRF tokens that have no use in auth decisions:
 
-| Default forwarded headers | Rationale |
+| Default stripped headers | Rationale |
 |---|---|
-| `Authorization` | Bearer tokens, Basic auth |
-| `X-Api-Key` | API key authentication |
+| `Cookie`, `Set-Cookie` | Session tokens — unnecessary for most auth patterns |
+| `Proxy-Authorization`, `Proxy-Authenticate` | Proxy credentials — internal infrastructure |
+| `X-Csrf-Token`, `X-Xsrf-Token` | CSRF tokens — meaningless outside a browser session |
 
-All other headers are **dropped by default**. This is a safe, minimal-footprint default — the auth service receives exactly what it needs and nothing else.
+Everything else passes through, including `Authorization`, `X-Api-Key`, and any custom headers like `X-Tenant-Id`. This is intentionally different from the external rate-limit service default (which also strips `Authorization` and `X-Api-Key`), because the auth service is precisely the place that validates those credentials.
 
-**Widening the default.** To forward additional headers, set an explicit `allow_list`:
+**Narrowing to an allow-list.** When only specific headers need to reach the auth service:
 
 ```yaml
 auth:
   header_filter:
-    allow_list:
+    allow_list:              # only forward these headers
       - "Authorization"
-      - "X-Tenant-Id"   # forwarded in addition
-      - "X-Api-Key"
+      - "X-Tenant-Id"
 ```
 
-**Switching to a deny-list.** When `deny_list` is set (and `allow_list` is empty), EdgeQuota forwards all headers except those listed. This is useful when the auth service needs broad access to request context:
+**Replacing the deny-list.** To forward everything except a custom set:
 
 ```yaml
 auth:
@@ -243,9 +243,10 @@ auth:
     deny_list:               # forward everything except these
       - "Cookie"
       - "Set-Cookie"
+      - "X-Internal-Secret"
 ```
 
-> **Note:** When `allow_list` is set, `deny_list` is ignored. When both are empty, the `DefaultAuthAllowHeaders` allow-list (`Authorization`, `X-Api-Key`) applies automatically.
+> **Note:** When `allow_list` is set, `deny_list` is ignored. When both are empty, `DefaultAuthDenyHeaders` (`Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `X-Csrf-Token`, `X-Xsrf-Token`) applies automatically.
 
 ### Auth Response Caching
 

@@ -248,7 +248,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		return c
 	}
 
-	t.Run("default allow-list forwards Authorization and X-Api-Key only", func(t *testing.T) {
+	t.Run("default deny-list forwards Authorization, X-Api-Key, and custom headers", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
@@ -259,18 +259,21 @@ func TestBuildCheckRequest(t *testing.T) {
 		r.Header.Set("X-Api-Key", "secret-key")
 		r.Header.Set("X-Tenant-Id", "tenant-1")
 		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Cookie", "session=abc")
+		r.Header.Set("X-Csrf-Token", "tok")
 		r.RemoteAddr = "192.168.1.1:5000"
 
 		c := newDefaultClient(t, srv.URL)
 		cr := c.BuildCheckRequest(r, nil)
 
-		assert.Equal(t, "Bearer token", cr.Headers["Authorization"],
-			"Authorization must reach the auth service by default")
-		assert.Equal(t, "secret-key", cr.Headers["X-Api-Key"],
-			"X-Api-Key must reach the auth service by default")
-		// All other headers are stripped unless the operator widens the list.
-		assert.NotContains(t, cr.Headers, "X-Tenant-Id")
-		assert.NotContains(t, cr.Headers, "Content-Type")
+		// Credential and custom headers pass through.
+		assert.Equal(t, "Bearer token", cr.Headers["Authorization"])
+		assert.Equal(t, "secret-key", cr.Headers["X-Api-Key"])
+		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
+		assert.Equal(t, "application/json", cr.Headers["Content-Type"])
+		// Session / CSRF tokens are still stripped.
+		assert.NotContains(t, cr.Headers, "Cookie")
+		assert.NotContains(t, cr.Headers, "X-Csrf-Token")
 	})
 
 	t.Run("explicit allow_list overrides the default", func(t *testing.T) {
@@ -292,7 +295,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		require.NoError(t, err)
 		cr := c.BuildCheckRequest(r, nil)
 
-		// Operator chose a different allow-list — only that list applies.
+		// Operator restricted to an allow-list — only that list applies.
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
 		assert.NotContains(t, cr.Headers, "Authorization")
 	})
@@ -317,7 +320,7 @@ func TestBuildCheckRequest(t *testing.T) {
 		require.NoError(t, err)
 		cr := c.BuildCheckRequest(r, nil)
 
-		// Deny-list configured — Authorization passes, Cookie is stripped.
+		// Operator's deny-list — Authorization and X-Tenant-Id pass; Cookie stripped.
 		assert.Equal(t, "Bearer token", cr.Headers["Authorization"])
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
 		assert.NotContains(t, cr.Headers, "Cookie")
@@ -330,15 +333,15 @@ func TestBuildCheckRequest(t *testing.T) {
 		r.Header.Set("Content-Type", "application/json")
 		r.RemoteAddr = "192.168.1.1:5000"
 
-		// Direct construction bypasses the New() default — useful for rate-limit
-		// service path which still uses the deny-list approach.
+		// Direct construction bypasses NewClient() — raw filter still uses the
+		// DefaultSensitiveHeaders deny-list (Authorization is stripped).
 		c := &Client{headerFilter: config.NewHeaderFilter(config.HeaderFilterConfig{})}
 		cr := c.BuildCheckRequest(r, nil)
 
 		assert.Equal(t, "POST", cr.Method)
 		assert.Equal(t, "/api/v1/resource", cr.Path)
 		assert.Equal(t, "192.168.1.1:5000", cr.RemoteAddr)
-		assert.NotContains(t, cr.Headers, "Authorization")
+		assert.NotContains(t, cr.Headers, "Authorization") // stripped by DefaultSensitiveHeaders
 		assert.Equal(t, "tenant-1", cr.Headers["X-Tenant-Id"])
 		assert.Equal(t, "application/json", cr.Headers["Content-Type"])
 	})

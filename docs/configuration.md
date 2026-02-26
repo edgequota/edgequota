@@ -165,10 +165,10 @@ backend:
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `allow_list` | []string | `["Authorization","X-Api-Key"]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (`deny_list` ignored when set). When empty and `deny_list` is also empty, `DefaultAuthAllowHeaders` (`Authorization`, `X-Api-Key`) is used automatically. |
-| `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers. Only applies when `allow_list` is empty. |
+| `allow_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_ALLOW_LIST` | Exclusive: only forward these headers (`deny_list` ignored when set). |
+| `deny_list` | []string | `[]` | `EDGEQUOTA_AUTH_HEADER_FILTER_DENY_LIST` | Never forward these headers. When both lists are empty, `DefaultAuthDenyHeaders` applies. |
 
-The auth service is the credential validator — it needs credential headers, not all request headers. Therefore the auth header filter defaults to a minimal allow-list (`Authorization`, `X-Api-Key`), unlike the external rate-limit filter which defaults to the `DefaultSensitiveHeaders` deny-list.
+When neither list is configured, `DefaultAuthDenyHeaders` is applied automatically: `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Proxy-Authenticate`, `X-Csrf-Token`, `X-Xsrf-Token` are stripped and everything else (including `Authorization`, `X-Api-Key`, and custom headers like `X-Tenant-Id`) is forwarded. This differs from the external rate-limit default (`DefaultSensitiveHeaders`) which also strips `Authorization` and `X-Api-Key` — the auth service needs those to do its job.
 
 ### `rate_limit` — Rate Limiting (Top-Level)
 
