@@ -241,7 +241,7 @@ time=2025-01-15T10:30:45.123Z level=INFO msg="server started" address=:8080 vers
 
 ## OpenTelemetry Tracing
 
-EdgeQuota has full OpenTelemetry support: it extracts W3C `traceparent`/`tracestate` headers from every incoming request, creates a root span, and propagates the trace context to all downstream calls (auth service, external RL service, Redis). Spans are exported via OTLP HTTP.
+EdgeQuota has full OpenTelemetry support: it extracts W3C `traceparent`/`tracestate` headers from every incoming request, creates a root span, and propagates the trace context to all downstream calls (auth service, external RL service, Redis). Spans are exported via OTLP using either gRPC (default) or HTTP transport.
 
 ### Trace Context Propagation
 
@@ -258,7 +258,9 @@ If you want EdgeQuota to participate in an existing trace from an upstream proxy
 ```yaml
 tracing:
   enabled: true
-  endpoint: "http://otel-collector:4318"
+  protocol: "grpc"                  # "grpc" (default) or "http"
+  endpoint: "otel-collector:4317"   # grpc: host:port | http: http://host:4318
+  insecure: true                    # plaintext (no TLS)
   service_name: "edgequota"
   sample_rate: 0.1    # Sample 10% of requests when no upstream trace is present
   level: "external"   # Instrumentation depth: basic | external | full

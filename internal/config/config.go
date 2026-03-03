@@ -928,13 +928,41 @@ func (l TracingLevel) Valid() bool {
 	return false
 }
 
+// TracingProtocol selects the OTLP exporter transport.
+type TracingProtocol string
+
+const (
+	TracingProtocolGRPC TracingProtocol = "grpc"
+	TracingProtocolHTTP TracingProtocol = "http"
+)
+
+func (p TracingProtocol) Valid() bool {
+	switch p {
+	case TracingProtocolGRPC, TracingProtocolHTTP, "":
+		return true
+	}
+	return false
+}
+
 // TracingConfig holds OpenTelemetry tracing settings.
 type TracingConfig struct {
-	Enabled     bool         `yaml:"enabled"      env:"ENABLED"`
-	Endpoint    string       `yaml:"endpoint"     env:"ENDPOINT"`
-	ServiceName string       `yaml:"service_name" env:"SERVICE_NAME"`
-	SampleRate  float64      `yaml:"sample_rate"  env:"SAMPLE_RATE"`
-	Level       TracingLevel `yaml:"level"        env:"LEVEL"`
+	Enabled     bool            `yaml:"enabled"      env:"ENABLED"`
+	Protocol    TracingProtocol `yaml:"protocol"     env:"PROTOCOL"`
+	Endpoint    string          `yaml:"endpoint"     env:"ENDPOINT"`
+	Insecure    bool            `yaml:"insecure"     env:"INSECURE"`
+	ServiceName string          `yaml:"service_name" env:"SERVICE_NAME"`
+	SampleRate  float64         `yaml:"sample_rate"  env:"SAMPLE_RATE"`
+	Level       TracingLevel    `yaml:"level"        env:"LEVEL"`
+}
+
+// ResolvedProtocol returns the effective protocol, defaulting to "grpc".
+func (c TracingConfig) ResolvedProtocol() TracingProtocol {
+	switch c.Protocol {
+	case TracingProtocolGRPC, TracingProtocolHTTP:
+		return c.Protocol
+	default:
+		return TracingProtocolGRPC
+	}
 }
 
 // ResolvedLevel returns the effective tracing level, defaulting to "external"
@@ -1010,6 +1038,8 @@ func Defaults() *Config {
 			Format: LogFormatJSON,
 		},
 		Tracing: TracingConfig{
+			Protocol:    TracingProtocolGRPC,
+			Insecure:    true,
 			ServiceName: "edgequota",
 			SampleRate:  0.1,
 		},
@@ -1400,6 +1430,9 @@ func validateEvents(cfg *Config) error {
 func validateTracing(cfg *Config) error {
 	if cfg.Tracing.Enabled && cfg.Tracing.Endpoint == "" {
 		return fmt.Errorf("tracing.endpoint is required when tracing is enabled")
+	}
+	if !cfg.Tracing.Protocol.Valid() {
+		return fmt.Errorf("invalid tracing.protocol %q: must be grpc or http", cfg.Tracing.Protocol)
 	}
 	if !cfg.Tracing.Level.Valid() {
 		return fmt.Errorf("invalid tracing.level %q: must be basic, external, or full", cfg.Tracing.Level)

@@ -297,6 +297,8 @@ logging:
 # Optional OpenTelemetry tracing.
 # tracing:
 #   enabled: true
-#   endpoint: "http://otel-collector:4318"
+#   protocol: "grpc"                    # "grpc" (default) or "http"
+#   endpoint: "otel-collector:4317"     # grpc: host:port | http: http://host:4318
+#   insecure: true                      # plaintext (no TLS)
 #   service_name: "edgequota"
 #   sample_rate: 0.1

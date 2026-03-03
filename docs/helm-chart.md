@@ -204,7 +204,9 @@ edgequota:
 edgequota:
   tracing:
     enabled: true
-    endpoint: "http://otel-collector:4318"
+    protocol: "grpc"                  # "grpc" (default) or "http"
+    endpoint: "otel-collector:4317"   # grpc: host:port | http: http://host:4318
+    insecure: true                    # plaintext (no TLS)
     serviceName: "edgequota"
     sampleRate: 0.1
     # level controls instrumentation depth:
