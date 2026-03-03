@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -165,21 +166,35 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	// deadlines only on non-streaming responses.
 	chain.SetWriteTimeout(writeTimeout)
 
+	// Wrap the chain with otelhttp so that:
+	//  1. Incoming traceparent/tracestate headers are extracted into the
+	//     request context (W3C TraceContext propagation).
+	//  2. A root "edgequota.request" span is created for every request,
+	//     which the chain's child spans (auth, external_rl, proxy, redis)
+	//     automatically nest under.
+	// otelhttp uses the global TextMapPropagator registered by InitTracing.
+	tracedChain := otelhttp.NewHandler(chain, "edgequota.request",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return "edgequota.request"
+		}),
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
 	// When TLS is enabled, Go's native HTTP/2 (via NextProtos in tls.Config)
 	// handles h2 negotiation. h2c.NewHandler is only needed for cleartext
 	// HTTP/2 upgrades (e.g. gRPC without TLS).
 	var mainHandler http.Handler
 	if cfg.Server.TLS.Enabled {
-		mainHandler = chain
+		mainHandler = tracedChain
 	} else {
-		mainHandler = h2c.NewHandler(chain, &http2.Server{})
+		mainHandler = h2c.NewHandler(tracedChain, &http2.Server{})
 	}
 
 	var h3srv *http3.Server
 	if cfg.Server.TLS.HTTP3Enabled {
 		h3srv = &http3.Server{
 			Addr:           cfg.Server.Address,
-			Handler:        chain,
+			Handler:        tracedChain,
 			MaxHeaderBytes: 1 << 20, // 1 MiB — same as the TCP server.
 			IdleTimeout:    idleTimeout,
 			QUICConfig: &quic.Config{

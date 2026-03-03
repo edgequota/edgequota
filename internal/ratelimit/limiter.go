@@ -14,6 +14,9 @@ import (
 
 	"github.com/edgequota/edgequota/internal/redis"
 	goredis "github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // ErrLimiterClosed is returned when Allow or AllowWithOverrides is called
@@ -118,19 +121,27 @@ type Limiter struct {
 	ttl       int // seconds
 	keyPrefix string
 	closed    atomic.Bool
+	// traceRedis, when true, wraps Redis calls in OTel spans (full tracing level).
+	traceRedis bool
 }
 
+var limiterTracer = otel.Tracer("edgequota.redis")
+
 // NewLimiter creates a Redis-backed rate limiter.
-func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int, prefix string, logger *slog.Logger) *Limiter {
+// When traceRedis is true, each Redis script execution is wrapped in an OTel
+// span ("edgequota.redis.ratelimit") for full-level distributed tracing.
+func NewLimiter(client redis.Client, ratePerSecond float64, burst int64, ttl int, prefix string, logger *slog.Logger, traceRedis ...bool) *Limiter {
+	trace := len(traceRedis) > 0 && traceRedis[0]
 	return &Limiter{
-		client:    client,
-		logger:    logger,
-		src:       rateLimitLua,
-		hash:      tokenBucketScript.Hash(),
-		rate:      ratePerSecond / 1e6, // convert to per-microsecond
-		burst:     burst,
-		ttl:       ttl,
-		keyPrefix: prefix,
+		client:     client,
+		logger:     logger,
+		src:        rateLimitLua,
+		hash:       tokenBucketScript.Hash(),
+		rate:       ratePerSecond / 1e6, // convert to per-microsecond
+		burst:      burst,
+		ttl:        ttl,
+		keyPrefix:  prefix,
+		traceRedis: trace,
 	}
 }
 
@@ -169,6 +180,15 @@ func (l *Limiter) Allow(ctx context.Context, key string) (*Result, error) {
 	fullKey := l.keyPrefix + key
 	now := time.Now().UnixMicro()
 
+	if l.traceRedis {
+		var span oteltrace.Span
+		ctx, span = limiterTracer.Start(ctx, "edgequota.redis.ratelimit",
+			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
+		)
+		defer span.End()
+	}
+
 	cmd, err := l.evalScript(ctx, []string{fullKey}, l.rate, l.burst, l.ttl, now)
 	if err != nil {
 		return nil, err
@@ -192,6 +212,15 @@ func (l *Limiter) AllowWithOverrides(ctx context.Context, key string, ratePerSec
 	ttl := l.ttl
 	if ttlOverride > 0 {
 		ttl = ttlOverride
+	}
+
+	if l.traceRedis {
+		var span oteltrace.Span
+		ctx, span = limiterTracer.Start(ctx, "edgequota.redis.ratelimit",
+			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
+		)
+		defer span.End()
 	}
 
 	cmd, err := l.evalScript(ctx, []string{fullKey}, rate, burst, ttl, now)

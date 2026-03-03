@@ -241,7 +241,17 @@ time=2025-01-15T10:30:45.123Z level=INFO msg="server started" address=:8080 vers
 
 ## OpenTelemetry Tracing
 
-EdgeQuota supports distributed tracing via OpenTelemetry with OTLP HTTP export.
+EdgeQuota has full OpenTelemetry support: it extracts W3C `traceparent`/`tracestate` headers from every incoming request, creates a root span, and propagates the trace context to all downstream calls (auth service, external RL service, Redis). Spans are exported via OTLP HTTP.
+
+### Trace Context Propagation
+
+The W3C TraceContext propagator is **always active**, regardless of whether tracing export is enabled. This means:
+
+- Incoming `traceparent`/`tracestate` headers are extracted and attached to the request context.
+- All outgoing HTTP/gRPC calls (auth, external RL, backend) carry the propagated trace context.
+- `traceparent`/`tracestate` are excluded from auth and external RL cache keys so they do not defeat caching.
+
+If you want EdgeQuota to participate in an existing trace from an upstream proxy or API gateway, simply ensure the upstream sets `traceparent` — EdgeQuota will inherit the sampling decision and attach all its spans as children.
 
 ### Configuration
 
@@ -250,8 +260,37 @@ tracing:
   enabled: true
   endpoint: "http://otel-collector:4318"
   service_name: "edgequota"
-  sample_rate: 0.1    # Sample 10% of requests
+  sample_rate: 0.1    # Sample 10% of requests when no upstream trace is present
+  level: "external"   # Instrumentation depth: basic | external | full
 ```
+
+### Instrumentation Levels
+
+The `level` field controls how many spans EdgeQuota generates per request:
+
+| Level | Spans created |
+|-------|--------------|
+| `basic` | One root span per request: `edgequota.request` |
+| `external` *(default)* | Root span + child spans for auth (`edgequota.auth.http`) and external RL (`edgequota.external_rl.http`) HTTP calls, plus gRPC spans (always on via `otelgrpc`) |
+| `full` | Everything in `external` + child spans for every Redis operation: `edgequota.redis.ratelimit`, `edgequota.redis.auth_cache_get`, `edgequota.redis.auth_cache_set` |
+
+The default (`external`) is a good balance between visibility and overhead. Use `full` only when debugging Redis latency or cache behaviour.
+
+### Span Inventory
+
+| Span name | Level | Description |
+|-----------|-------|-------------|
+| `edgequota.request` | basic+ | Root span — wraps the entire request pipeline |
+| `edgequota.auth` | basic+ | Auth check decision (allowed/denied) |
+| `edgequota.external_rl` | basic+ | External rate limit fetch (includes cache lookup) |
+| `edgequota.proxy` | basic+ | Backend proxy call |
+| `edgequota.auth.http` | external+ | Outgoing HTTP call to auth service |
+| `edgequota.external_rl.http` | external+ | Outgoing HTTP call to external RL service |
+| `edgequota.redis.ratelimit` | full | Redis Lua script execution for token bucket |
+| `edgequota.redis.auth_cache_get` | full | Redis GET for auth response cache lookup |
+| `edgequota.redis.auth_cache_set` | full | Redis SET when caching a fresh auth response |
+
+> **gRPC note:** Auth and external RL gRPC transports are always instrumented via `otelgrpc` regardless of level, because the gRPC stats handler is part of the dial options and cannot be selectively disabled.
 
 ### Trace Attributes
 
@@ -259,6 +298,10 @@ tracing:
 |-----------|-------|
 | `service.name` | Configured `service_name` |
 | `service.version` | Binary version (set via `-ldflags`) |
+| `tenant_key` | Tenant identifier (on `edgequota.proxy` span) |
+| `rate_limit.allowed` | Whether the request was allowed (on `edgequota.proxy` span) |
+| `rate_limit.remaining` | Remaining tokens in bucket (on `edgequota.proxy` span) |
+| `db.system` | `"redis"` (on Redis spans) |
 
 ### Sampling
 
@@ -269,9 +312,10 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 
 ### Production Recommendation
 
+- **Level:** `external` (default). Use `full` only for debugging Redis performance.
 - **Sample rate:** 0.01–0.1 (1–10%) for high-traffic services.
 - **Endpoint:** Point to an OpenTelemetry Collector, not directly to a tracing backend.
-- **Cost:** Higher sample rates increase storage and network costs.
+- **Cost:** Higher sample rates and `full` level increase storage and network costs.
 
 ---
 

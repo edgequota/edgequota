@@ -22,6 +22,7 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
@@ -322,7 +323,37 @@ func resolveCBResetTimeout(configured string) time.Duration {
 
 // NewExternalClient creates a client for the external rate limit service.
 // The redisClient is used for distributed caching; pass nil to disable caching.
-func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, logger *slog.Logger) (*ExternalClient, error) {
+// buildExternalRLTransport returns an HTTP RoundTripper for the external RL
+// client. When the tracing level is "external" or "full" the transport is
+// wrapped with otelhttp so outgoing requests propagate the current span's
+// trace context and appear as child spans in distributed traces.
+func buildExternalRLTransport(lvl config.TracingLevel) http.RoundTripper {
+	base := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if lvl == config.TracingLevelExternal || lvl == config.TracingLevelFull {
+		return otelhttp.NewTransport(base,
+			otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
+				return "edgequota.external_rl.http"
+			}),
+		)
+	}
+	return base
+}
+
+// NewExternalClient creates an ExternalClient from the given config.
+// When tracingLevel is "external" or "full", outgoing HTTP requests to the
+// external rate limit service carry the current span's trace context, creating
+// child spans that are visible in distributed traces.
+func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, logger *slog.Logger, tracingLevel ...config.TracingLevel) (*ExternalClient, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -333,17 +364,12 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, lo
 
 	// Tuned HTTP transport with high per-host connection pool for
 	// low-latency, high-concurrency external rate limit calls.
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100, // External RL is typically a single host.
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	// Wrapped with otelhttp at external/full tracing levels.
+	lvl := config.TracingLevelExternal
+	if len(tracingLevel) > 0 {
+		lvl = tracingLevel[0]
 	}
+	baseTransport := buildExternalRLTransport(lvl)
 
 	maxConcurrent := int64(cfg.MaxConcurrentRequests)
 	if maxConcurrent <= 0 {
@@ -364,7 +390,7 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, lo
 
 	ec := &ExternalClient{
 		httpURL:         cfg.HTTP.URL,
-		httpClient:      &http.Client{Timeout: timeout, Transport: transport},
+		httpClient:      &http.Client{Timeout: timeout, Transport: baseTransport},
 		timeout:         timeout,
 		headerFilter:    config.NewHeaderFilter(cfg.HeaderFilter),
 		cacheKeyExclude: cacheKeyExclude,

@@ -485,10 +485,13 @@ If both `auth_token` and an explicit `headers` entry for the same header name ex
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `enabled` | bool | `false` | `EDGEQUOTA_TRACING_ENABLED` | Enable distributed tracing |
+| `enabled` | bool | `false` | `EDGEQUOTA_TRACING_ENABLED` | Enable distributed tracing export via OTLP |
 | `endpoint` | string | `""` | `EDGEQUOTA_TRACING_ENDPOINT` | OTLP HTTP endpoint (e.g., `http://otel-collector:4318`) |
 | `service_name` | string | `"edgequota"` | `EDGEQUOTA_TRACING_SERVICE_NAME` | Service name in traces |
-| `sample_rate` | float64 | `0.1` | `EDGEQUOTA_TRACING_SAMPLE_RATE` | Sampling ratio (0.0–1.0) |
+| `sample_rate` | float64 | `0.1` | `EDGEQUOTA_TRACING_SAMPLE_RATE` | Sampling ratio (0.0–1.0); ignored when an upstream trace is present |
+| `level` | string | `"external"` | `EDGEQUOTA_TRACING_LEVEL` | Instrumentation depth: `basic`, `external` (default), or `full`. See [Observability — Instrumentation Levels](observability.md#instrumentation-levels) |
+
+> **Note:** W3C `traceparent`/`tracestate` propagation is always active. Even with `enabled: false`, incoming trace headers are forwarded to backends and outgoing calls carry the correct context.
 
 ---
 

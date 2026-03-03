@@ -907,12 +907,45 @@ func (l LoggingConfig) AccessLogEnabled() bool {
 	return *l.AccessLog
 }
 
+// TracingLevel controls how deeply EdgeQuota instruments requests with spans.
+//
+//	basic    – one root span per request (edgequota.request)
+//	external – root span + child spans for auth and external RL HTTP/gRPC calls
+//	full     – external + child spans for every Redis operation
+type TracingLevel string
+
+const (
+	TracingLevelBasic    TracingLevel = "basic"
+	TracingLevelExternal TracingLevel = "external"
+	TracingLevelFull     TracingLevel = "full"
+)
+
+func (l TracingLevel) Valid() bool {
+	switch l {
+	case TracingLevelBasic, TracingLevelExternal, TracingLevelFull, "":
+		return true
+	}
+	return false
+}
+
 // TracingConfig holds OpenTelemetry tracing settings.
 type TracingConfig struct {
-	Enabled     bool    `yaml:"enabled"      env:"ENABLED"`
-	Endpoint    string  `yaml:"endpoint"     env:"ENDPOINT"`
-	ServiceName string  `yaml:"service_name" env:"SERVICE_NAME"`
-	SampleRate  float64 `yaml:"sample_rate"  env:"SAMPLE_RATE"`
+	Enabled     bool         `yaml:"enabled"      env:"ENABLED"`
+	Endpoint    string       `yaml:"endpoint"     env:"ENDPOINT"`
+	ServiceName string       `yaml:"service_name" env:"SERVICE_NAME"`
+	SampleRate  float64      `yaml:"sample_rate"  env:"SAMPLE_RATE"`
+	Level       TracingLevel `yaml:"level"        env:"LEVEL"`
+}
+
+// ResolvedLevel returns the effective tracing level, defaulting to "external"
+// when not configured so existing deployments get auth+RL spans out of the box.
+func (c TracingConfig) ResolvedLevel() TracingLevel {
+	switch c.Level {
+	case TracingLevelBasic, TracingLevelExternal, TracingLevelFull:
+		return c.Level
+	default:
+		return TracingLevelExternal
+	}
 }
 
 // Defaults returns a Config populated with sensible default values.
@@ -1058,6 +1091,7 @@ func (cfg *Config) normalize() {
 	cfg.Logging.Level = LogLevel(strings.ToLower(string(cfg.Logging.Level)))
 	cfg.Logging.Format = LogFormat(strings.ToLower(string(cfg.Logging.Format)))
 	cfg.Server.TLS.MinVersion = TLSVersion(normalizeTLSVersion(string(cfg.Server.TLS.MinVersion)))
+	cfg.Tracing.Level = TracingLevel(strings.ToLower(string(cfg.Tracing.Level)))
 }
 
 // normalizeTLSVersion maps the various accepted spellings to canonical "1.2" / "1.3".
@@ -1366,6 +1400,9 @@ func validateEvents(cfg *Config) error {
 func validateTracing(cfg *Config) error {
 	if cfg.Tracing.Enabled && cfg.Tracing.Endpoint == "" {
 		return fmt.Errorf("tracing.endpoint is required when tracing is enabled")
+	}
+	if !cfg.Tracing.Level.Valid() {
+		return fmt.Errorf("invalid tracing.level %q: must be basic, external, or full", cfg.Tracing.Level)
 	}
 	return nil
 }

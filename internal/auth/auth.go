@@ -28,6 +28,7 @@ import (
 	authv1http "github.com/edgequota/edgequota/api/gen/http/auth/v1"
 	"github.com/edgequota/edgequota/internal/config"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -245,14 +246,17 @@ type Client struct {
 }
 
 // NewClient creates an auth client from the configuration.
-func NewClient(cfg config.AuthConfig) (*Client, error) {
+// When tracingLevel is "external" or "full", outgoing HTTP requests carry the
+// current span's trace context (traceparent/tracestate) so auth service logs
+// and traces are linked to the EdgeQuota request span.
+func NewClient(cfg config.AuthConfig, tracingLevel ...config.TracingLevel) (*Client, error) {
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil {
 		timeout = 5 * time.Second
 	}
 
 	// Custom transport with tuned connection pool for high-concurrency auth checks.
-	transport := &http.Transport{
+	var baseTransport http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -262,6 +266,20 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	// Wrap with otelhttp so outgoing auth requests propagate the current span's
+	// trace context and appear as child spans in traces.
+	lvl := config.TracingLevelExternal
+	if len(tracingLevel) > 0 {
+		lvl = tracingLevel[0]
+	}
+	if lvl == config.TracingLevelExternal || lvl == config.TracingLevelFull {
+		baseTransport = otelhttp.NewTransport(baseTransport,
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return "edgequota.auth.http"
+			}),
+		)
 	}
 
 	maxBodySize := cfg.MaxAuthBodySize
@@ -281,7 +299,7 @@ func NewClient(cfg config.AuthConfig) (*Client, error) {
 
 	c := &Client{
 		httpURL:                cfg.HTTP.URL,
-		httpClient:             &http.Client{Timeout: timeout, Transport: transport},
+		httpClient:             &http.Client{Timeout: timeout, Transport: baseTransport},
 		timeout:                timeout,
 		headerFilter:           config.NewHeaderFilter(hfCfg),
 		forwardOriginalHeaders: cfg.HTTP.ForwardOriginalHeaders,

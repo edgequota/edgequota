@@ -207,7 +207,14 @@ edgequota:
     endpoint: "http://otel-collector:4318"
     serviceName: "edgequota"
     sampleRate: 0.1
+    # level controls instrumentation depth:
+    #   basic    - one root span per request
+    #   external - root + auth/external RL spans (default)
+    #   full     - external + Redis operation spans
+    level: "external"
 ```
+
+W3C `traceparent`/`tracestate` propagation is always active even when `enabled: false`. See [Observability — OpenTelemetry Tracing](observability.md#opentelemetry-tracing) for the full span inventory.
 
 ---
 

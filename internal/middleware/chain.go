@@ -35,10 +35,14 @@ import (
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/semaphore"
 )
 
-var tracer = otel.Tracer("edgequota.middleware")
+var (
+	tracer      = otel.Tracer("edgequota.middleware")
+	redisTracer = otel.Tracer("edgequota.redis")
+)
 
 // requestIDHeader is the canonical HTTP header for request correlation.
 const requestIDHeader = "X-Request-Id"
@@ -241,6 +245,12 @@ type Chain struct {
 	reconnectMu  sync.Mutex
 	reconnecting bool
 
+	// tracingLevel controls the depth of OTel instrumentation:
+	//   basic    – root span only (created by the otelhttp wrapper in server.go)
+	//   external – + spans for auth and external RL HTTP calls (default)
+	//   full     – + spans for every Redis operation
+	tracingLevel config.TracingLevel
+
 	// Per-instance backoff config for the recovery loop. Copied from
 	// package-level defaults at construction; tests override these on
 	// individual Chain instances to avoid data races with goroutines
@@ -371,6 +381,7 @@ func NewChain(
 		recoveryBackoffBase: defaultRecoveryBackoffBase,
 		recoveryBackoffMax:  defaultRecoveryBackoffMax,
 		backoffJitter:       defaultBackoffJitter,
+		tracingLevel:        cfg.Tracing.ResolvedLevel(),
 	}
 	for _, o := range opts {
 		o(chain)
@@ -451,7 +462,7 @@ func NewChain(
 
 func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 	if cfg.Auth.Enabled {
-		authClient, authErr := auth.NewClient(cfg.Auth)
+		authClient, authErr := auth.NewClient(cfg.Auth, c.tracingLevel)
 		if authErr != nil {
 			return fmt.Errorf("auth client: %w", authErr)
 		}
@@ -468,7 +479,7 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 	if cfg.RateLimit.External.Enabled {
 		cacheClient := c.resolveCacheRedis(cfg, logger)
 
-		extClient, extErr := ratelimit.NewExternalClient(cfg.RateLimit.External, cacheClient, logger)
+		extClient, extErr := ratelimit.NewExternalClient(cfg.RateLimit.External, cacheClient, logger, c.tracingLevel)
 		if extErr != nil {
 			if c.cacheRedis != nil {
 				_ = c.cacheRedis.Close()
@@ -668,9 +679,18 @@ func authCacheKey(req *auth.CheckRequest) string {
 
 // getAuthFromCache retrieves a cached auth response from Redis.
 // Returns nil on cache miss or when Redis is unavailable.
+// When tracingLevel is "full", the Redis GET is wrapped in an OTel span.
 func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckResponse {
 	if c.authCacheRedis == nil {
 		return nil
+	}
+	if c.tracingLevel == config.TracingLevelFull {
+		var span oteltrace.Span
+		ctx, span = redisTracer.Start(ctx, "edgequota.redis.auth_cache_get",
+			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
+		)
+		defer span.End()
 	}
 	data, err := c.authCacheRedis.Get(ctx, key).Bytes()
 	if err != nil {
@@ -685,6 +705,7 @@ func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckRes
 
 // setAuthInCache stores an auth response in Redis with the given TTL.
 // No-ops when Redis is unavailable or TTL is zero.
+// When tracingLevel is "full", the Redis SET is wrapped in an OTel span.
 func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.CheckResponse, ttl time.Duration) {
 	if c.authCacheRedis == nil || ttl <= 0 {
 		return
@@ -692,6 +713,14 @@ func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.Check
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return
+	}
+	if c.tracingLevel == config.TracingLevelFull {
+		var span oteltrace.Span
+		ctx, span = redisTracer.Start(ctx, "edgequota.redis.auth_cache_set",
+			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
+		)
+		defer span.End()
 	}
 	_ = c.authCacheRedis.Set(ctx, key, data, ttl).Err()
 }
@@ -713,7 +742,7 @@ func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitPa
 	// path is taken for the base Allow call, while AllowWithOverrides is used for
 	// per-request limits supplied by the external service.
 	if p.ratePerSecond > 0 || cfg.RateLimit.External.Enabled {
-		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix, logger)
+		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix, logger, c.tracingLevel == config.TracingLevelFull)
 	} else if client != nil {
 		_ = client.Close()
 	}
@@ -1703,7 +1732,7 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		return
 	}
 
-	limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger)
+	limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger, c.tracingLevel == config.TracingLevelFull)
 
 	c.mu.Lock()
 	old := c.swapLimiterLocked(limiter)
@@ -1827,7 +1856,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	// Rebuild limiter with new params but same Redis client if available.
 	if c.limiter != nil {
 		oldLim := c.limiter
-		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix, c.logger)
+		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix, c.logger, c.tracingLevel == config.TracingLevelFull)
 	}
 
 	// Rebuild fallback limiter with new parameters.
@@ -1889,7 +1918,7 @@ func (c *Chain) reloadAuth(prevCfg, newCfg *config.Config) {
 	if !newCfg.Auth.Enabled || !authChanged {
 		return
 	}
-	newAuth, authErr := auth.NewClient(newCfg.Auth)
+	newAuth, authErr := auth.NewClient(newCfg.Auth, c.tracingLevel)
 	if authErr != nil {
 		c.logger.Error("reload auth client failed, keeping old client", "error", authErr)
 		return
@@ -1917,7 +1946,7 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 	}
 
 	cacheClient := c.resolveCacheRedis(newCfg, c.logger)
-	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient, c.logger)
+	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient, c.logger, c.tracingLevel)
 	if extErr != nil {
 		c.logger.Error("reload external RL client failed, keeping old client", "error", extErr)
 		return
