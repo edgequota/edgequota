@@ -27,6 +27,8 @@ import (
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http2"
 )
 
@@ -631,6 +633,7 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 				req.URL.Path = singleJoiningSlash(effective.Path, req.URL.Path)
 			}
 			setForwardingHeaders(req)
+			otel.GetTextMapPropagator().Inject(req.Context(), propagation.HeaderCarrier(req.Header))
 		},
 		Transport: &protocolAwareTransport{
 			defaultRT: defaultRT,
@@ -794,6 +797,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// can still route based on the client's requested domain.
 	setForwardingHeaders(r)
 	setForwardedFor(r)
+	otel.GetTextMapPropagator().Inject(r.Context(), propagation.HeaderCarrier(r.Header))
 	r.Host = effective.Host
 	r.URL.Host = effective.Host
 	r.URL.Scheme = effective.Scheme
