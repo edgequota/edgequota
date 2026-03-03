@@ -845,12 +845,14 @@ func (c *Chain) emitAccessLog(r *http.Request, sw *statusWriter, originalHost, r
 }
 
 // fetchExternalLimitsWithSpan wraps fetchExternalLimits with an OTel span
-// when an external rate-limit service is configured.
+// when an external rate-limit service is configured. The span context is
+// propagated into the request so that outgoing HTTP/gRPC calls to the
+// external service appear as children of edgequota.external_rl.
 func (c *Chain) fetchExternalLimitsWithSpan(r *http.Request, key string) (*ratelimit.ExternalLimits, string) {
 	if c.externalRL.Load() != nil {
-		_, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
+		ctx, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
 		extStart := time.Now()
-		limits, resolved := c.fetchExternalLimits(r, key)
+		limits, resolved := c.fetchExternalLimits(r.WithContext(ctx), key)
 		c.metrics.PromExternalRLDuration.Observe(time.Since(extStart).Seconds())
 		extSpan.End()
 		return limits, resolved
@@ -896,15 +898,17 @@ func (c *Chain) externalLimitsFailClosed(sw *statusWriter, extLimits *ratelimit.
 
 // runAuth executes the auth check with tracing if an auth client is
 // configured. Returns false if the request was denied (response already
-// written).
+// written). The request is updated with the auth span's context so that
+// downstream calls (gRPC/HTTP to the auth service) appear as children of
+// the edgequota.auth span rather than siblings of it.
 func (c *Chain) runAuth(sw *statusWriter, r *http.Request) bool {
 	ac := c.authClient.Load()
 	if ac == nil {
 		return true
 	}
-	_, authSpan := tracer.Start(r.Context(), "edgequota.auth")
+	ctx, authSpan := tracer.Start(r.Context(), "edgequota.auth")
 	authStart := time.Now()
-	allowed := c.checkAuth(sw, r, ac)
+	allowed := c.checkAuth(sw, r.WithContext(ctx), ac)
 	c.metrics.PromAuthDuration.Observe(time.Since(authStart).Seconds())
 	authSpan.End()
 	return allowed
