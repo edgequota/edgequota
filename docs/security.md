@@ -365,16 +365,18 @@ server:
 
 ### Identity Headers Forwarded Upstream
 
-When mTLS is active and a verified peer certificate exists, EdgeQuota injects these headers on **every** upstream request:
+EdgeQuota injects identity headers on **every** upstream request early in the middleware chain (before auth and rate limiting). When the TLS connection has a **verified** client certificate chain (`VerifiedChains`), identity is extracted from the leaf; otherwise the headers report `"false"`.
 
 | Header | Value | Example |
 |--------|-------|---------|
-| `X-EdgeQuota-mTLS` | `"true"` or `"false"` | `true` |
+| `X-EdgeQuota-MTLS` | `"true"` or `"false"` | `true` |
 | `X-EdgeQuota-Client-Fingerprint-SHA256` | SHA-256 hex of the leaf cert DER | `a1b2c3d4...` |
 | `X-EdgeQuota-Client-Serial` | Certificate serial number | `42` |
 | `X-EdgeQuota-Client-Subject` | Certificate subject DN | `CN=device-001,O=Acme` |
 
-**Anti-spoofing guarantee:** These headers are **always overwritten** — EdgeQuota deletes any incoming values before setting them from TLS state. Clients cannot spoof identity headers. The auth service injection deny list also blocks these headers.
+> **Verification semantics:** `X-EdgeQuota-MTLS=true` means the client presented a certificate **and** the Go TLS stack verified the chain against `ClientCAs`. If the listener uses `RequestClientCert` or `RequireAnyClientCert` (no chain verification), a presented-but-unverified cert will still result in `"false"`.
+
+**Anti-spoofing guarantee:** These headers are **always overwritten** — EdgeQuota deletes any incoming values before setting them from TLS state. Clients cannot spoof identity headers. The auth service injection deny list also blocks these headers. Identity is available to all downstream middleware (auth, rate limiting) since injection happens at the start of the pipeline.
 
 ### Kubernetes / Traefik Routing Example
 
@@ -492,7 +494,7 @@ Production deployment checklist:
 - [ ] All capabilities dropped (`capabilities.drop: [ALL]`)
 - [ ] TLS enabled for external-facing traffic (`server.tls.enabled: true`)
 - [ ] mTLS configured for device/service authentication if needed (`server.tls.mtls.enabled: true`)
-- [ ] mTLS identity headers (`X-EdgeQuota-*`) trusted only from EdgeQuota, not from external sources
+- [ ] mTLS identity headers (`X-EdgeQuota-MTLS`, `X-EdgeQuota-Client-*`) trusted only from EdgeQuota, not from external sources
 - [ ] Container image scanned for vulnerabilities
 - [ ] Secrets stored in Kubernetes Secrets, not ConfigMaps
 - [ ] Admin port (`:9090`) not exposed outside the cluster

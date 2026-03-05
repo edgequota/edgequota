@@ -1732,6 +1732,30 @@ func truncate(s string, maxLen int) string {
 func testConfigReload(base string) testResult {
 	const name = "config-reload"
 
+	// originalPatchJSON resets the ConfigMap to the Terraform-managed baseline
+	// (average=100, burst=50). This is applied at both the start (to handle
+	// leftover state from a previous test run) and at the end of the test
+	// (to leave the environment clean for future runs).
+	originalPatchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  static:\n    backend_url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n    average: 100\n    burst: 50\n    period: \"1s\"\n    key_strategy:\n      type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
+
+	// Reset to the high-limit baseline first so the test is idempotent
+	// even when run without a prior `terraform apply` (e.g. `go run . test`).
+	if _, resetErr := kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace,
+		"--type=merge", "-p", originalPatchJSON); resetErr != nil {
+		return fail(name, "failed to reset ConfigMap to baseline: %v", resetErr)
+	}
+
+	// Wait for the reset config to propagate and take effect before measuring.
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		// With average=100 and burst=50 a burst of 5 should all succeed.
+		ok, _ := sendBurst(base, nil, 5)
+		if ok == 5 {
+			break
+		}
+	}
+
 	// 1. Verify initial limits work (average=100, burst=50 — should allow 50).
 	ok200, _ := sendBurst(base, nil, 55)
 	if ok200 < 40 {
@@ -1739,18 +1763,24 @@ func testConfigReload(base string) testResult {
 	}
 
 	// 2. Patch the ConfigMap to lower the limits drastically (average=5, burst=3).
-	patchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  static:\n    backend_url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n    average: 5\n    burst: 3\n    period: \"1s\"\n    key_strategy:\n      type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
+	reducedPatchJSON := `{"data":{"config.yaml":"server:\n  address: \":8080\"\n  read_timeout: \"30s\"\n  write_timeout: \"30s\"\n  idle_timeout: \"120s\"\n  drain_timeout: \"5s\"\nadmin:\n  address: \":9090\"\nbackend:\n  timeout: \"10s\"\n  max_idle_conns: 50\n  idle_conn_timeout: \"60s\"\nrate_limit:\n  failure_policy: \"passThrough\"\n  key_prefix: \"config-reload\"\n  static:\n    backend_url: \"http://whoami.edgequota-e2e.svc.cluster.local:80\"\n    average: 5\n    burst: 3\n    period: \"1s\"\n    key_strategy:\n      type: \"clientIP\"\nredis:\n  endpoints:\n    - \"redis-single.edgequota-e2e.svc.cluster.local:6379\"\n  mode: \"single\"\n  pool_size: 5\n  dial_timeout: \"3s\"\n  read_timeout: \"2s\"\n  write_timeout: \"2s\"\nlogging:\n  level: \"debug\"\n  format: \"json\"\n"}}`
 
-	_, err := kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace,
-		"--type=merge", "-p", patchJSON)
-	if err != nil {
+	if _, err := kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace,
+		"--type=merge", "-p", reducedPatchJSON); err != nil {
 		return fail(name, "failed to patch ConfigMap: %v", err)
 	}
+
+	// Always restore the original config when done so subsequent `go run . test`
+	// runs start from a clean state.
+	defer func() {
+		kubectl("patch", "configmap", "edgequota-config-reload", "-n", namespace, //nolint:errcheck
+			"--type=merge", "-p", originalPatchJSON)
+	}()
 
 	// 3. Poll until the new rate limits take effect. Kubernetes ConfigMap
 	//    volume propagation can take up to ~60s (syncFrequency + cache TTL),
 	//    plus the watcher poll interval and debounce.
-	deadline := time.Now().Add(90 * time.Second)
+	deadline = time.Now().Add(90 * time.Second)
 	var ok200After, ok429After int
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)

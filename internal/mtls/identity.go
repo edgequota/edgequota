@@ -1,7 +1,8 @@
 // Package mtls provides client certificate identity extraction and header
-// injection for mTLS-authenticated requests. It is designed to be used by
-// the proxy layer to forward verified client identity to upstream services
-// in a non-spoofable manner.
+// injection for mTLS-authenticated requests. It is designed to be called
+// early in the middleware chain so that auth, rate-limiting, and the proxy
+// layer all see verified client identity. Headers are non-spoofable:
+// inbound values are always stripped before being set from TLS state.
 package mtls
 
 import (
@@ -11,14 +12,13 @@ import (
 	"net/http"
 )
 
-// Header names injected by EdgeQuota when forwarding mTLS identity.
-// These are ALWAYS overwritten (never trusted from inbound requests)
-// to prevent spoofing.
+// Canonical header names. Go's net/http canonicalises on Set/Get, but we
+// use consistent Title-Case-With-Acronyms in source for greppability.
 const (
-	HeaderMTLS              = "X-Edgequota-Mtls"
-	HeaderClientFingerprint = "X-Edgequota-Client-Fingerprint-Sha256"
-	HeaderClientSerial      = "X-Edgequota-Client-Serial"
-	HeaderClientSubject     = "X-Edgequota-Client-Subject"
+	HeaderMTLS              = "X-EdgeQuota-MTLS"
+	HeaderClientFingerprint = "X-EdgeQuota-Client-Fingerprint-SHA256"
+	HeaderClientSerial      = "X-EdgeQuota-Client-Serial"
+	HeaderClientSubject     = "X-EdgeQuota-Client-Subject"
 )
 
 // IdentityHeaders is the full set of mTLS identity headers that must be
@@ -56,20 +56,26 @@ func SanitizeHeaders(h http.Header) {
 	}
 }
 
-// InjectHeaders sets mTLS identity headers on the request. If the request
-// has verified peer certificates (from r.TLS.PeerCertificates), identity
-// is extracted and injected. Otherwise, headers indicate no mTLS.
+// InjectHeaders derives mTLS identity from TLS connection state and sets
+// the canonical X-EdgeQuota-* headers on the request.
+//
+// Authentication is only considered valid when the TLS stack has completed
+// chain verification (VerifiedChains populated). A request may carry
+// PeerCertificates without verified chains when the listener uses
+// RequestClientCert or RequireAnyClientCert — those modes do NOT verify
+// the chain. In that case the headers report "false" to prevent treating
+// an unverified cert as authenticated.
 //
 // This function always calls SanitizeHeaders first to prevent spoofing.
 func InjectHeaders(r *http.Request) {
 	SanitizeHeaders(r.Header)
 
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
 		r.Header.Set(HeaderMTLS, "false")
 		return
 	}
 
-	leaf := r.TLS.PeerCertificates[0]
+	leaf := r.TLS.VerifiedChains[0][0]
 	id := ExtractIdentity(leaf)
 
 	r.Header.Set(HeaderMTLS, "true")

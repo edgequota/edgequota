@@ -31,10 +31,11 @@ server:
   #   # protected endpoints to the mTLS port and everything else to the
   #   # normal port.
   #   #
-  #   # When mTLS is active and a verified peer cert exists, EdgeQuota
-  #   # injects these headers on every upstream request (always overwritten,
-  #   # never trusted from inbound):
-  #   #   X-EdgeQuota-mTLS: "true" | "false"
+  #   # EdgeQuota injects identity headers early in the middleware chain
+  #   # (before auth/rate-limit) on every request — always overwritten,
+  #   # never trusted from inbound. "true" requires VerifiedChains (chain
+  #   # verified against ClientCAs), not just a presented certificate.
+  #   #   X-EdgeQuota-MTLS: "true" | "false"
   #   #   X-EdgeQuota-Client-Fingerprint-SHA256: <hex>
   #   #   X-EdgeQuota-Client-Serial: <serial>
   #   #   X-EdgeQuota-Client-Subject: <subject DN>

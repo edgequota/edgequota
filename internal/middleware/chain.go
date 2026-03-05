@@ -29,6 +29,7 @@ import (
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/events"
+	"github.com/edgequota/edgequota/internal/mtls"
 	"github.com/edgequota/edgequota/internal/observability"
 	"github.com/edgequota/edgequota/internal/proxy"
 	"github.com/edgequota/edgequota/internal/ratelimit"
@@ -113,7 +114,7 @@ var injectionDenyHeaders = map[string]struct{}{
 	"X-Real-Ip":           {},
 	"X-Request-Id":        {},
 
-	// mTLS identity headers — always set by the proxy from TLS state.
+	// mTLS identity headers — always set from TLS state in the middleware chain.
 	"X-Edgequota-Mtls":                      {},
 	"X-Edgequota-Client-Fingerprint-Sha256": {},
 	"X-Edgequota-Client-Serial":             {},
@@ -947,6 +948,10 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reqID := ensureRequestID(r)
 	sw.Header().Set(requestIDHeader, reqID)
+
+	// Derive mTLS identity from TLS state early so that auth and
+	// rate-limit middleware can see the X-EdgeQuota-* headers.
+	mtls.InjectHeaders(r)
 
 	originalHost := r.Host
 	var logRLKey, logTenantID string

@@ -6,11 +6,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -25,6 +23,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
+	imtls "github.com/edgequota/edgequota/internal/mtls"
 	"github.com/edgequota/edgequota/internal/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -777,37 +776,16 @@ func TestMTLSHeaderInjectionE2E(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// Create a minimal proxy that injects mTLS headers.
+	// Create a minimal proxy that calls mtls.InjectHeaders (the real
+	// implementation) and forwards to the backend.
 	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate what the proxy Director does:
-		// 1. Sanitize + inject mTLS identity headers
-		// 2. Forward to backend
 		mtlsReq := r.Clone(r.Context())
 		mtlsReq.URL.Scheme = "http"
 		mtlsReq.URL.Host = backend.Listener.Addr().String()
 		mtlsReq.Host = backend.Listener.Addr().String()
 		mtlsReq.RequestURI = ""
 
-		// Simulate the Director flow
-		for _, h := range []string{
-			"X-Edgequota-Mtls",
-			"X-Edgequota-Client-Fingerprint-Sha256",
-			"X-Edgequota-Client-Serial",
-			"X-Edgequota-Client-Subject",
-		} {
-			mtlsReq.Header.Del(h)
-		}
-
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			leaf := r.TLS.PeerCertificates[0]
-			fp := sha256.Sum256(leaf.Raw)
-			mtlsReq.Header.Set("X-Edgequota-Mtls", "true")
-			mtlsReq.Header.Set("X-Edgequota-Client-Fingerprint-Sha256", hex.EncodeToString(fp[:]))
-			mtlsReq.Header.Set("X-Edgequota-Client-Serial", leaf.SerialNumber.String())
-			mtlsReq.Header.Set("X-Edgequota-Client-Subject", leaf.Subject.String())
-		} else {
-			mtlsReq.Header.Set("X-Edgequota-Mtls", "false")
-		}
+		imtls.InjectHeaders(mtlsReq)
 
 		resp, fwdErr := http.DefaultClient.Do(mtlsReq)
 		if fwdErr != nil {
@@ -839,20 +817,19 @@ func TestMTLSHeaderInjectionE2E(t *testing.T) {
 			},
 		}
 
-		// Send request with spoofed headers that should be overwritten.
 		req, reqErr := http.NewRequest(http.MethodGet, mtlsSrv.URL+"/v1/device/bootstrap", nil)
 		require.NoError(t, reqErr)
-		req.Header.Set("X-Edgequota-Mtls", "false")
-		req.Header.Set("X-Edgequota-Client-Fingerprint-Sha256", "evil-fp")
+		req.Header.Set(imtls.HeaderMTLS, "false")
+		req.Header.Set(imtls.HeaderClientFingerprint, "evil-fp")
 
 		resp, err := client.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		assert.Equal(t, "true", backendHeaders.Get("X-Edgequota-Mtls"))
-		assert.NotEqual(t, "evil-fp", backendHeaders.Get("X-Edgequota-Client-Fingerprint-Sha256"))
-		assert.Equal(t, "42", backendHeaders.Get("X-Edgequota-Client-Serial"))
-		assert.Contains(t, backendHeaders.Get("X-Edgequota-Client-Subject"), "test-device-001")
+		assert.Equal(t, "true", backendHeaders.Get(imtls.HeaderMTLS))
+		assert.NotEqual(t, "evil-fp", backendHeaders.Get(imtls.HeaderClientFingerprint))
+		assert.Equal(t, "42", backendHeaders.Get(imtls.HeaderClientSerial))
+		assert.Contains(t, backendHeaders.Get(imtls.HeaderClientSubject), "test-device-001")
 	})
 }

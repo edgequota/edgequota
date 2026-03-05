@@ -43,6 +43,16 @@ func selfSignedCert(t *testing.T) *x509.Certificate {
 	return cert
 }
 
+// verifiedTLSState builds a ConnectionState that mimics what the Go TLS
+// stack produces when RequireAndVerifyClientCert succeeds: both
+// PeerCertificates and VerifiedChains are populated.
+func verifiedTLSState(leaf *x509.Certificate) *tls.ConnectionState {
+	return &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}
+}
+
 func TestExtractIdentity(t *testing.T) {
 	cert := selfSignedCert(t)
 	id := ExtractIdentity(cert)
@@ -97,13 +107,34 @@ func TestInjectHeaders_TLSNoPeerCerts(t *testing.T) {
 	assert.Empty(t, r.Header.Get(HeaderClientFingerprint))
 }
 
-func TestInjectHeaders_WithPeerCert(t *testing.T) {
+func TestInjectHeaders_PeerCertsButNoVerifiedChains(t *testing.T) {
 	cert := selfSignedCert(t)
 
 	r := httptest.NewRequest(http.MethodGet, "/v1/device/bootstrap", nil)
 	r.TLS = &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{cert},
+		// VerifiedChains intentionally empty — simulates RequestClientCert
+		// or RequireAnyClientCert where the cert is presented but the
+		// chain is not verified by the TLS stack.
 	}
+	r.Header.Set(HeaderMTLS, "true")
+	r.Header.Set(HeaderClientFingerprint, "spoofed-fp")
+
+	InjectHeaders(r)
+
+	assert.Equal(t, "false", r.Header.Get(HeaderMTLS),
+		"must be false when chain is not verified")
+	assert.Empty(t, r.Header.Get(HeaderClientFingerprint),
+		"unverified cert must not produce identity headers")
+	assert.Empty(t, r.Header.Get(HeaderClientSerial))
+	assert.Empty(t, r.Header.Get(HeaderClientSubject))
+}
+
+func TestInjectHeaders_WithVerifiedCert(t *testing.T) {
+	cert := selfSignedCert(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/v1/device/bootstrap", nil)
+	r.TLS = verifiedTLSState(cert)
 	r.Header.Set(HeaderMTLS, "spoofed-should-be-overwritten")
 	r.Header.Set(HeaderClientFingerprint, "spoofed-fp")
 
@@ -138,13 +169,11 @@ func TestInjectHeaders_AntiSpoofing(t *testing.T) {
 			"spoofed subject must be removed")
 	})
 
-	t.Run("spoofed headers are overwritten with real cert values", func(t *testing.T) {
+	t.Run("spoofed headers are overwritten with real verified cert values", func(t *testing.T) {
 		cert := selfSignedCert(t)
 
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.TLS = &tls.ConnectionState{
-			PeerCertificates: []*x509.Certificate{cert},
-		}
+		r.TLS = verifiedTLSState(cert)
 		r.Header.Set(HeaderMTLS, "false")
 		r.Header.Set(HeaderClientFingerprint, "evil-fingerprint")
 		r.Header.Set(HeaderClientSerial, "evil-serial")
@@ -156,5 +185,23 @@ func TestInjectHeaders_AntiSpoofing(t *testing.T) {
 		assert.NotEqual(t, "evil-fingerprint", r.Header.Get(HeaderClientFingerprint))
 		assert.Equal(t, "42", r.Header.Get(HeaderClientSerial))
 		assert.Contains(t, r.Header.Get(HeaderClientSubject), "test-device-001")
+	})
+
+	t.Run("unverified cert does not produce identity even with PeerCertificates", func(t *testing.T) {
+		cert := selfSignedCert(t)
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.TLS = &tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{cert},
+		}
+		r.Header.Set(HeaderMTLS, "true")
+		r.Header.Set(HeaderClientFingerprint, "evil-fingerprint")
+
+		InjectHeaders(r)
+
+		assert.Equal(t, "false", r.Header.Get(HeaderMTLS),
+			"must be false when chain is not verified")
+		assert.Empty(t, r.Header.Get(HeaderClientFingerprint),
+			"no identity for unverified cert")
 	})
 }
