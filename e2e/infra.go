@@ -82,6 +82,7 @@ func waitForInfrastructure() {
 		{"EdgeQuota (dynamic-backend)", "edgequota-scenario=dynamic-backend"},
 		{"EdgeQuota (cache-basic)", "edgequota-scenario=cache-basic"},
 		{"EdgeQuota (cache-extrl)", "edgequota-scenario=cache-extrl"},
+		{"EdgeQuota (mtls)", "edgequota-scenario=mtls"},
 	}
 
 	for _, c := range checks {

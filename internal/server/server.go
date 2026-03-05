@@ -6,11 +6,13 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +38,7 @@ type Server struct {
 	logger          *slog.Logger
 	version         string
 	mainServer      *http.Server
+	mtlsServer      *http.Server  // nil when mTLS is disabled; second listener for client-cert auth.
 	http3Server     *http3.Server // nil when HTTP/3 is disabled.
 	adminServer     *http.Server
 	adminRL         *adminRateLimiter // stopped during shutdown to avoid goroutine leak
@@ -79,11 +82,17 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
 	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger, chain.ResponseCache)
 
+	var mtlsSrv *http.Server
+	if cfg.Server.TLS.MTLS.Enabled {
+		mtlsSrv = buildMTLSServer(cfg, chain, logger)
+	}
+
 	return &Server{
 		cfg:         cfg,
 		logger:      logger,
 		version:     version,
 		mainServer:  mainServer,
+		mtlsServer:  mtlsSrv,
 		http3Server: h3srv,
 		adminServer: adminServer,
 		adminRL:     adminRL,
@@ -238,6 +247,64 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	}
 
 	return srv, h3srv
+}
+
+// buildMTLSServer creates the secondary HTTP server for the mTLS listener.
+// It shares the same handler (chain) as the main server but has no HTTP/3.
+// TLS config (with ClientCAs and ClientAuth) is applied in Run().
+func buildMTLSServer(cfg *config.Config, chain *middleware.Chain, logger *slog.Logger) *http.Server {
+	readTimeout, _ := config.ParseDuration(cfg.Server.ReadTimeout, 30*time.Second)
+	idleTimeout, _ := config.ParseDuration(cfg.Server.IdleTimeout, 120*time.Second)
+
+	tracedChain := otelhttp.NewHandler(chain, "edgequota.request",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return "edgequota.request"
+		}),
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
+	return &http.Server{
+		Addr:              cfg.Server.TLS.MTLS.ListenAddr,
+		Handler:           tracedChain,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		BaseContext: func(_ net.Listener) context.Context {
+			return context.Background()
+		},
+	}
+}
+
+// loadClientCAs reads a PEM file containing one or more CA certificates and
+// returns an x509.CertPool. Returns an error if the file cannot be read or
+// contains no valid certificates.
+func loadClientCAs(path string) (*x509.CertPool, error) {
+	pemData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read client CA file %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("no valid CA certificates found in %s", path)
+	}
+	return pool, nil
+}
+
+// mtlsClientAuth maps a config.ClientAuthMode to the corresponding
+// crypto/tls constant.
+func mtlsClientAuth(mode config.ClientAuthMode) tls.ClientAuthType {
+	switch mode {
+	case config.ClientAuthRequest:
+		return tls.RequestClientCert
+	case config.ClientAuthRequireAny:
+		return tls.RequireAnyClientCert
+	case config.ClientAuthRequireAndVerify:
+		return tls.RequireAndVerifyClientCert
+	default:
+		return tls.RequireAndVerifyClientCert
+	}
 }
 
 // adminRateLimiter provides a simple in-process rate limiter for the admin
@@ -522,9 +589,37 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.http3Server != nil {
 			s.http3Server.TLSConfig = tlsCfg
 		}
+
+		// Configure the mTLS listener with its own TLSConfig that includes
+		// ClientCAs and a stricter ClientAuth mode.
+		if s.mtlsServer != nil {
+			mtlsCfg := s.cfg.Server.TLS.MTLS
+			clientCAs, caErr := loadClientCAs(mtlsCfg.ClientCAFile)
+			if caErr != nil {
+				return caErr
+			}
+
+			mtlsTLSCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
+				MinVersion:     minVer,
+				GetCertificate: ch.GetCertificate,
+				NextProtos:     []string{"h2", "http/1.1"},
+				ClientCAs:      clientCAs,
+				ClientAuth:     mtlsClientAuth(mtlsCfg.ResolvedClientAuth()),
+			}
+			s.mtlsServer.TLSConfig = mtlsTLSCfg
+
+			if h2Err := http2.ConfigureServer(s.mtlsServer, nil); h2Err != nil {
+				return fmt.Errorf("configure HTTP/2 for mTLS server: %w", h2Err)
+			}
+
+			s.logger.Info("mTLS listener configured",
+				"listen_addr", mtlsCfg.ListenAddr,
+				"client_auth", string(mtlsCfg.ResolvedClientAuth()),
+				"client_ca_file", mtlsCfg.ClientCAFile)
+		}
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	// readyCh is closed after the main listener has successfully bound,
 	// preventing SetReady from being called before the server can accept
@@ -533,6 +628,10 @@ func (s *Server) Run(ctx context.Context) error {
 
 	go s.startAdminServer(errCh)
 	go s.startMainServerWithReady(errCh, readyCh)
+
+	if s.mtlsServer != nil {
+		go s.startMTLSServer(errCh)
+	}
 
 	if s.http3Server != nil {
 		go s.startHTTP3Server(errCh)
@@ -597,6 +696,21 @@ func (s *Server) startMainServerWithReady(errCh chan<- error, readyCh chan struc
 
 	if err != nil && err != http.ErrServerClosed {
 		errCh <- fmt.Errorf("proxy server: %w", err)
+	}
+}
+
+func (s *Server) startMTLSServer(errCh chan<- error) {
+	s.logger.Info("mTLS proxy server starting", "address", s.cfg.Server.TLS.MTLS.ListenAddr)
+
+	ln, listenErr := net.Listen("tcp", s.cfg.Server.TLS.MTLS.ListenAddr)
+	if listenErr != nil {
+		errCh <- fmt.Errorf("mTLS server listen: %w", listenErr)
+		return
+	}
+
+	tlsLn := tls.NewListener(ln, s.mtlsServer.TLSConfig)
+	if err := s.mtlsServer.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
+		errCh <- fmt.Errorf("mTLS server: %w", err)
 	}
 }
 
@@ -687,6 +801,12 @@ func (s *Server) shutdown() error {
 
 	if err := s.mainServer.Shutdown(shutdownCtx); err != nil {
 		s.logger.Error("main server shutdown error", "error", err)
+	}
+
+	if s.mtlsServer != nil {
+		if err := s.mtlsServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Error("mTLS server shutdown error", "error", err)
+		}
 	}
 
 	if err := s.adminServer.Shutdown(shutdownCtx); err != nil {

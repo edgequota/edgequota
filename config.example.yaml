@@ -17,6 +17,39 @@ server:
   #   http3_enabled: true        # Serve HTTP/3 (QUIC) on the same address over UDP
   #   http3_advertise_port: 443  # External port for Alt-Svc header (0 = use listen port)
   #   min_version: "1.2"    # Minimum TLS version: "1.2" (default) or "1.3"
+  #
+  #   # ── Mutual TLS (mTLS) — Client Certificate Authentication ────────
+  #   # Starts a SECOND TLS listener that requires client certificates.
+  #   # The normal listener (server.address) is unchanged — existing traffic
+  #   # is unaffected. Route mTLS-protected endpoints to this listener at
+  #   # the LB/Ingress level (separate hostname or port).
+  #   #
+  #   # Why a second listener? TLS client cert requirements are enforced at
+  #   # the TLS handshake level (tls.Config.ClientAuth). A single listener
+  #   # cannot selectively require certs for some paths — it's all or nothing
+  #   # at the TLS layer. The dual-listener approach lets the LB route
+  #   # protected endpoints to the mTLS port and everything else to the
+  #   # normal port.
+  #   #
+  #   # When mTLS is active and a verified peer cert exists, EdgeQuota
+  #   # injects these headers on every upstream request (always overwritten,
+  #   # never trusted from inbound):
+  #   #   X-EdgeQuota-mTLS: "true" | "false"
+  #   #   X-EdgeQuota-Client-Fingerprint-SHA256: <hex>
+  #   #   X-EdgeQuota-Client-Serial: <serial>
+  #   #   X-EdgeQuota-Client-Subject: <subject DN>
+  #   #
+  #   mtls:
+  #     enabled: true
+  #     listen_addr: ":4443"                 # Must differ from server.address
+  #     client_ca_file: "/etc/tls/client-ca.pem"
+  #     client_auth: "require_and_verify"    # request | require_any | require_and_verify
+  #     # required_routes documents intent — routing is done at the LB/Ingress level.
+  #     required_routes:
+  #       - host: "kiosk-api.example.com"
+  #         path_prefixes:
+  #           - "/v1/device/bootstrap"
+  #           - "/v1/device/heartbeat"
 
 admin:
   address: ":9090"

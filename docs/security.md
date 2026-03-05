@@ -326,6 +326,99 @@ Or use a cert-manager with a sidecar that reloads certificates dynamically.
 
 ---
 
+## Inbound mTLS (Client Certificate Authentication)
+
+EdgeQuota supports **inbound mTLS** — requiring clients to present a TLS certificate during the handshake. This is used for device/service authentication where the client identity is proven by a certificate signed by a trusted CA.
+
+### Why a Second Listener?
+
+TLS client certificate requirements are enforced at the **TLS handshake level** (`tls.Config.ClientAuth`). A single listener cannot selectively require certificates for some paths — it's all-or-nothing at the TLS layer.
+
+EdgeQuota uses a **dual-listener approach** (Approach A):
+
+| Listener | Port | ClientAuth | Purpose |
+|----------|------|-----------|---------|
+| Normal TLS | `:8080` | None | General traffic, backward compatible |
+| mTLS TLS | `:4443` | `RequireAndVerifyClientCert` | Protected endpoints (device bootstrap, heartbeat) |
+
+Route selection is done at the **LB/Ingress level**: protected endpoints are routed to the mTLS listener, everything else to the normal listener.
+
+### Configuration
+
+```yaml
+server:
+  tls:
+    enabled: true
+    cert_file: "/etc/tls/tls.crt"
+    key_file: "/etc/tls/tls.key"
+    mtls:
+      enabled: true
+      listen_addr: ":4443"
+      client_ca_file: "/etc/tls/client-ca.pem"
+      client_auth: "require_and_verify"    # request | require_any | require_and_verify
+      required_routes:
+        - host: "kiosk-api.example.com"
+          path_prefixes:
+            - "/v1/device/bootstrap"
+            - "/v1/device/heartbeat"
+```
+
+### Identity Headers Forwarded Upstream
+
+When mTLS is active and a verified peer certificate exists, EdgeQuota injects these headers on **every** upstream request:
+
+| Header | Value | Example |
+|--------|-------|---------|
+| `X-EdgeQuota-mTLS` | `"true"` or `"false"` | `true` |
+| `X-EdgeQuota-Client-Fingerprint-SHA256` | SHA-256 hex of the leaf cert DER | `a1b2c3d4...` |
+| `X-EdgeQuota-Client-Serial` | Certificate serial number | `42` |
+| `X-EdgeQuota-Client-Subject` | Certificate subject DN | `CN=device-001,O=Acme` |
+
+**Anti-spoofing guarantee:** These headers are **always overwritten** — EdgeQuota deletes any incoming values before setting them from TLS state. Clients cannot spoof identity headers. The auth service injection deny list also blocks these headers.
+
+### Kubernetes / Traefik Routing Example
+
+Route device endpoints to the mTLS listener using separate Kubernetes Services:
+
+```yaml
+# Service for mTLS-protected endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: edgequota-mtls
+spec:
+  ports:
+    - name: https-mtls
+      port: 443
+      targetPort: 4443
+  selector:
+    app: edgequota
+---
+# IngressRoute routing /v1/device/* to the mTLS service
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: device-mtls
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`kiosk-api.example.com`) && PathPrefix(`/v1/device/`)
+      kind: Rule
+      services:
+        - name: edgequota-mtls
+          port: 443
+```
+
+### Client Auth Modes
+
+| Mode | TLS Constant | Behavior |
+|------|-------------|----------|
+| `require_and_verify` | `RequireAndVerifyClientCert` | Client must present a valid cert signed by a CA in `client_ca_file`. **Recommended.** |
+| `require_any` | `RequireAnyClientCert` | Client must present a cert, but chain is not verified. Use only for testing. |
+| `request` | `RequestClientCert` | Client cert is requested but not required. For opt-in scenarios. |
+
+---
+
 ## mTLS Between Services
 
 For zero-trust environments, use mTLS for all internal communication:
@@ -398,6 +491,8 @@ Production deployment checklist:
 - [ ] `allowPrivilegeEscalation: false` in pod security context
 - [ ] All capabilities dropped (`capabilities.drop: [ALL]`)
 - [ ] TLS enabled for external-facing traffic (`server.tls.enabled: true`)
+- [ ] mTLS configured for device/service authentication if needed (`server.tls.mtls.enabled: true`)
+- [ ] mTLS identity headers (`X-EdgeQuota-*`) trusted only from EdgeQuota, not from external sources
 - [ ] Container image scanned for vulnerabilities
 - [ ] Secrets stored in Kubernetes Secrets, not ConfigMaps
 - [ ] Admin port (`:9090`) not exposed outside the cluster

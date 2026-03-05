@@ -112,6 +112,12 @@ var injectionDenyHeaders = map[string]struct{}{
 	"X-Forwarded-Proto":   {},
 	"X-Real-Ip":           {},
 	"X-Request-Id":        {},
+
+	// mTLS identity headers — always set by the proxy from TLS state.
+	"X-Edgequota-Mtls":                      {},
+	"X-Edgequota-Client-Fingerprint-Sha256": {},
+	"X-Edgequota-Client-Serial":             {},
+	"X-Edgequota-Client-Subject":            {},
 }
 
 // jsonErrorResponse is the structured error body returned by EdgeQuota.
@@ -1381,6 +1387,8 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 // tryRedisLimit attempts to enforce rate limit via Redis.
 // Returns true if the request was fully handled (allowed or denied), false if Redis is unavailable.
 // When extLimits is non-nil, the dynamic per-tenant/per-key limits override the static config.
+// The Redis check is wrapped in an edgequota.ratelimit span; edgequota.proxy
+// then starts as a sibling (both children of edgequota.request).
 func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string, extLimits *ratelimit.ExternalLimits) bool {
 	c.mu.RLock()
 	lim := c.limiter
@@ -1389,6 +1397,13 @@ func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string
 	if lim == nil {
 		return false
 	}
+
+	// parentCtx holds the span context one level above (edgequota.request).
+	// The ratelimit span is a child of it; the proxy span will also be a
+	// child of it (sibling of ratelimit), not a child of ratelimit.
+	parentCtx := r.Context()
+
+	rlCtx, rlSpan := tracer.Start(parentCtx, "edgequota.ratelimit")
 
 	var result *ratelimit.Result
 	var limErr error
@@ -1401,13 +1416,15 @@ func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string
 		}
 		ratePerSecond := float64(extLimits.Average) * float64(time.Second) / float64(period)
 		burst := max(extLimits.Burst, 1)
-		result, limErr = lim.AllowWithOverrides(r.Context(), key, ratePerSecond, burst, 0)
+		result, limErr = lim.AllowWithOverrides(rlCtx, key, ratePerSecond, burst, 0)
 	} else {
-		result, limErr = lim.Allow(r.Context(), key)
+		result, limErr = lim.Allow(rlCtx, key)
 	}
+	rlSpan.End()
 
 	if limErr == nil {
-		c.serveResult(w, r, key, result)
+		// Pass parentCtx so edgequota.proxy is a sibling of edgequota.ratelimit.
+		c.serveResult(w, r.WithContext(parentCtx), key, result)
 		return true
 	}
 

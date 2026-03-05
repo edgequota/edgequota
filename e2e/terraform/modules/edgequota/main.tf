@@ -33,6 +33,12 @@ variable "tls_secret_name" {
   default     = ""
 }
 
+variable "mtls_client_ca_secret_name" {
+  description = "Optional: name of a Secret holding client CA cert (ca.crt) to mount at /etc/edgequota/mtls"
+  type        = string
+  default     = ""
+}
+
 variable "extra_ports" {
   description = "Additional port blocks for the service (e.g. UDP for QUIC)"
   type = list(object({
@@ -146,6 +152,16 @@ resource "kubernetes_deployment_v1" "edgequota" {
             }
           }
 
+          # Conditional mTLS client CA volume mount.
+          dynamic "volume_mount" {
+            for_each = var.mtls_client_ca_secret_name != "" ? [1] : []
+            content {
+              name       = "mtls-client-ca"
+              mount_path = "/etc/edgequota/mtls"
+              read_only  = true
+            }
+          }
+
           startup_probe {
             http_get {
               path = "/startz"
@@ -194,6 +210,18 @@ resource "kubernetes_deployment_v1" "edgequota" {
 
             secret {
               secret_name = var.tls_secret_name
+            }
+          }
+        }
+
+        # Conditional mTLS client CA volume.
+        dynamic "volume" {
+          for_each = var.mtls_client_ca_secret_name != "" ? [1] : []
+          content {
+            name = "mtls-client-ca"
+
+            secret {
+              secret_name = var.mtls_client_ca_secret_name
             }
           }
         }

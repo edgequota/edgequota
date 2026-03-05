@@ -269,6 +269,12 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		"x-forwarded-for":   r.Header.Get("X-Forwarded-For"),
 		"x-forwarded-proto": r.Header.Get("X-Forwarded-Proto"),
 	}
+	for name, vals := range r.Header {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-edgequota-") && len(vals) > 0 {
+			resp[lower] = vals[0]
+		}
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 

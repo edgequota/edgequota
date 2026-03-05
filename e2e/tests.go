@@ -3,13 +3,18 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +66,8 @@ var scenarioNodePorts = map[string]int{
 	"dynamic-backend": 30116,
 	"cache-basic":     30117,
 	"cache-extrl":     30118,
+	"mtls":            30219, // mTLS listener (RequireAndVerifyClientCert)
+	"mtls-tls":        30119, // Normal TLS listener of the mtls scenario (no client cert)
 }
 
 // adminNodePorts maps scenario names to their admin NodePort (when exposed).
@@ -79,7 +86,8 @@ func runAllTests() bool {
 	baseURLs := make(map[string]string, len(scenarioNodePorts))
 	for scenario, port := range scenarioNodePorts {
 		scheme := "http"
-		if scenario == "protocol-h3" {
+		switch scenario {
+		case "protocol-h3", "mtls", "mtls-tls":
 			scheme = "https"
 		}
 		baseURLs[scenario] = fmt.Sprintf("%s://%s:%d", scheme, minikubeIP, port)
@@ -92,8 +100,14 @@ func runAllTests() bool {
 	}
 
 	// Wait for all EdgeQuota instances to become reachable.
+	// Skip the "mtls" key since the mTLS listener requires a client cert
+	// for the TLS handshake; we wait on "mtls-tls" (the normal TLS port
+	// of the same deployment) and trust both listeners are ready together.
 	info("Waiting for EdgeQuota instances to become reachable...")
 	for scenario, base := range baseURLs {
+		if scenario == "mtls" {
+			continue
+		}
 		if err := waitForEdgeQuota(base, 60*time.Second); err != nil {
 			fatal("EdgeQuota %q not reachable at %s: %v", scenario, base, err)
 		}
@@ -237,6 +251,23 @@ func allTestCases(urls, adminURLs map[string]string) []testCase {
 		// Config hot-reload
 		{"Config reload — rate limit changes via ConfigMap", "config-reload", func() testResult { return testConfigReload(urls["config-reload"]) }},
 		{"Config reload — TLS cert rotation", "protocol-h3", func() testResult { return testCertReload(urls["protocol-h3"]) }},
+
+		// mTLS (dual-listener)
+		{"mTLS — normal TLS port proxies without client cert", "mtls", func() testResult {
+			return testMTLSNormalPort(urls["mtls-tls"])
+		}},
+		{"mTLS — mTLS port rejects client without certificate", "mtls", func() testResult {
+			return testMTLSRejectsNoCert(urls["mtls"])
+		}},
+		{"mTLS — mTLS port accepts valid client cert and forwards identity headers", "mtls", func() testResult {
+			return testMTLSAcceptsValidCert(urls["mtls"])
+		}},
+		{"mTLS — spoofed identity headers are overwritten", "mtls", func() testResult {
+			return testMTLSAntiSpoofing(urls["mtls"])
+		}},
+		{"mTLS — normal TLS port sets X-Edgequota-Mtls: false", "mtls", func() testResult {
+			return testMTLSNormalPortNoIdentity(urls["mtls-tls"])
+		}},
 
 		// Dynamic backend URL (tenant-aware routing)
 		{"Dynamic backend — tenant-a routes to whoami", "dynamic-backend", func() testResult { return testDynamicBackendTenantA(urls["dynamic-backend"]) }},
@@ -1797,6 +1828,227 @@ func testCertReload(base string) testResult {
 	}
 
 	return pass(name, "serial changed: %s → %s", serial1.String(), serial2.String())
+}
+
+// ---------------------------------------------------------------------------
+// mTLS e2e tests
+// ---------------------------------------------------------------------------
+
+// loadMTLSClientTLS fetches the client cert, key, and CA PEM from Terraform
+// outputs and returns a *tls.Config suitable for connecting to the mTLS port.
+func loadMTLSClientTLS() (*tls.Config, *x509.Certificate, error) {
+	tfDir := filepath.Join(getE2EDir(), "terraform")
+
+	certPEM, err := runInDir(tfDir, "terraform", "output", "-raw", "mtls_client_cert_pem")
+	if err != nil {
+		return nil, nil, fmt.Errorf("terraform output mtls_client_cert_pem: %w", err)
+	}
+
+	keyPEM, err := runInDir(tfDir, "terraform", "output", "-raw", "mtls_client_key_pem")
+	if err != nil {
+		return nil, nil, fmt.Errorf("terraform output mtls_client_key_pem: %w", err)
+	}
+
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return nil, nil, fmt.Errorf("x509 key pair: %w", err)
+	}
+
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, nil, fmt.Errorf("failed to decode client cert PEM")
+	}
+
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse client cert: %w", err)
+	}
+
+	return &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, //nolint:gosec // e2e self-signed server certs
+	}, leaf, nil
+}
+
+// doMTLSRequest performs an HTTPS request using the given TLS config and returns
+// the parsed JSON echo response from the testbackend.
+func doMTLSRequest(base string, tlsCfg *tls.Config, extraHeaders map[string]string) (map[string]string, int, error) {
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+
+	var echo map[string]string
+	if err := json.Unmarshal(body, &echo); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("unmarshal echo: %w (body: %s)", err, string(body))
+	}
+
+	return echo, resp.StatusCode, nil
+}
+
+func testMTLSNormalPort(base string) testResult {
+	const name = "mtls-normal-port"
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	echo, status, err := doMTLSRequest(base, tlsCfg, nil)
+	if err != nil {
+		return fail(name, "request failed: %v", err)
+	}
+	if status != 200 {
+		return fail(name, "expected 200, got %d", status)
+	}
+	if echo["protocol"] == "" {
+		return fail(name, "echo response missing protocol field")
+	}
+
+	return pass(name, "normal TLS port proxied OK (protocol=%s)", echo["protocol"])
+}
+
+func testMTLSRejectsNoCert(base string) testResult {
+	const name = "mtls-rejects-no-cert"
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	_, _, err := doMTLSRequest(base, tlsCfg, nil)
+	if err == nil {
+		return fail(name, "expected TLS handshake failure but request succeeded")
+	}
+
+	if !strings.Contains(err.Error(), "tls") && !strings.Contains(err.Error(), "certificate") &&
+		!strings.Contains(err.Error(), "EOF") && !strings.Contains(err.Error(), "reset") &&
+		!strings.Contains(err.Error(), "connection") {
+		return fail(name, "unexpected error type: %v", err)
+	}
+
+	return pass(name, "mTLS port correctly rejected client without cert: %v", err)
+}
+
+func testMTLSAcceptsValidCert(base string) testResult {
+	const name = "mtls-accepts-valid-cert"
+
+	tlsCfg, leaf, err := loadMTLSClientTLS()
+	if err != nil {
+		return fail(name, "failed to load mTLS client config: %v", err)
+	}
+
+	echo, status, err := doMTLSRequest(base, tlsCfg, nil)
+	if err != nil {
+		return fail(name, "request with valid client cert failed: %v", err)
+	}
+	if status != 200 {
+		return fail(name, "expected 200, got %d", status)
+	}
+
+	mtlsHeader := echo["x-edgequota-mtls"]
+	if mtlsHeader != "true" {
+		return fail(name, "expected x-edgequota-mtls=true, got %q", mtlsHeader)
+	}
+
+	fp := echo["x-edgequota-client-fingerprint-sha256"]
+	h := sha256.Sum256(leaf.Raw)
+	expectedFP := hex.EncodeToString(h[:])
+	if fp != expectedFP {
+		return fail(name, "fingerprint mismatch: got %q, expected %q", fp, expectedFP)
+	}
+
+	serial := echo["x-edgequota-client-serial"]
+	if serial != leaf.SerialNumber.String() {
+		return fail(name, "serial mismatch: got %q, expected %q", serial, leaf.SerialNumber.String())
+	}
+
+	subject := echo["x-edgequota-client-subject"]
+	if subject == "" {
+		return fail(name, "x-edgequota-client-subject is empty")
+	}
+
+	return pass(name, "mTLS accepted, headers correct: fp=%s serial=%s subject=%s", fp[:16]+"...", serial, subject)
+}
+
+func testMTLSAntiSpoofing(base string) testResult {
+	const name = "mtls-anti-spoofing"
+
+	tlsCfg, leaf, err := loadMTLSClientTLS()
+	if err != nil {
+		return fail(name, "failed to load mTLS client config: %v", err)
+	}
+
+	spoofedHeaders := map[string]string{
+		"X-Edgequota-Mtls":                        "false",
+		"X-Edgequota-Client-Fingerprint-Sha256":    "deadbeef",
+		"X-Edgequota-Client-Serial":                "99999",
+		"X-Edgequota-Client-Subject":               "CN=evil",
+	}
+
+	echo, status, err := doMTLSRequest(base, tlsCfg, spoofedHeaders)
+	if err != nil {
+		return fail(name, "request failed: %v", err)
+	}
+	if status != 200 {
+		return fail(name, "expected 200, got %d", status)
+	}
+
+	if echo["x-edgequota-mtls"] != "true" {
+		return fail(name, "spoofed x-edgequota-mtls was not overwritten: got %q", echo["x-edgequota-mtls"])
+	}
+	if echo["x-edgequota-client-fingerprint-sha256"] == "deadbeef" {
+		return fail(name, "spoofed fingerprint was not overwritten")
+	}
+
+	h := sha256.Sum256(leaf.Raw)
+	expectedFP := hex.EncodeToString(h[:])
+	if echo["x-edgequota-client-fingerprint-sha256"] != expectedFP {
+		return fail(name, "fingerprint not set to real value: got %q", echo["x-edgequota-client-fingerprint-sha256"])
+	}
+	if echo["x-edgequota-client-serial"] == "99999" {
+		return fail(name, "spoofed serial was not overwritten")
+	}
+	if echo["x-edgequota-client-subject"] == "CN=evil" {
+		return fail(name, "spoofed subject was not overwritten")
+	}
+
+	return pass(name, "all spoofed headers overwritten with real mTLS identity")
+}
+
+func testMTLSNormalPortNoIdentity(base string) testResult {
+	const name = "mtls-normal-port-no-identity"
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	echo, status, err := doMTLSRequest(base, tlsCfg, nil)
+	if err != nil {
+		return fail(name, "request failed: %v", err)
+	}
+	if status != 200 {
+		return fail(name, "expected 200, got %d", status)
+	}
+
+	mtlsHeader := echo["x-edgequota-mtls"]
+	if mtlsHeader != "false" {
+		return fail(name, "expected x-edgequota-mtls=false on normal TLS port, got %q", mtlsHeader)
+	}
+
+	if fp := echo["x-edgequota-client-fingerprint-sha256"]; fp != "" {
+		return fail(name, "expected empty fingerprint on normal port, got %q", fp)
+	}
+
+	return pass(name, "normal TLS port correctly sets x-edgequota-mtls=false with no identity headers")
 }
 
 // getTLSSerial connects to the given HTTPS URL and returns the server

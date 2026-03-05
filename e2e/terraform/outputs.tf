@@ -71,3 +71,22 @@ output "eq_protocol_port" {
 output "eq_protocol_rl_port" {
   value = module.eq_protocol_rl.node_port
 }
+
+output "eq_mtls_port" {
+  value = module.eq_mtls.node_port
+}
+
+output "mtls_client_cert_pem" {
+  value     = module.mtls_certs.client_cert_pem
+  sensitive = true
+}
+
+output "mtls_client_key_pem" {
+  value     = module.mtls_certs.client_key_pem
+  sensitive = true
+}
+
+output "mtls_client_ca_cert_pem" {
+  value     = module.mtls_certs.client_ca_cert_pem
+  sensitive = true
+}

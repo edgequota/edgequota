@@ -1517,3 +1517,204 @@ func TestValidateEventsHeaders(t *testing.T) {
 		assert.Contains(t, err.Error(), "restricted")
 	})
 }
+
+func TestValidateMTLS(t *testing.T) {
+	base := func() *Config {
+		c := Defaults()
+		c.RateLimit.Static.BackendURL = "http://backend:8080"
+		c.Server.TLS.Enabled = true
+		c.Server.TLS.CertFile = "/cert.pem"
+		c.Server.TLS.KeyFile = "/key.pem"
+		return c
+	}
+
+	t.Run("disabled mTLS passes validation", func(t *testing.T) {
+		cfg := base()
+		require.NoError(t, Validate(cfg))
+	})
+
+	t.Run("valid mTLS config", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ListenAddr:   ":4443",
+			ClientCAFile: "/ca.pem",
+			ClientAuth:   ClientAuthRequireAndVerify,
+		}
+		require.NoError(t, Validate(cfg))
+	})
+
+	t.Run("mTLS requires TLS enabled", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.Enabled = false
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ListenAddr:   ":4443",
+			ClientCAFile: "/ca.pem",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "server.tls.mtls.enabled requires server.tls.enabled")
+	})
+
+	t.Run("mTLS requires client_ca_file", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:    true,
+			ListenAddr: ":4443",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "client_ca_file is required")
+	})
+
+	t.Run("mTLS requires listen_addr", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ClientCAFile: "/ca.pem",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "listen_addr is required")
+	})
+
+	t.Run("mTLS listen_addr must differ from server.address", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ListenAddr:   ":8080",
+			ClientCAFile: "/ca.pem",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must differ from server.address")
+	})
+
+	t.Run("invalid client_auth value", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ListenAddr:   ":4443",
+			ClientCAFile: "/ca.pem",
+			ClientAuth:   "bogus",
+		}
+		err := Validate(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid server.tls.mtls.client_auth")
+	})
+
+	t.Run("empty client_auth defaults to require_and_verify", func(t *testing.T) {
+		cfg := base()
+		cfg.Server.TLS.MTLS = MTLSConfig{
+			Enabled:      true,
+			ListenAddr:   ":4443",
+			ClientCAFile: "/ca.pem",
+		}
+		assert.Equal(t, ClientAuthRequireAndVerify, cfg.Server.TLS.MTLS.ResolvedClientAuth())
+	})
+
+	t.Run("all valid client_auth modes accepted", func(t *testing.T) {
+		for _, mode := range []ClientAuthMode{ClientAuthRequest, ClientAuthRequireAny, ClientAuthRequireAndVerify} {
+			cfg := base()
+			cfg.Server.TLS.MTLS = MTLSConfig{
+				Enabled:      true,
+				ListenAddr:   ":4443",
+				ClientCAFile: "/ca.pem",
+				ClientAuth:   mode,
+			}
+			require.NoError(t, Validate(cfg), "mode %s should be valid", mode)
+		}
+	})
+}
+
+func TestMTLSNormalize(t *testing.T) {
+	cfg := Defaults()
+	cfg.Server.TLS.MTLS.ClientAuth = "REQUIRE_AND_VERIFY"
+	cfg.normalize()
+	assert.Equal(t, ClientAuthRequireAndVerify, cfg.Server.TLS.MTLS.ClientAuth)
+}
+
+func TestRequiresRestart_MTLS(t *testing.T) {
+	old := Defaults()
+	new_ := Defaults()
+
+	t.Run("mtls enabled change requires restart", func(t *testing.T) {
+		new_.Server.TLS.MTLS.Enabled = true
+		fields := new_.RequiresRestart(old)
+		assert.Contains(t, fields, "server.tls.mtls.enabled")
+	})
+
+	t.Run("mtls listen_addr change requires restart", func(t *testing.T) {
+		old2 := Defaults()
+		old2.Server.TLS.MTLS.Enabled = true
+		old2.Server.TLS.MTLS.ListenAddr = ":4443"
+
+		new2 := Defaults()
+		new2.Server.TLS.MTLS.Enabled = true
+		new2.Server.TLS.MTLS.ListenAddr = ":5443"
+
+		fields := new2.RequiresRestart(old2)
+		assert.Contains(t, fields, "server.tls.mtls.listen_addr")
+	})
+}
+
+func TestMTLSConfigParsing(t *testing.T) {
+	yamlContent := `
+server:
+  address: ":8080"
+  tls:
+    enabled: true
+    cert_file: "/cert.pem"
+    key_file: "/key.pem"
+    mtls:
+      enabled: true
+      listen_addr: ":4443"
+      client_ca_file: "/etc/tls/client-ca.pem"
+      client_auth: "require_and_verify"
+      required_routes:
+        - host: "kiosk-api.example.com"
+          path_prefixes:
+            - "/v1/device/bootstrap"
+            - "/v1/device/heartbeat"
+redis:
+  endpoints:
+    - "redis:6379"
+rate_limit:
+  static:
+    backend_url: "http://backend:8080"
+`
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(yamlContent), 0o644))
+
+	t.Setenv("EDGEQUOTA_CONFIG_FILE", cfgFile)
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Server.TLS.MTLS.Enabled)
+	assert.Equal(t, ":4443", cfg.Server.TLS.MTLS.ListenAddr)
+	assert.Equal(t, "/etc/tls/client-ca.pem", cfg.Server.TLS.MTLS.ClientCAFile)
+	assert.Equal(t, ClientAuthRequireAndVerify, cfg.Server.TLS.MTLS.ClientAuth)
+}
+
+func TestMTLSConfigEnvOverride(t *testing.T) {
+	cfg := Defaults()
+	cfg.Server.TLS.Enabled = true
+	cfg.Server.TLS.CertFile = "/cert.pem"
+	cfg.Server.TLS.KeyFile = "/key.pem"
+	cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+
+	t.Setenv("EDGEQUOTA_SERVER_TLS_MTLS_ENABLED", "true")
+	t.Setenv("EDGEQUOTA_SERVER_TLS_MTLS_LISTEN_ADDR", ":5443")
+	t.Setenv("EDGEQUOTA_SERVER_TLS_MTLS_CLIENT_CA_FILE", "/custom-ca.pem")
+	t.Setenv("EDGEQUOTA_SERVER_TLS_MTLS_CLIENT_AUTH", "request")
+	parseEnv(t, cfg)
+	cfg.normalize()
+	require.NoError(t, Validate(cfg))
+
+	assert.True(t, cfg.Server.TLS.MTLS.Enabled)
+	assert.Equal(t, ":5443", cfg.Server.TLS.MTLS.ListenAddr)
+	assert.Equal(t, "/custom-ca.pem", cfg.Server.TLS.MTLS.ClientCAFile)
+	assert.Equal(t, ClientAuthRequest, cfg.Server.TLS.MTLS.ClientAuth)
+}

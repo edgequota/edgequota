@@ -6,9 +6,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -516,4 +518,341 @@ func generateSelfSignedCert(certFile, keyFile string) error {
 		return err
 	}
 	return os.WriteFile(keyFile, keyPEM, 0o644)
+}
+
+// generateCA creates a CA certificate and private key, writes them to files,
+// and returns the parsed certificate and key for signing client certs.
+func generateCA(t *testing.T, dir string) (*x509.Certificate, *ecdsa.PrivateKey, string) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	caFile := dir + "/ca.pem"
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	require.NoError(t, os.WriteFile(caFile, caPEM, 0o644))
+
+	return caCert, caKey, caFile
+}
+
+// generateClientCert creates a client certificate signed by the given CA.
+func generateClientCert(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	clientTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject: pkix.Name{
+			CommonName:   "test-device-001",
+			Organization: []string{"Test Org"},
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTmpl, caCert, &clientKey.PublicKey, caKey)
+	require.NoError(t, err)
+
+	return tls.Certificate{
+		Certificate: [][]byte{clientDER},
+		PrivateKey:  clientKey,
+	}
+}
+
+func TestBuildMTLSServer(t *testing.T) {
+	t.Run("creates server when mTLS is enabled", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.MTLS.Enabled = true
+		cfg.Server.TLS.MTLS.ListenAddr = ":4443"
+
+		dir := t.TempDir()
+		certFile := dir + "/tls.crt"
+		keyFile := dir + "/tls.key"
+		require.NoError(t, generateSelfSignedCert(certFile, keyFile))
+		cfg.Server.TLS.CertFile = certFile
+		cfg.Server.TLS.KeyFile = keyFile
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		assert.NotNil(t, srv.mtlsServer, "mTLS server should be created")
+		assert.Equal(t, ":4443", srv.mtlsServer.Addr)
+	})
+
+	t.Run("nil when mTLS is disabled", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		assert.Nil(t, srv.mtlsServer)
+	})
+}
+
+func TestMTLSClientAuth(t *testing.T) {
+	tests := []struct {
+		mode   config.ClientAuthMode
+		expect tls.ClientAuthType
+	}{
+		{config.ClientAuthRequest, tls.RequestClientCert},
+		{config.ClientAuthRequireAny, tls.RequireAnyClientCert},
+		{config.ClientAuthRequireAndVerify, tls.RequireAndVerifyClientCert},
+		{"", tls.RequireAndVerifyClientCert},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.mode), func(t *testing.T) {
+			assert.Equal(t, tt.expect, mtlsClientAuth(tt.mode))
+		})
+	}
+}
+
+func TestLoadClientCAs(t *testing.T) {
+	t.Run("loads valid CA file", func(t *testing.T) {
+		dir := t.TempDir()
+		_, _, caFile := generateCA(t, dir)
+
+		pool, err := loadClientCAs(caFile)
+		require.NoError(t, err)
+		assert.NotNil(t, pool)
+	})
+
+	t.Run("errors on missing file", func(t *testing.T) {
+		_, err := loadClientCAs("/nonexistent/ca.pem")
+		assert.Error(t, err)
+	})
+
+	t.Run("errors on empty PEM", func(t *testing.T) {
+		dir := t.TempDir()
+		emptyFile := dir + "/empty.pem"
+		require.NoError(t, os.WriteFile(emptyFile, []byte("not a certificate"), 0o644))
+
+		_, err := loadClientCAs(emptyFile)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no valid CA certificates")
+	})
+}
+
+func TestMTLSIntegration(t *testing.T) {
+	dir := t.TempDir()
+
+	certFile := dir + "/tls.crt"
+	keyFile := dir + "/tls.key"
+	require.NoError(t, generateSelfSignedCert(certFile, keyFile))
+
+	caCert, caKey, caFile := generateCA(t, dir)
+	clientCert := generateClientCert(t, caCert, caKey)
+
+	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	require.NoError(t, err)
+
+	clientCAs, err := loadClientCAs(caFile)
+	require.NoError(t, err)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("mTLS server rejects clients without cert", func(t *testing.T) {
+		srv := httptest.NewUnstartedServer(handler)
+		srv.TLS = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{serverCert},
+			ClientCAs:    clientCAs,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+		}
+		srv.StartTLS()
+		defer srv.Close()
+
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: true,
+				},
+			},
+		}
+
+		_, err := client.Get(srv.URL + "/v1/device/bootstrap")
+		assert.Error(t, err, "should fail without client certificate")
+	})
+
+	t.Run("mTLS server accepts clients with valid cert", func(t *testing.T) {
+		srv := httptest.NewUnstartedServer(handler)
+		srv.TLS = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{serverCert},
+			ClientCAs:    clientCAs,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+		}
+		srv.StartTLS()
+		defer srv.Close()
+
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: true,
+					Certificates:       []tls.Certificate{clientCert},
+				},
+			},
+		}
+
+		resp, err := client.Get(srv.URL + "/v1/device/bootstrap")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("normal TLS server does not require client cert", func(t *testing.T) {
+		srv := httptest.NewUnstartedServer(handler)
+		srv.TLS = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{serverCert},
+		}
+		srv.StartTLS()
+		defer srv.Close()
+
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: true,
+				},
+			},
+		}
+
+		resp, err := client.Get(srv.URL + "/some/path")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+}
+
+func TestMTLSHeaderInjectionE2E(t *testing.T) {
+	dir := t.TempDir()
+
+	certFile := dir + "/tls.crt"
+	keyFile := dir + "/tls.key"
+	require.NoError(t, generateSelfSignedCert(certFile, keyFile))
+
+	caCert, caKey, caFile := generateCA(t, dir)
+	clientCert := generateClientCert(t, caCert, caKey)
+
+	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	require.NoError(t, err)
+
+	clientCAs, err := loadClientCAs(caFile)
+	require.NoError(t, err)
+
+	// Backend that captures forwarded headers.
+	var backendHeaders http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	// Create a minimal proxy that injects mTLS headers.
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate what the proxy Director does:
+		// 1. Sanitize + inject mTLS identity headers
+		// 2. Forward to backend
+		mtlsReq := r.Clone(r.Context())
+		mtlsReq.URL.Scheme = "http"
+		mtlsReq.URL.Host = backend.Listener.Addr().String()
+		mtlsReq.Host = backend.Listener.Addr().String()
+		mtlsReq.RequestURI = ""
+
+		// Simulate the Director flow
+		for _, h := range []string{
+			"X-Edgequota-Mtls",
+			"X-Edgequota-Client-Fingerprint-Sha256",
+			"X-Edgequota-Client-Serial",
+			"X-Edgequota-Client-Subject",
+		} {
+			mtlsReq.Header.Del(h)
+		}
+
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			leaf := r.TLS.PeerCertificates[0]
+			fp := sha256.Sum256(leaf.Raw)
+			mtlsReq.Header.Set("X-Edgequota-Mtls", "true")
+			mtlsReq.Header.Set("X-Edgequota-Client-Fingerprint-Sha256", hex.EncodeToString(fp[:]))
+			mtlsReq.Header.Set("X-Edgequota-Client-Serial", leaf.SerialNumber.String())
+			mtlsReq.Header.Set("X-Edgequota-Client-Subject", leaf.Subject.String())
+		} else {
+			mtlsReq.Header.Set("X-Edgequota-Mtls", "false")
+		}
+
+		resp, fwdErr := http.DefaultClient.Do(mtlsReq)
+		if fwdErr != nil {
+			http.Error(w, fwdErr.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+	})
+
+	mtlsSrv := httptest.NewUnstartedServer(proxyHandler)
+	mtlsSrv.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    clientCAs,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	mtlsSrv.StartTLS()
+	defer mtlsSrv.Close()
+
+	t.Run("verified client cert headers forwarded to backend", func(t *testing.T) {
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: true,
+					Certificates:       []tls.Certificate{clientCert},
+				},
+			},
+		}
+
+		// Send request with spoofed headers that should be overwritten.
+		req, reqErr := http.NewRequest(http.MethodGet, mtlsSrv.URL+"/v1/device/bootstrap", nil)
+		require.NoError(t, reqErr)
+		req.Header.Set("X-Edgequota-Mtls", "false")
+		req.Header.Set("X-Edgequota-Client-Fingerprint-Sha256", "evil-fp")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		assert.Equal(t, "true", backendHeaders.Get("X-Edgequota-Mtls"))
+		assert.NotEqual(t, "evil-fp", backendHeaders.Get("X-Edgequota-Client-Fingerprint-Sha256"))
+		assert.Equal(t, "42", backendHeaders.Get("X-Edgequota-Client-Serial"))
+		assert.Contains(t, backendHeaders.Get("X-Edgequota-Client-Subject"), "test-device-001")
+	})
 }

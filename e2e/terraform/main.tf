@@ -52,6 +52,11 @@ module "tls_certs" {
   namespace = kubernetes_namespace_v1.e2e.metadata[0].name
 }
 
+module "mtls_certs" {
+  source    = "./modules/mtls-certs"
+  namespace = kubernetes_namespace_v1.e2e.metadata[0].name
+}
+
 locals {
   ns                  = kubernetes_namespace_v1.e2e.metadata[0].name
   backend_url         = module.whoami.endpoint
@@ -992,4 +997,83 @@ module "eq_cache_extrl" {
   YAML
 
   depends_on = [module.redis_single, module.whoami, module.mockextrl]
+}
+
+# --- mtls: Dual-listener mTLS test (TLS + mTLS on separate ports) ---
+module "eq_mtls" {
+  source    = "./modules/edgequota"
+  namespace = local.ns
+  scenario  = "mtls"
+  image     = var.edgequota_image
+  node_port = 30120 # unused (maps to 8080, nothing listens there)
+
+  tls_secret_name            = module.tls_certs.secret_name
+  mtls_client_ca_secret_name = module.mtls_certs.secret_name
+
+  extra_ports = [
+    {
+      name        = "tls"
+      port        = 8443
+      target_port = 8443
+      protocol    = "TCP"
+      node_port   = 30119
+    },
+    {
+      name        = "mtls"
+      port        = 4443
+      target_port = 4443
+      protocol    = "TCP"
+      node_port   = 30219
+    },
+  ]
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8443"
+      read_timeout: "30s"
+      write_timeout: "60s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+      tls:
+        enabled: true
+        cert_file: "/etc/edgequota/tls/tls.crt"
+        key_file: "/etc/edgequota/tls/tls.key"
+        mtls:
+          enabled: true
+          listen_addr: ":4443"
+          client_ca_file: "/etc/edgequota/mtls/ca.crt"
+          client_auth: "require_and_verify"
+    admin:
+      address: ":9090"
+    backend:
+      timeout: "30s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+      tls_insecure_skip_verify: true
+      url_policy:
+        deny_private_networks: false
+    rate_limit:
+      failure_policy: "passThrough"
+      key_prefix: "mtls"
+      static:
+        backend_url: "${local.testbackend_tls_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.testbackend, module.tls_certs, module.mtls_certs]
 }

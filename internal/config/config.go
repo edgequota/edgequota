@@ -134,6 +134,23 @@ func (v TLSVersion) Valid() bool {
 	return false
 }
 
+// ClientAuthMode maps to crypto/tls ClientAuth constants.
+type ClientAuthMode string
+
+const (
+	ClientAuthRequest          ClientAuthMode = "request"
+	ClientAuthRequireAny       ClientAuthMode = "require_any"
+	ClientAuthRequireAndVerify ClientAuthMode = "require_and_verify"
+)
+
+func (m ClientAuthMode) Valid() bool {
+	switch m {
+	case ClientAuthRequest, ClientAuthRequireAny, ClientAuthRequireAndVerify, "":
+		return true
+	}
+	return false
+}
+
 // AuthFailurePolicy controls behavior when the auth service is unreachable.
 type AuthFailurePolicy string
 
@@ -291,6 +308,35 @@ type ServerTLSConfig struct {
 	HTTP3Enabled       bool       `yaml:"http3_enabled"       env:"HTTP3_ENABLED"`
 	HTTP3AdvertisePort int        `yaml:"http3_advertise_port" env:"HTTP3_ADVERTISE_PORT"`
 	MinVersion         TLSVersion `yaml:"min_version"         env:"MIN_VERSION"`
+	MTLS               MTLSConfig `yaml:"mtls"                envPrefix:"MTLS_"`
+}
+
+// MTLSConfig holds mutual TLS (client certificate) settings.
+// When enabled, EdgeQuota starts a second listener that requires client
+// certificates, allowing TLS-level authentication of clients (devices,
+// services). The normal listener remains unchanged, so existing traffic
+// is unaffected (backward compatible).
+type MTLSConfig struct {
+	Enabled      bool           `yaml:"enabled"        env:"ENABLED"`
+	ListenAddr   string         `yaml:"listen_addr"    env:"LISTEN_ADDR"`
+	ClientCAFile string         `yaml:"client_ca_file" env:"CLIENT_CA_FILE"`
+	ClientAuth   ClientAuthMode `yaml:"client_auth"    env:"CLIENT_AUTH"`
+}
+
+// ResolvedClientAuth returns the effective ClientAuthMode, defaulting to
+// require_and_verify when not explicitly configured.
+func (m MTLSConfig) ResolvedClientAuth() ClientAuthMode {
+	if m.ClientAuth == "" {
+		return ClientAuthRequireAndVerify
+	}
+	return m.ClientAuth
+}
+
+// MTLSRequiredRoute specifies a host + path-prefix combination that
+// should be routed to the mTLS listener.
+type MTLSRequiredRoute struct {
+	Host         string   `yaml:"host"`
+	PathPrefixes []string `yaml:"path_prefixes"`
 }
 
 // AdminConfig holds the admin/observability server settings.
@@ -1121,6 +1167,7 @@ func (cfg *Config) normalize() {
 	cfg.Logging.Level = LogLevel(strings.ToLower(string(cfg.Logging.Level)))
 	cfg.Logging.Format = LogFormat(strings.ToLower(string(cfg.Logging.Format)))
 	cfg.Server.TLS.MinVersion = TLSVersion(normalizeTLSVersion(string(cfg.Server.TLS.MinVersion)))
+	cfg.Server.TLS.MTLS.ClientAuth = ClientAuthMode(strings.ToLower(string(cfg.Server.TLS.MTLS.ClientAuth)))
 	cfg.Tracing.Level = TracingLevel(strings.ToLower(string(cfg.Tracing.Level)))
 }
 
@@ -1267,6 +1314,32 @@ func validateTLS(cfg *Config) error {
 	}
 	if v := cfg.Server.TLS.MinVersion; v != "" && !v.Valid() {
 		return fmt.Errorf("invalid server.tls.min_version %q: must be 1.2 or 1.3", v)
+	}
+	if err := validateMTLS(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMTLS(cfg *Config) error {
+	mtls := cfg.Server.TLS.MTLS
+	if !mtls.Enabled {
+		return nil
+	}
+	if !cfg.Server.TLS.Enabled {
+		return fmt.Errorf("server.tls.mtls.enabled requires server.tls.enabled to be true")
+	}
+	if mtls.ClientCAFile == "" {
+		return fmt.Errorf("server.tls.mtls.client_ca_file is required when mTLS is enabled")
+	}
+	if mtls.ListenAddr == "" {
+		return fmt.Errorf("server.tls.mtls.listen_addr is required when mTLS is enabled (dual-listener approach)")
+	}
+	if mtls.ListenAddr == cfg.Server.Address {
+		return fmt.Errorf("server.tls.mtls.listen_addr must differ from server.address (%s)", cfg.Server.Address)
+	}
+	if !mtls.ClientAuth.Valid() {
+		return fmt.Errorf("invalid server.tls.mtls.client_auth %q: must be request, require_any, or require_and_verify", mtls.ClientAuth)
 	}
 	return nil
 }
@@ -1560,6 +1633,12 @@ func (c *Config) RequiresRestart(old *Config) []string {
 	}
 	if c.Server.TLS.HTTP3Enabled != old.Server.TLS.HTTP3Enabled {
 		fields = append(fields, "server.tls.http3_enabled")
+	}
+	if c.Server.TLS.MTLS.Enabled != old.Server.TLS.MTLS.Enabled {
+		fields = append(fields, "server.tls.mtls.enabled")
+	}
+	if c.Server.TLS.MTLS.ListenAddr != old.Server.TLS.MTLS.ListenAddr {
+		fields = append(fields, "server.tls.mtls.listen_addr")
 	}
 	return fields
 }
