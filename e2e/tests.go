@@ -2021,10 +2021,10 @@ func testMTLSAntiSpoofing(base string) testResult {
 	}
 
 	spoofedHeaders := map[string]string{
-		"X-Edgequota-Mtls":                        "false",
-		"X-Edgequota-Client-Fingerprint-Sha256":    "deadbeef",
-		"X-Edgequota-Client-Serial":                "99999",
-		"X-Edgequota-Client-Subject":               "CN=evil",
+		"X-Edgequota-Mtls":                      "false",
+		"X-Edgequota-Client-Fingerprint-Sha256": "deadbeef",
+		"X-Edgequota-Client-Serial":             "99999",
+		"X-Edgequota-Client-Subject":            "CN=evil",
 	}
 
 	echo, status, err := doMTLSRequest(base, tlsCfg, spoofedHeaders)
