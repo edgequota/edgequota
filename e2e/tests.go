@@ -3,9 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -14,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -267,6 +272,9 @@ func allTestCases(urls, adminURLs map[string]string) []testCase {
 		}},
 		{"mTLS — normal TLS port sets X-Edgequota-Mtls: false", "mtls", func() testResult {
 			return testMTLSNormalPortNoIdentity(urls["mtls-tls"])
+		}},
+		{"mTLS — CA hot-reload accepts new client cert after Secret update", "mtls", func() testResult {
+			return testMTLSCAReload(urls["mtls"])
 		}},
 
 		// Dynamic backend URL (tenant-aware routing)
@@ -2079,6 +2087,136 @@ func testMTLSNormalPortNoIdentity(base string) testResult {
 	}
 
 	return pass(name, "normal TLS port correctly sets x-edgequota-mtls=false with no identity headers")
+}
+
+// testMTLSCAReload verifies that the mTLS client CA can be hot-reloaded by
+// updating the Kubernetes Secret. After the reload, a client cert signed by the
+// new CA should be accepted and the old one rejected.
+func testMTLSCAReload(base string) testResult {
+	const name = "mtls-ca-reload"
+
+	// 1. Verify current client cert works.
+	tlsCfg, _, err := loadMTLSClientTLS()
+	if err != nil {
+		return fail(name, "load original mTLS client TLS: %v", err)
+	}
+	_, status, err := doMTLSRequest(base, tlsCfg, nil)
+	if err != nil {
+		return fail(name, "initial mTLS request failed: %v", err)
+	}
+	if status != 200 {
+		return fail(name, "initial request: expected 200, got %d", status)
+	}
+
+	// Save the original CA PEM so we can restore the Secret when done.
+	// This prevents the CA reload test from poisoning subsequent test runs
+	// that reuse the same cluster without a full setup.
+	tfDir := filepath.Join(getE2EDir(), "terraform")
+	origCAPEM, origErr := runInDir(tfDir, "terraform", "output", "-raw", "mtls_client_ca_cert_pem")
+	if origErr != nil {
+		return fail(name, "terraform output mtls_client_ca_cert_pem: %v", origErr)
+	}
+	defer func() {
+		if writeErr := os.WriteFile("/tmp/e2e-orig-ca-cert.pem", []byte(origCAPEM), 0o600); writeErr == nil {
+			_, _ = run("bash", "-c",
+				`kubectl create secret generic edgequota-mtls-client-ca -n `+namespace+
+					` --from-file=ca.crt=/tmp/e2e-orig-ca-cert.pem `+
+					`--dry-run=client -o yaml | kubectl apply -f -`)
+		}
+	}()
+
+	// 2. Generate a new CA + client cert in pure Go (avoids LibreSSL quirks).
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fail(name, "generate CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "EdgeQuota E2E New CA", Organization: []string{"EdgeQuota"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		return fail(name, "create CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		return fail(name, "parse CA cert: %v", err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fail(name, "generate client key: %v", err)
+	}
+	clientTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject:      pkix.Name{CommonName: "e2e-new-device", Organization: []string{"EdgeQuota E2E"}},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTmpl, caCert, &clientKey.PublicKey, caKey)
+	if err != nil {
+		return fail(name, "create client cert: %v", err)
+	}
+
+	// 3. Update the mTLS client CA Secret with the new CA.
+	if err := os.WriteFile("/tmp/e2e-new-ca-cert.pem", caPEM, 0o600); err != nil {
+		return fail(name, "write CA PEM: %v", err)
+	}
+	_, applyErr := run("bash", "-c",
+		`kubectl create secret generic edgequota-mtls-client-ca -n `+namespace+
+			` --from-file=ca.crt=/tmp/e2e-new-ca-cert.pem `+
+			`--dry-run=client -o yaml | kubectl apply -f -`)
+	if applyErr != nil {
+		return fail(name, "failed to update mTLS CA secret: %v", applyErr)
+	}
+
+	// Build TLS config for the new client cert.
+	newClientTLS := &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{clientDER},
+			PrivateKey:  clientKey,
+		}},
+		InsecureSkipVerify: true, //nolint:gosec // e2e self-signed server certs
+	}
+
+	// 4. Poll until the mTLS port accepts the new client cert.
+	// Kubernetes Secret volume propagation can take up to ~60s (kubelet
+	// syncFrequency) plus the cert watcher poll interval (2s).
+	deadline := time.Now().Add(90 * time.Second)
+	var lastErr error
+	accepted := false
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		_, s, reqErr := doMTLSRequest(base, newClientTLS, nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		if s == 200 {
+			accepted = true
+			break
+		}
+		lastErr = fmt.Errorf("unexpected status %d", s)
+	}
+	if !accepted {
+		return fail(name, "new client cert never accepted within timeout: %v", lastErr)
+	}
+
+	// 5. Verify old client cert is now rejected.
+	_, _, oldErr := doMTLSRequest(base, tlsCfg, nil)
+	if oldErr == nil {
+		return fail(name, "old client cert should be rejected after CA rotation, but request succeeded")
+	}
+
+	return pass(name, "mTLS CA hot-reloaded: new client accepted, old client rejected")
 }
 
 // getTLSSerial connects to the given HTTPS URL and returns the server

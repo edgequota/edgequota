@@ -574,6 +574,124 @@ func generateClientCert(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.Pri
 	}
 }
 
+func TestClientCAHolder(t *testing.T) {
+	t.Run("loads valid CA file", func(t *testing.T) {
+		dir := t.TempDir()
+		_, _, caFile := generateCA(t, dir)
+
+		holder, err := newClientCAHolder(caFile)
+		require.NoError(t, err)
+		assert.NotNil(t, holder.GetPool())
+	})
+
+	t.Run("rejects invalid PEM", func(t *testing.T) {
+		dir := t.TempDir()
+		badFile := dir + "/bad.pem"
+		require.NoError(t, os.WriteFile(badFile, []byte("not-a-cert"), 0o644))
+
+		_, err := newClientCAHolder(badFile)
+		assert.Error(t, err)
+	})
+
+	t.Run("rejects missing file", func(t *testing.T) {
+		_, err := newClientCAHolder("/nonexistent/ca.pem")
+		assert.Error(t, err)
+	})
+
+	t.Run("reload swaps pool", func(t *testing.T) {
+		dir := t.TempDir()
+		_, _, caFile1 := generateCA(t, dir)
+
+		holder, err := newClientCAHolder(caFile1)
+		require.NoError(t, err)
+		pool1 := holder.GetPool()
+
+		// Generate a different CA.
+		dir2 := t.TempDir()
+		_, _, caFile2 := generateCA(t, dir2)
+
+		require.NoError(t, holder.Reload(caFile2))
+		pool2 := holder.GetPool()
+
+		// Pools should be different pointer values since they were loaded from
+		// different CA files.
+		assert.NotSame(t, pool1, pool2)
+	})
+
+	t.Run("reload invalid keeps old pool", func(t *testing.T) {
+		dir := t.TempDir()
+		_, _, caFile := generateCA(t, dir)
+
+		holder, err := newClientCAHolder(caFile)
+		require.NoError(t, err)
+		poolBefore := holder.GetPool()
+
+		err = holder.Reload("/nonexistent/bad.pem")
+		assert.Error(t, err)
+
+		// Pool should be unchanged.
+		assert.Same(t, poolBefore, holder.GetPool())
+	})
+}
+
+func TestReloadMTLSCA(t *testing.T) {
+	t.Run("no-op when mTLS is not enabled", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		// Should not panic — mtlsCAs is nil.
+		srv.ReloadMTLSCA("/nonexistent/ca.pem")
+	})
+
+	t.Run("reloads valid CA file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		dir := t.TempDir()
+		_, _, caFile := generateCA(t, dir)
+		holder, caErr := newClientCAHolder(caFile)
+		require.NoError(t, caErr)
+		srv.mtlsCAs = holder
+
+		// Generate a new CA and reload.
+		dir2 := t.TempDir()
+		_, _, caFile2 := generateCA(t, dir2)
+		srv.ReloadMTLSCA(caFile2)
+	})
+
+	t.Run("logs error for invalid CA file", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.Redis.Endpoints = []string{mr.Addr()}
+
+		srv, err := New(cfg, testLogger(), "test")
+		require.NoError(t, err)
+		defer srv.chain.Close()
+
+		dir := t.TempDir()
+		_, _, caFile := generateCA(t, dir)
+		holder, caErr := newClientCAHolder(caFile)
+		require.NoError(t, caErr)
+		srv.mtlsCAs = holder
+
+		// Reload with nonexistent file — should not panic.
+		srv.ReloadMTLSCA("/nonexistent/ca.pem")
+	})
+}
+
 func TestBuildMTLSServer(t *testing.T) {
 	t.Run("creates server when mTLS is enabled", func(t *testing.T) {
 		mr := miniredis.RunT(t)
@@ -750,6 +868,90 @@ func TestMTLSIntegration(t *testing.T) {
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 	})
+}
+
+func TestMTLSCAHotReload(t *testing.T) {
+	dir := t.TempDir()
+
+	certFile := dir + "/tls.crt"
+	keyFile := dir + "/tls.key"
+	require.NoError(t, generateSelfSignedCert(certFile, keyFile))
+
+	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	require.NoError(t, err)
+
+	// Create CA1 and a client cert signed by it.
+	ca1Cert, ca1Key, ca1File := generateCA(t, dir)
+	clientCert1 := generateClientCert(t, ca1Cert, ca1Key)
+
+	// Create CA2 and a client cert signed by it.
+	dir2 := t.TempDir()
+	ca2Cert, ca2Key, ca2File := generateCA(t, dir2)
+	clientCert2 := generateClientCert(t, ca2Cert, ca2Key)
+
+	// Build the CA holder from CA1.
+	caHolder, err := newClientCAHolder(ca1File)
+	require.NoError(t, err)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	clientAuth := tls.RequireAndVerifyClientCert
+	minVer := uint16(tls.VersionTLS12)
+
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{
+		MinVersion:   minVer,
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caHolder.GetPool(),
+		ClientAuth:   clientAuth,
+		GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+			return &tls.Config{
+				MinVersion:   minVer,
+				Certificates: []tls.Certificate{serverCert},
+				ClientCAs:    caHolder.GetPool(),
+				ClientAuth:   clientAuth,
+			}, nil
+		},
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	makeClient := func(cert tls.Certificate) *http.Client {
+		return &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: true,
+					Certificates:       []tls.Certificate{cert},
+				},
+			},
+		}
+	}
+
+	// 1. Client with CA1-signed cert should succeed.
+	resp, err := makeClient(clientCert1).Get(srv.URL + "/")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// 2. Client with CA2-signed cert should fail (CA2 not trusted yet).
+	_, err = makeClient(clientCert2).Get(srv.URL + "/")
+	assert.Error(t, err, "CA2 client should be rejected before CA reload")
+
+	// 3. Hot-reload the CA to CA2.
+	require.NoError(t, caHolder.Reload(ca2File))
+
+	// 4. Now CA2-signed client should succeed.
+	resp, err = makeClient(clientCert2).Get(srv.URL + "/")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// 5. CA1-signed client should now fail.
+	_, err = makeClient(clientCert1).Get(srv.URL + "/")
+	assert.Error(t, err, "CA1 client should be rejected after CA reload to CA2")
 }
 
 func TestMTLSHeaderInjectionE2E(t *testing.T) {

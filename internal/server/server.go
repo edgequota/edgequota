@@ -46,7 +46,8 @@ type Server struct {
 	health          *observability.HealthChecker
 	metrics         *observability.Metrics
 	tracingShutdown func(context.Context) error
-	certs           *certHolder // non-nil when TLS is enabled; supports hot-reload.
+	certs           *certHolder     // non-nil when TLS is enabled; supports hot-reload.
+	mtlsCAs         *clientCAHolder // non-nil when mTLS is enabled; supports hot-reload.
 }
 
 // New creates a new EdgeQuota server instance.
@@ -55,6 +56,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	reg.MustRegister(collectors.NewGoCollector())
 
+	observability.RegisterBuildInfo(reg, version)
 	metrics := observability.NewMetrics(reg, int64(cfg.RateLimit.MaxTenantLabels))
 	health := observability.NewHealthChecker()
 
@@ -541,6 +543,35 @@ func (ch *certHolder) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, 
 	return ch.cert.Load(), nil
 }
 
+// clientCAHolder provides atomic hot-reload of the mTLS client CA pool.
+type clientCAHolder struct {
+	pool atomic.Pointer[x509.CertPool]
+}
+
+// newClientCAHolder loads the initial client CA pool from a PEM file.
+func newClientCAHolder(path string) (*clientCAHolder, error) {
+	ch := &clientCAHolder{}
+	if err := ch.Reload(path); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// Reload reads the PEM file and atomically swaps the CA pool.
+func (ch *clientCAHolder) Reload(path string) error {
+	pool, err := loadClientCAs(path)
+	if err != nil {
+		return err
+	}
+	ch.pool.Store(pool)
+	return nil
+}
+
+// GetPool returns the current client CA pool.
+func (ch *clientCAHolder) GetPool() *x509.CertPool {
+	return ch.pool.Load()
+}
+
 // tlsMinVersion returns the tls.Config MinVersion from config, defaulting to TLS 1.2.
 func tlsMinVersion(cfg *config.Config) uint16 {
 	if cfg.Server.TLS.MinVersion == config.TLSVersion13 {
@@ -591,20 +622,32 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		// Configure the mTLS listener with its own TLSConfig that includes
-		// ClientCAs and a stricter ClientAuth mode.
+		// ClientCAs and a stricter ClientAuth mode. The CA pool is served
+		// via GetConfigForClient so it can be hot-reloaded at runtime.
 		if s.mtlsServer != nil {
 			mtlsCfg := s.cfg.Server.TLS.MTLS
-			clientCAs, caErr := loadClientCAs(mtlsCfg.ClientCAFile)
+			caHolder, caErr := newClientCAHolder(mtlsCfg.ClientCAFile)
 			if caErr != nil {
 				return caErr
 			}
+			s.mtlsCAs = caHolder
 
+			clientAuth := mtlsClientAuth(mtlsCfg.ResolvedClientAuth())
 			mtlsTLSCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
 				MinVersion:     minVer,
 				GetCertificate: ch.GetCertificate,
 				NextProtos:     []string{"h2", "http/1.1"},
-				ClientCAs:      clientCAs,
-				ClientAuth:     mtlsClientAuth(mtlsCfg.ResolvedClientAuth()),
+				ClientCAs:      caHolder.GetPool(),
+				ClientAuth:     clientAuth,
+				GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+					return &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
+						MinVersion:     minVer,
+						GetCertificate: ch.GetCertificate,
+						NextProtos:     []string{"h2", "http/1.1"},
+						ClientCAs:      caHolder.GetPool(),
+						ClientAuth:     clientAuth,
+					}, nil
+				},
 			}
 			s.mtlsServer.TLSConfig = mtlsTLSCfg
 
@@ -755,6 +798,7 @@ func (s *Server) Reload(newCfg *config.Config) error {
 	}
 
 	s.cfg = newCfg
+	s.metrics.SetConfigReloadTimestamp()
 	return nil
 }
 
@@ -783,6 +827,22 @@ func (s *Server) ReloadCerts(certFile, keyFile string) {
 		s.logger.Error("TLS certificate reload failed, keeping old certificate", "error", err)
 	} else {
 		s.logger.Info("TLS certificates reloaded", "cert", certFile, "key", keyFile)
+		s.metrics.SetTLSReloadTimestamp()
+	}
+}
+
+// ReloadMTLSCA hot-swaps the mTLS client CA pool from the given file
+// without restarting the server. Called by the dedicated CA file watcher
+// to handle Kubernetes Secret volume updates.
+func (s *Server) ReloadMTLSCA(caFile string) {
+	if s.mtlsCAs == nil {
+		return
+	}
+	if err := s.mtlsCAs.Reload(caFile); err != nil {
+		s.logger.Error("mTLS CA reload failed, keeping old CA pool", "error", err)
+	} else {
+		s.logger.Info("mTLS CA certificates reloaded", "ca_file", caFile)
+		s.metrics.SetMTLSCAReloadTimestamp()
 	}
 }
 

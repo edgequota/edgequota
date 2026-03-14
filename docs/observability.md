@@ -28,20 +28,25 @@ Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exp
 | `edgequota_concurrent_requests_rejected_total` | Concurrency limit rejections | `max_concurrent_requests` exceeded; request received 503 |
 | `edgequota_external_rl_semaphore_rejected_total` | External RL semaphore rejections | `max_concurrent_requests` for external RL calls exceeded |
 | `edgequota_external_rl_singleflight_shared_total` | Singleflight shared results | A concurrent cache miss shared the result of another in-flight external call |
+| `edgequota_external_rl_cache_hits_total` | External RL cache hits | External RL lookup served from fresh Redis cache |
+| `edgequota_external_rl_cache_misses_total` | External RL cache misses | External RL lookup required a service call (cache miss) |
+| `edgequota_external_rl_cache_stale_hits_total` | External RL stale cache hits | External RL lookup served from stale cache (circuit open, semaphore full, or fetch error) |
 | `edgequota_response_cache_hits_total` | Response cache hits | Request served from the CDN-style response cache |
 | `edgequota_response_cache_misses_total` | Response cache misses | Request missed the cache and was proxied to the backend |
+| `edgequota_response_cache_stale_hits_total` | Response cache stale hits | Stale cache entry revalidated via conditional request (304 Not Modified) |
 | `edgequota_response_cache_stores_total` | Response cache stores | Backend response stored in cache |
-| `edgequota_response_cache_store_errors_total` | Response cache store errors | Error storing a response in cache (Redis write failure) |
-| `edgequota_response_cache_evictions_total` | Response cache evictions | Cache entry evicted (TTL expiry or explicit purge) |
-| `edgequota_response_cache_purge_total` | Response cache purge operations | Purge executed (by key or by tag) |
-| `edgequota_response_cache_revalidations_total` | Response cache revalidations | Conditional request received 304 Not Modified from backend |
-| `edgequota_response_cache_skip_total` | Response cache skips | Response skipped from caching (no-store, too large, non-cacheable status) |
+| `edgequota_response_cache_skips_total` | Response cache skips | Response skipped from caching (no-store, too large, streaming, non-cacheable status) |
+| `edgequota_response_cache_purges_total` | Response cache purge operations | Purge executed (by key or by tag) |
 
 ### Gauges
 
 | Metric | Description |
 |--------|-------------|
 | `edgequota_redis_healthy` | Whether Redis is reachable: `1` = healthy, `0` = unhealthy. Updated by the recovery loop. |
+| `edgequota_build_info` | Build information (value always 1). Labels: `version`, `goversion`. |
+| `edgequota_config_last_reload_timestamp_seconds` | Unix timestamp of the last successful config reload. |
+| `edgequota_tls_last_reload_timestamp_seconds` | Unix timestamp of the last successful TLS certificate reload. |
+| `edgequota_mtls_ca_last_reload_timestamp_seconds` | Unix timestamp of the last successful mTLS CA certificate reload. |
 
 ### Histograms
 
@@ -321,156 +326,59 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 
 ---
 
-## Suggested Grafana Dashboards
+## Grafana Dashboard
 
-### Dashboard 1: Request Overview
+A comprehensive, importable Grafana dashboard is available at [`deploy/grafana/edgequota-dashboard.json`](../deploy/grafana/edgequota-dashboard.json).
 
-**Purpose:** High-level traffic view.
+**Sections:**
 
-| Panel | Query | Visualization |
-|-------|-------|---------------|
-| Requests/sec | `rate(edgequota_requests_allowed_total[5m]) + rate(edgequota_requests_limited_total[5m])` | Time series |
-| Allow/Deny ratio | `rate(edgequota_requests_allowed_total[5m])` vs `rate(edgequota_requests_limited_total[5m])` | Stacked time series |
-| Rate limit hit ratio | `rate(edgequota_requests_limited_total[5m]) / (rate(edgequota_requests_allowed_total[5m]) + rate(edgequota_requests_limited_total[5m]))` | Gauge (0–100%) |
-| P50/P95/P99 latency | `histogram_quantile(0.5, rate(edgequota_request_duration_seconds_bucket[5m]))` | Time series |
-| Error rate | `rate(edgequota_redis_errors_total[5m]) + rate(edgequota_auth_errors_total[5m])` | Time series |
+| Row                  | Panels                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| Overview | Request rate, 5xx error rate, P95 latency, rate-limited %, Redis health, cache hit rate |
+| Traffic | Request rate by status code, allowed vs rate-limited, by method, by pod |
+| Latency | E2E P50/P95/P99, breakdown (auth/ext-RL/backend), backend P50/P95/P99, heatmap |
+| Rate Limiting | Remaining tokens distribution, top tenants, top rate-limited tenants, key errors |
+| Redis & Fallback | Redis errors/sec, fallback/sec, health by pod |
+| Auth & External RL | Auth errors/denials, auth latency, ext-RL cache performance, ext-RL concurrency, ext-RL latency |
+| Response Cache | Cache operations/sec, hit ratio, body size, purges |
+| Events | Events dropped/sec, send failures/sec |
+| System Resources | CPU, memory (RSS + heap), goroutines, GC, file descriptors, network I/O |
+| Config & TLS Reloads | Time since last config/TLS/mTLS-CA reload, build info table |
 
-### Dashboard 2: Redis Health
+**Template variables:** `$datasource`, `$namespace`, `$pod`, `$rate_interval`
 
-**Purpose:** Redis connectivity and performance.
+**Annotations:** Config reloads and version rollouts are automatically annotated on all panels.
 
-| Panel | Query | Visualization |
-|-------|-------|---------------|
-| Redis errors/sec | `rate(edgequota_redis_errors_total[5m])` | Time series |
-| Fallback activations/sec | `rate(edgequota_fallback_used_total[5m])` | Time series |
-| Fallback active (boolean) | `edgequota_fallback_used_total > bool 0` | Stat |
-| Redis connection pool | `go_goroutines` (as a proxy for connection activity) | Time series |
-
-### Dashboard 3: Auth Service
-
-**Purpose:** External auth service health.
-
-| Panel | Query | Visualization |
-|-------|-------|---------------|
-| Auth errors/sec | `rate(edgequota_auth_errors_total[5m])` | Time series |
-| Auth denials/sec | `rate(edgequota_auth_denied_total[5m])` | Time series |
-| Auth error ratio | `rate(edgequota_auth_errors_total[5m]) / (rate(edgequota_requests_allowed_total[5m]) + rate(edgequota_requests_limited_total[5m]))` | Gauge |
-
-### Dashboard 4: Response Cache
-
-**Purpose:** CDN-style response cache performance.
-
-| Panel | Query | Visualization |
-|-------|-------|---------------|
-| Hit rate | `rate(edgequota_response_cache_hits_total[5m]) / (rate(edgequota_response_cache_hits_total[5m]) + rate(edgequota_response_cache_misses_total[5m]))` | Gauge (0–100%) |
-| Hits vs misses | `rate(edgequota_response_cache_hits_total[5m])` vs `rate(edgequota_response_cache_misses_total[5m])` | Stacked time series |
-| Store errors/sec | `rate(edgequota_response_cache_store_errors_total[5m])` | Time series |
-| Purge operations | `rate(edgequota_response_cache_purge_total[5m])` | Time series |
-| Cache skips/sec | `rate(edgequota_response_cache_skip_total[5m])` | Time series |
-| Cached body size distribution | `histogram_quantile(0.5, rate(edgequota_response_cache_body_size_bytes_bucket[5m]))` | Time series |
-
-### Dashboard 5: Infrastructure
-
-**Purpose:** Resource consumption and runtime health.
-
-| Panel | Query | Visualization |
-|-------|-------|---------------|
-| CPU usage | `rate(process_cpu_seconds_total[5m])` | Time series |
-| Memory usage | `process_resident_memory_bytes` | Time series |
-| Goroutines | `go_goroutines` | Time series |
-| GC pause | `rate(go_gc_duration_seconds_sum[5m])` | Time series |
-| Open file descriptors | `process_open_fds` | Time series |
-| Key extraction errors | `rate(edgequota_key_extract_errors_total[5m])` | Time series |
+> **Traffic by path:** Per-path metrics are intentionally omitted to avoid unbounded label cardinality. Use access logs (structured JSON with `path` field) with a log aggregation system (Loki, Elasticsearch) for per-path traffic analysis.
+>
+> **Redis cluster latency:** EdgeQuota exposes Redis health and error counts but not per-cluster latency. For detailed Redis observability, deploy a dedicated redis-exporter alongside each Redis cluster.
 
 ---
 
 ## Alerting Rules
 
-Suggested Prometheus alerting rules for production:
+Production-ready Prometheus alerting rules are available at [`deploy/prometheus/alerts.yaml`](../deploy/prometheus/alerts.yaml).
 
-```yaml
-groups:
-  - name: edgequota
-    rules:
-      - alert: EdgeQuotaHighRateLimitRatio
-        expr: |
-          rate(edgequota_requests_limited_total[5m])
-          / (rate(edgequota_requests_allowed_total[5m]) + rate(edgequota_requests_limited_total[5m]))
-          > 0.5
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "More than 50% of requests are being rate-limited"
-
-      - alert: EdgeQuotaRedisErrors
-        expr: rate(edgequota_redis_errors_total[5m]) > 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "EdgeQuota is experiencing Redis errors"
-
-      - alert: EdgeQuotaFallbackActive
-        expr: rate(edgequota_fallback_used_total[1m]) > 0
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "EdgeQuota is using in-memory fallback (Redis may be down)"
-
-      - alert: EdgeQuotaAuthErrors
-        expr: rate(edgequota_auth_errors_total[5m]) > 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "EdgeQuota auth service is returning errors"
-
-      - alert: EdgeQuotaHighLatency
-        expr: |
-          histogram_quantile(0.99, rate(edgequota_request_duration_seconds_bucket[5m])) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "EdgeQuota P99 latency exceeds 1 second"
-
-      - alert: EdgeQuotaEventsDropped
-        expr: rate(edgequota_events_dropped_total[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "EdgeQuota is dropping usage events (buffer overflow)"
-
-      - alert: EdgeQuotaLowCacheHitRate
-        expr: |
-          rate(edgequota_response_cache_hits_total[5m])
-          / (rate(edgequota_response_cache_hits_total[5m]) + rate(edgequota_response_cache_misses_total[5m]))
-          < 0.3
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Response cache hit rate below 30%"
-
-      - alert: EdgeQuotaCacheStoreErrors
-        expr: rate(edgequota_response_cache_store_errors_total[5m]) > 0
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "EdgeQuota is failing to store responses in cache (Redis write errors)"
-
-      - alert: EdgeQuotaConcurrencyRejections
-        expr: rate(edgequota_concurrent_requests_rejected_total[1m]) > 0
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "EdgeQuota is rejecting requests due to concurrency limit"
-```
+| Alert | Severity | Condition |
+|-------|----------|-----------|
+| EdgeQuotaHighErrorRate | critical | 5xx error rate > 5% for 5m |
+| EdgeQuotaTrafficSpike | warning | Current rate > 2x the rate 1 hour ago |
+| EdgeQuotaNoTraffic | critical | Zero requests for 10m while pods are running |
+| EdgeQuotaHighP99Latency | warning/critical | P99 > 2s (warning), > 5s (critical) |
+| EdgeQuotaBackendLatencyHigh | warning | Backend P95 > 5s |
+| EdgeQuotaHighRateLimitRatio | warning | > 50% of requests rate-limited |
+| EdgeQuotaConcurrencyRejections | warning | Requests rejected by concurrency limit |
+| EdgeQuotaRedisUnhealthy | critical | `edgequota_redis_healthy == 0` |
+| EdgeQuotaRedisErrors | warning | Redis errors > 1/s |
+| EdgeQuotaFallbackActive | warning | In-memory fallback in use |
+| EdgeQuotaAuthErrors | critical | Auth service returning errors |
+| EdgeQuotaAuthLatencyHigh | warning | Auth P95 > 1s |
+| EdgeQuotaEventsDropped | warning | Events dropped from ring buffer |
+| EdgeQuotaEventSendFailures | warning | Event batches failing to send |
+| EdgeQuotaLowCacheHitRate | warning | Cache hit rate < 30% |
+| EdgeQuotaHighMemory | warning | RSS > 85% of memory limit |
+| EdgeQuotaHighGoroutines | warning | Goroutine count > 10,000 |
+| EdgeQuotaConfigReloadStale | info | No config reload in 24 hours |
 
 ---
 

@@ -61,6 +61,7 @@ func doSetup() {
 	ensureMinikube()
 	buildAndLoadImage()
 	terraformApply()
+	rolloutRestartEdgeQuota()
 
 	banner("SETUP COMPLETE")
 	info("All Redis topologies + EdgeQuota instances deployed in namespace %q", namespace)

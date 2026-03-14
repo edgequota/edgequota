@@ -93,6 +93,26 @@ func main() {
 		defer certWatcher.Stop()
 	}
 
+	// Start a dedicated watcher for the mTLS client CA file. The CA bundle
+	// lives in its own Kubernetes Secret (separate from the server TLS cert
+	// and the config ConfigMap), so it needs an independent watcher.
+	if cfg.Server.TLS.Enabled && cfg.Server.TLS.MTLS.Enabled && cfg.Server.TLS.MTLS.ClientCAFile != "" {
+		caWatcher := config.NewCertWatcher(
+			cfg.Server.TLS.MTLS.ClientCAFile,
+			cfg.Server.TLS.MTLS.ClientCAFile, // single file — pass same path for both
+			func(caFile, _ string) {
+				srv.ReloadMTLSCA(caFile)
+			},
+			logger,
+		)
+		go func() {
+			if watchErr := caWatcher.Start(ctx); watchErr != nil {
+				logger.Error("mTLS CA watcher error", "error", watchErr)
+			}
+		}()
+		defer caWatcher.Stop()
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server exited with error", "error", err)
 		os.Exit(1)

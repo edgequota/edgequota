@@ -3,12 +3,27 @@
 package observability
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+// RegisterBuildInfo creates and sets the edgequota_build_info gauge. This is
+// a static metric (value always 1) whose labels expose the binary version and
+// Go runtime version, following the standard *_build_info convention.
+func RegisterBuildInfo(reg prometheus.Registerer, version string) {
+	if reg == nil {
+		reg = prometheus.DefaultRegisterer
+	}
+	promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "edgequota",
+		Name:      "build_info",
+		Help:      "Build information for EdgeQuota. Value is always 1.",
+	}, []string{"version", "goversion"}).WithLabelValues(version, runtime.Version()).Set(1)
+}
 
 // Metrics holds both Prometheus gauges/counters and atomic counters for
 // fast-path access in the middleware hot path.
@@ -86,6 +101,11 @@ type Metrics struct {
 
 	// Events emitter failures.
 	PromEventsSendFailures prometheus.Counter
+
+	// Reload timestamp gauges (Unix seconds of last successful reload).
+	PromConfigLastReload prometheus.Gauge
+	PromTLSLastReload    prometheus.Gauge
+	PromMTLSCALastReload prometheus.Gauge
 }
 
 // NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
@@ -270,6 +290,21 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "events_send_failures_total",
 			Help:      "Number of event batches that failed to send after all retries.",
 		}),
+		PromConfigLastReload: factory.NewGauge(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "config_last_reload_timestamp_seconds",
+			Help:      "Unix timestamp of the last successful config reload.",
+		}),
+		PromTLSLastReload: factory.NewGauge(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "tls_last_reload_timestamp_seconds",
+			Help:      "Unix timestamp of the last successful TLS certificate reload.",
+		}),
+		PromMTLSCALastReload: factory.NewGauge(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "mtls_ca_last_reload_timestamp_seconds",
+			Help:      "Unix timestamp of the last successful mTLS CA certificate reload.",
+		}),
 	}
 
 	// Start as healthy (set to 1). The middleware chain will set to 0 on
@@ -408,4 +443,22 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		AuthErrors:       atomic.LoadInt64(&m.authErrors),
 		AuthDenied:       atomic.LoadInt64(&m.authDenied),
 	}
+}
+
+// SetConfigReloadTimestamp records the current time as the last successful
+// config reload.
+func (m *Metrics) SetConfigReloadTimestamp() {
+	m.PromConfigLastReload.SetToCurrentTime()
+}
+
+// SetTLSReloadTimestamp records the current time as the last successful
+// TLS certificate reload.
+func (m *Metrics) SetTLSReloadTimestamp() {
+	m.PromTLSLastReload.SetToCurrentTime()
+}
+
+// SetMTLSCAReloadTimestamp records the current time as the last successful
+// mTLS CA certificate reload.
+func (m *Metrics) SetMTLSCAReloadTimestamp() {
+	m.PromMTLSCALastReload.SetToCurrentTime()
 }

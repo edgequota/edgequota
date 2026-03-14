@@ -158,6 +158,32 @@ func TestMetricsObserveRemaining(t *testing.T) {
 	})
 }
 
+func TestReloadTimestampMetrics(t *testing.T) {
+	t.Run("SetConfigReloadTimestamp sets gauge to non-zero", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry(), 0)
+		assert.Equal(t, float64(0), testutil.ToFloat64(m.PromConfigLastReload))
+
+		m.SetConfigReloadTimestamp()
+		assert.Greater(t, testutil.ToFloat64(m.PromConfigLastReload), float64(0))
+	})
+
+	t.Run("SetTLSReloadTimestamp sets gauge to non-zero", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry(), 0)
+		assert.Equal(t, float64(0), testutil.ToFloat64(m.PromTLSLastReload))
+
+		m.SetTLSReloadTimestamp()
+		assert.Greater(t, testutil.ToFloat64(m.PromTLSLastReload), float64(0))
+	})
+
+	t.Run("SetMTLSCAReloadTimestamp sets gauge to non-zero", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry(), 0)
+		assert.Equal(t, float64(0), testutil.ToFloat64(m.PromMTLSCALastReload))
+
+		m.SetMTLSCAReloadTimestamp()
+		assert.Greater(t, testutil.ToFloat64(m.PromMTLSCALastReload), float64(0))
+	})
+}
+
 func TestMetricsSnapshot(t *testing.T) {
 	t.Run("returns point-in-time snapshot of all counters", func(t *testing.T) {
 		m := NewMetrics(prometheus.NewRegistry(), 0)

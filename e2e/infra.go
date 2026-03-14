@@ -51,6 +51,26 @@ func terraformDestroy() {
 	}
 }
 
+// rolloutRestartEdgeQuota deletes all EdgeQuota pods so the deployment
+// controller recreates them with the latest image. This is necessary because
+// terraform apply won't trigger a rolling update when only the image contents
+// change (same tag: edgequota:e2e).
+func rolloutRestartEdgeQuota() {
+	info("Restarting EdgeQuota pods to pick up latest image...")
+
+	if _, err := kubectl("delete", "pods", "-n", namespace, "-l", "app=edgequota",
+		"--grace-period=0", "--force"); err != nil {
+		warn("Failed to delete EdgeQuota pods (may not exist yet): %v", err)
+	}
+
+	// Wait for all EdgeQuota deployments to become ready again.
+	if err := waitForPods("app=edgequota", 3*time.Minute); err != nil {
+		fatal("EdgeQuota pods not ready after restart: %v", err)
+	}
+
+	info("All EdgeQuota pods restarted with latest image")
+}
+
 // waitForInfrastructure waits for all deployed pods to be ready.
 func waitForInfrastructure() {
 	checks := []struct {
