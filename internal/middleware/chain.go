@@ -1060,7 +1060,7 @@ func (c *Chain) applyRequestTimeout(ctx context.Context, r *http.Request, extLim
 		}
 	}
 	if timeout > 0 {
-		return context.WithTimeout(ctx, timeout) //nolint:gosec // G118: cancel func returned to caller
+		return context.WithTimeout(ctx, timeout)
 	}
 	return ctx, nil
 }

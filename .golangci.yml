@@ -69,6 +69,8 @@ linters:
         # host allowlist, private network blocking) and the SafeDialer
         # re-validates IPs at connect time to prevent DNS rebinding.
         - G704
+        # G118: false positive — cancel func is returned to caller, not leaked.
+        - G118
     errcheck:
       exclude-functions:
         - (io.Closer).Close
