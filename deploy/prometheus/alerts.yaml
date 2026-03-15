@@ -237,8 +237,8 @@ groups:
 
       - alert: EdgeQuotaHighMemory
         expr: |
-          process_resident_memory_bytes
-          / on(pod, namespace) kube_pod_container_resource_limits{resource="memory"}
+          sum by (pod, namespace) (container_memory_working_set_bytes{container="edgequota"})
+          / on(pod, namespace) kube_pod_container_resource_limits{resource="memory", container="edgequota"}
           > 0.85
         for: 5m
         labels:
