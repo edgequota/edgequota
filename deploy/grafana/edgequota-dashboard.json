@@ -1,0 +1,2574 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "heatmap",
+      "name": "Heatmap",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "edgequota-overview",
+  "title": "EdgeQuota",
+  "description": "Comprehensive observability dashboard for EdgeQuota rate-limiting reverse proxy.",
+  "tags": [
+    "edgequota",
+    "rate-limiting",
+    "proxy"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "schemaVersion": 39,
+  "style": "dark",
+  "version": 1,
+  "links": [],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "expr": "changes(edgequota_config_last_reload_timestamp_seconds{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[1m]) > 0",
+        "iconColor": "#FF9830",
+        "name": "Config Reload",
+        "titleFormat": "Config reloaded",
+        "tagKeys": "pod",
+        "useValueForTime": false
+      },
+      {
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "expr": "changes(edgequota_build_info{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[5m]) > 0",
+        "iconColor": "#73BF69",
+        "name": "Deployment",
+        "titleFormat": "Version rollout",
+        "tagKeys": "version",
+        "useValueForTime": false
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(edgequota_redis_healthy, cluster)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "cluster",
+        "query": {
+          "query": "label_values(edgequota_redis_healthy, cluster)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "allValue": ".*"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\"}, namespace)",
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "namespace",
+        "query": {
+          "query": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\"}, namespace)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\", namespace=\"$namespace\"}, job)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "job",
+        "query": {
+          "query": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\", namespace=\"$namespace\"}, job)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "allValue": ".*"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\", namespace=\"$namespace\", job=~\"$job\"}, pod)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "pod",
+        "query": {
+          "query": "label_values(edgequota_redis_healthy{cluster=~\"$cluster\", namespace=\"$namespace\", job=~\"$job\"}, pod)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "5m",
+          "value": "5m"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "rate_interval",
+        "options": [
+          {
+            "selected": false,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": true,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          }
+        ],
+        "query": "1m,5m,15m,1h",
+        "type": "custom"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Request Rate",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "max": 1
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "5xx Error Rate",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",status_code=~\"5..\"}[$rate_interval])) / sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "P95 Latency",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_request_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "orange",
+                "value": 0.3
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "max": 1
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Rate Limited %",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) / (sum(rate(edgequota_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) + sum(rate(edgequota_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Redis Health",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "min(edgequota_redis_healthy{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"})",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "max": 1
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Cache Hit Rate",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) / (sum(rate(edgequota_response_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) + sum(rate(edgequota_response_cache_misses_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "title": "Traffic",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Request Rate by Status Code",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (status_code) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{status_code}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Allowed vs Rate-Limited",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Allowed"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Rate Limited (429)"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_concurrent_requests_rejected_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Concurrency Rejected (503)"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Request Rate by Method",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (method) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Request Rate by Pod",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pod) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 20,
+      "title": "Latency",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "End-to-End Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(edgequota_request_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_request_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(edgequota_request_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Latency Breakdown (P95)",
+      "description": "Breakdown of P95 latency by stage: auth check, external rate limit, and backend proxy.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_auth_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "Auth"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_external_rl_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "External RL"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_backend_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "Backend"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Backend Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(edgequota_backend_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_backend_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(edgequota_backend_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "scheme",
+            "schemeId": "YlOrRd"
+          },
+          "custom": {
+            "fillOpacity": 100
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "id": 24,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "yAxis": {
+          "unit": "s"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "YlOrRd"
+        }
+      },
+      "title": "Request Duration Heatmap",
+      "type": "heatmap",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(increase(edgequota_request_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) by (le)",
+          "legendFormat": "{{le}}",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "id": 30,
+      "title": "Rate Limiting",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 32,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Top Tenants (Allowed + Limited)",
+      "description": "Per-tenant request rates. Capped at max_tenant_labels; overflow aggregated under __overflow__.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "topk(10, sum by (tenant) (rate(edgequota_tenant_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]) + rate(edgequota_tenant_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "{{tenant}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 33,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Top Rate-Limited Tenants",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "topk(10, sum by (tenant) (rate(edgequota_tenant_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "{{tenant}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 34,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Key Extraction & Tenant Key Errors",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_key_extract_errors_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Key Extract Errors"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_tenant_key_rejected_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Tenant Key Rejected"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_tenant_label_overflow_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Tenant Label Overflow"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "id": 40,
+      "title": "Redis Pools",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "UNHEALTHY"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "HEALTHY"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "N/A"
+        }
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 0,
+        "y": 57
+      },
+      "id": 160,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Rate Limit Redis",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "min(edgequota_redis_healthy{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",pool=\"ratelimit\"})",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "UNHEALTHY"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "HEALTHY"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "N/A"
+        }
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 8,
+        "y": 57
+      },
+      "id": 161,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "External RL Cache Redis",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "min(edgequota_redis_healthy{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",pool=\"external_rl_cache\"})",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "UNHEALTHY"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "HEALTHY"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "N/A"
+        }
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 57
+      },
+      "id": 162,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Response Cache (CDN) Redis",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "min(edgequota_redis_healthy{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",pool=\"response_cache\"})",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "id": 163,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Redis Errors / sec by Pool",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pool) (rate(edgequota_redis_errors_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{pool}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "id": 164,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "In-Memory Fallback / sec by Pool",
+      "description": "Non-zero means Redis is unreachable for that pool.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pool) (rate(edgequota_fallback_used_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{pool}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "id": 143,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Rate Limit Redis: Allowed vs Limited",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Allowed"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Limited"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_fallback_used_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",pool=\"ratelimit\"}[$rate_interval]))",
+          "legendFormat": "Fallback"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "id": 144,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Rate Limit Redis: Remaining Tokens (P50 / P95)",
+      "description": "How many tokens remain in the bucket after each rate-limit check. Low values indicate keys close to exhaustion.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(edgequota_ratelimit_remaining_tokens_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(edgequota_ratelimit_remaining_tokens_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "id": 145,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "External RL Cache Redis: Hit / Miss / Stale",
+      "description": "Cache performance for the external rate-limit service response cache backed by Redis.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_external_rl_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Hit"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_external_rl_cache_misses_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Miss"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_external_rl_cache_stale_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Stale Hit"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "id": 146,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "External RL Cache Redis: Concurrency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_external_rl_semaphore_rejected_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Semaphore Rejected"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_external_rl_singleflight_shared_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Singleflight Shared"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "id": 147,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Response Cache (CDN) Redis: Operations / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Hit"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_misses_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Miss"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_stale_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Stale Hit"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_stores_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Store"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_skips_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Skip"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percentunit",
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "id": 148,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Response Cache (CDN) Redis: Hit Ratio",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_response_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) / (sum(rate(edgequota_response_cache_hits_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) + sum(rate(edgequota_response_cache_misses_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "Hit Ratio"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 86
+      },
+      "id": 50,
+      "title": "Auth & External Rate Limit",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 87
+      },
+      "id": 51,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Auth Errors & Denials / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_auth_errors_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Auth Errors"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_auth_denied_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Auth Denied"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 87
+      },
+      "id": 52,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Auth Latency (P50 / P99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(edgequota_auth_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(edgequota_auth_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 95
+      },
+      "id": 55,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "External RL Latency (P50 / P99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(edgequota_external_rl_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(edgequota_external_rl_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 103
+      },
+      "id": 70,
+      "title": "Events",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "id": 71,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Events Dropped / sec",
+      "description": "Events dropped due to ring buffer overflow. Non-zero indicates the emitter cannot keep up with the event volume.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_events_dropped_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Dropped"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 104
+      },
+      "id": 72,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Event Send Failures / sec",
+      "description": "Event batches that failed to send after all retries.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(edgequota_events_send_failures_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "Send Failures"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "id": 80,
+      "title": "System Resources",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 113
+      },
+      "id": 150,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Requests In-Flight",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum(edgequota_requests_in_flight{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"})",
+          "legendFormat": "Total"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "edgequota_requests_in_flight{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 113
+      },
+      "id": 81,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "CPU Usage (cores)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"$namespace\",pod=~\"$pod\",container=\"edgequota\"}[$rate_interval]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "decbytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 113
+      },
+      "id": 82,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Memory (Working Set)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\",pod=~\"$pod\",container=\"edgequota\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 121
+      },
+      "id": 83,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Goroutines",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "go_goroutines{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 121
+      },
+      "id": 86,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Network I/O (container)",
+      "description": "Requires container network metrics from cAdvisor/kubelet. Falls back gracefully if unavailable.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pod) (rate(container_network_receive_bytes_total{namespace=\"$namespace\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{pod}} RX"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (pod) (rate(container_network_transmit_bytes_total{namespace=\"$namespace\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{pod}} TX"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 129
+      },
+      "id": 90,
+      "title": "Config & TLS Reloads",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3600
+              },
+              {
+                "color": "red",
+                "value": 86400
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 130
+      },
+      "id": 91,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Time Since Last Config Reload",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "time() - max(edgequota_config_last_reload_timestamp_seconds{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"} > 0)",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 86400
+              },
+              {
+                "color": "red",
+                "value": 604800
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 130
+      },
+      "id": 92,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Time Since Last TLS Cert Reload",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "time() - max(edgequota_tls_last_reload_timestamp_seconds{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"} > 0)",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 86400
+              },
+              {
+                "color": "red",
+                "value": 604800
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 130
+      },
+      "id": 93,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "title": "Time Since Last mTLS CA Reload",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "time() - max(edgequota_mtls_ca_last_reload_timestamp_seconds{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"} > 0)",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Version"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 134
+      },
+      "id": 94,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Build Info",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "edgequota_build_info{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "container": true,
+              "endpoint": true,
+              "service": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "pod": "Pod",
+              "version": "Version",
+              "goversion": "Go",
+              "namespace": "Namespace"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

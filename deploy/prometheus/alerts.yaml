@@ -1,0 +1,277 @@
+# EdgeQuota Prometheus Alerting Rules
+#
+# Usage:
+#   - For Prometheus: add to rule_files in prometheus.yml
+#   - For Prometheus Operator: wrap in a PrometheusRule CR
+#
+# All alerts use the "edgequota" group name and follow the severity convention:
+#   critical = pages on-call / requires immediate action
+#   warning  = investigate within hours / non-urgent
+
+groups:
+  - name: edgequota
+    rules:
+
+      # --- Traffic & Availability ---
+
+      - alert: EdgeQuotaHighErrorRate
+        expr: |
+          (
+            sum(rate(edgequota_request_duration_seconds_count{status_code=~"5.."}[5m]))
+            / sum(rate(edgequota_request_duration_seconds_count[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EdgeQuota 5xx error rate above 5%"
+          description: >-
+            {{ $value | humanizePercentage }} of requests are returning 5xx status codes.
+            Check backend health, Redis connectivity, and EdgeQuota logs.
+
+      - alert: EdgeQuotaTrafficSpike
+        expr: |
+          sum(rate(edgequota_request_duration_seconds_count[5m]))
+          > 2 * sum(rate(edgequota_request_duration_seconds_count[1h] offset 1h))
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota traffic spike detected"
+          description: >-
+            Current request rate is more than 2x the rate from 1 hour ago.
+            Verify whether this is expected (marketing campaign, deploy) or anomalous.
+
+      - alert: EdgeQuotaNoTraffic
+        expr: |
+          sum(rate(edgequota_request_duration_seconds_count[5m])) == 0
+          and on() sum(edgequota_build_info) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EdgeQuota receiving no traffic"
+          description: >-
+            No requests have been processed for 10 minutes even though
+            EdgeQuota pods are running. Check ingress routing and DNS.
+
+      # --- Latency ---
+
+      - alert: EdgeQuotaHighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(edgequota_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota P99 latency above 2 seconds"
+          description: >-
+            P99 request latency is {{ $value | humanizeDuration }}.
+            Check backend latency, auth service, and Redis performance.
+
+      - alert: EdgeQuotaP99LatencyCritical
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(edgequota_request_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EdgeQuota P99 latency above 5 seconds"
+          description: >-
+            P99 request latency is {{ $value | humanizeDuration }}.
+            Likely a downstream dependency issue. Check backend and auth service.
+
+      - alert: EdgeQuotaBackendLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(edgequota_backend_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend P95 latency above 5 seconds"
+          description: >-
+            The upstream backend is responding slowly. This is likely a
+            backend-side issue, not EdgeQuota.
+
+      # --- Rate Limiting ---
+
+      - alert: EdgeQuotaHighRateLimitRatio
+        expr: |
+          (
+            sum(rate(edgequota_requests_limited_total[5m]))
+            / (sum(rate(edgequota_requests_allowed_total[5m]))
+               + sum(rate(edgequota_requests_limited_total[5m])))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 50% of requests are rate-limited"
+          description: >-
+            {{ $value | humanizePercentage }} of all requests are being rejected
+            with 429. Review rate limit configuration or investigate a traffic surge.
+
+      - alert: EdgeQuotaConcurrencyRejections
+        expr: rate(edgequota_concurrent_requests_rejected_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota rejecting requests due to concurrency limit"
+          description: >-
+            Requests are being rejected with 503 because max_concurrent_requests
+            was reached. Consider increasing the limit or scaling horizontally.
+
+      # --- Redis ---
+
+      - alert: EdgeQuotaRedisUnhealthy
+        expr: edgequota_redis_healthy == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EdgeQuota Redis pool {{ $labels.pool }} is unhealthy"
+          description: >-
+            Redis connectivity is down for pool {{ $labels.pool }} on {{ $labels.pod }}.
+            Rate limiting may be degraded (in-memory fallback or fail-closed).
+
+      - alert: EdgeQuotaRedisErrors
+        expr: sum by (pool, pod, namespace, job) (rate(edgequota_redis_errors_total[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota Redis errors on pool {{ $labels.pool }}"
+          description: >-
+            Redis errors are occurring at {{ $value | humanize }}/s on pool {{ $labels.pool }}.
+            Check Redis cluster health and network connectivity.
+
+      - alert: EdgeQuotaFallbackActive
+        expr: sum by (pool, pod, namespace, job) (rate(edgequota_fallback_used_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota in-memory fallback active for pool {{ $labels.pool }}"
+          description: >-
+            Redis pool {{ $labels.pool }} is unreachable and EdgeQuota has switched to
+            in-memory rate limiting. Distributed rate limits are not enforced.
+
+      # --- Auth Service ---
+
+      - alert: EdgeQuotaAuthErrors
+        expr: rate(edgequota_auth_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Auth service returning errors"
+          description: >-
+            EdgeQuota auth service calls are failing at {{ $value | humanize }}/s.
+            Depending on failure_policy, requests may be passing through unauthenticated.
+
+      - alert: EdgeQuotaAuthLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(edgequota_auth_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Auth service P95 latency above 1 second"
+          description: >-
+            External auth checks are slow, adding latency to every request.
+            Check auth service health.
+
+      # --- Events ---
+
+      - alert: EdgeQuotaEventsDropped
+        expr: rate(edgequota_events_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota dropping usage events"
+          description: >-
+            The event ring buffer is overflowing. Usage data is being lost.
+            Consider increasing buffer size or reducing event volume.
+
+      - alert: EdgeQuotaEventSendFailures
+        expr: rate(edgequota_events_send_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota event batches failing to send"
+          description: >-
+            Event batches are failing after all retries. Check the events
+            endpoint connectivity.
+
+      # --- Response Cache ---
+
+      - alert: EdgeQuotaLowCacheHitRate
+        expr: |
+          (
+            sum(rate(edgequota_response_cache_hits_total[15m]))
+            / (sum(rate(edgequota_response_cache_hits_total[15m]))
+               + sum(rate(edgequota_response_cache_misses_total[15m])))
+          ) < 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Response cache hit rate below 30%"
+          description: >-
+            The CDN-style response cache is only serving
+            {{ $value | humanizePercentage }} of requests from cache.
+            Check if cache TTLs are too short or if traffic patterns changed.
+
+      # --- System Resources ---
+
+      - alert: EdgeQuotaHighMemory
+        expr: |
+          process_resident_memory_bytes
+          / on(pod, namespace) kube_pod_container_resource_limits{resource="memory"}
+          > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota memory usage above 85% of limit"
+          description: >-
+            Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of
+            its memory limit. Risk of OOM kill.
+
+      - alert: EdgeQuotaHighGoroutines
+        expr: go_goroutines > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota goroutine count unusually high"
+          description: >-
+            {{ $labels.pod }} has {{ $value }} goroutines. This may indicate
+            a goroutine leak or extremely high concurrency.
+
+      # --- Config & TLS ---
+
+      - alert: EdgeQuotaConfigReloadStale
+        expr: |
+          (time() - edgequota_config_last_reload_timestamp_seconds > 0)
+          and (time() - edgequota_config_last_reload_timestamp_seconds) > 86400
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "EdgeQuota config not reloaded in 24 hours"
+          description: >-
+            Last config reload was {{ $value | humanizeDuration }} ago
+            for {{ $labels.pod }}. This is informational — may be expected
+            if config rarely changes.
