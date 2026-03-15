@@ -41,11 +41,14 @@ type Metrics struct {
 	// Prometheus counters for scraping.
 	promAllowed      prometheus.Counter
 	promLimited      prometheus.Counter
-	promRedisErrors  prometheus.Counter
-	promFallbackUsed prometheus.Counter
+	promRedisErrors  *prometheus.CounterVec
+	promFallbackUsed *prometheus.CounterVec
 	promAuthErrors   prometheus.Counter
 	promAuthDenied   prometheus.Counter
 	promKeyErrors    prometheus.Counter
+
+	// In-flight request tracking.
+	PromRequestsInFlight prometheus.Gauge
 
 	// Prometheus histograms.
 	PromRequestDuration *prometheus.HistogramVec
@@ -64,8 +67,8 @@ type Metrics struct {
 	promTenantAllowed *prometheus.CounterVec
 	promTenantLimited *prometheus.CounterVec
 
-	// Redis health gauge (0 = unhealthy, 1 = healthy).
-	PromRedisHealthy prometheus.Gauge
+	// Redis health gauge (0 = unhealthy, 1 = healthy), per pool.
+	PromRedisHealthy *prometheus.GaugeVec
 
 	// Tenant label cardinality tracking.
 	tenantLabels       sync.Map // map[string]struct{}
@@ -133,16 +136,16 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "requests_limited_total",
 			Help:      "Total number of requests rejected by rate limiting.",
 		}),
-		promRedisErrors: factory.NewCounter(prometheus.CounterOpts{
+		promRedisErrors: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "redis_errors_total",
 			Help:      "Total number of Redis errors encountered.",
-		}),
-		promFallbackUsed: factory.NewCounter(prometheus.CounterOpts{
+		}, []string{"pool"}),
+		promFallbackUsed: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "fallback_used_total",
 			Help:      "Total number of requests handled by in-memory fallback.",
-		}),
+		}, []string{"pool"}),
 		promAuthErrors: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "auth_errors_total",
@@ -199,11 +202,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "tenant_requests_limited_total",
 			Help:      "Total requests rate-limited per tenant.",
 		}, []string{"tenant"}),
-		PromRedisHealthy: factory.NewGauge(prometheus.GaugeOpts{
+		PromRedisHealthy: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "edgequota",
 			Name:      "redis_healthy",
-			Help:      "Whether Redis is reachable (1 = healthy, 0 = unhealthy).",
-		}),
+			Help:      "Whether Redis is reachable (1 = healthy, 0 = unhealthy). Pool: ratelimit, external_rl_cache, response_cache.",
+		}, []string{"pool"}),
 		promTenantOverflow: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "tenant_label_overflow_total",
@@ -290,6 +293,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "events_send_failures_total",
 			Help:      "Number of event batches that failed to send after all retries.",
 		}),
+		PromRequestsInFlight: factory.NewGauge(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "requests_in_flight",
+			Help:      "Number of HTTP requests currently being processed.",
+		}),
 		PromConfigLastReload: factory.NewGauge(prometheus.GaugeOpts{
 			Namespace: "edgequota",
 			Name:      "config_last_reload_timestamp_seconds",
@@ -307,9 +315,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 		}),
 	}
 
-	// Start as healthy (set to 1). The middleware chain will set to 0 on
-	// connectivity failure and back to 1 on recovery.
-	m.PromRedisHealthy.Set(1)
+	// Start all pools as healthy (set to 1). The middleware chain will set
+	// to 0 on connectivity failure and back to 1 on recovery.
+	m.PromRedisHealthy.WithLabelValues("ratelimit").Set(1)
+	m.PromRedisHealthy.WithLabelValues("external_rl_cache").Set(1)
+	m.PromRedisHealthy.WithLabelValues("response_cache").Set(1)
 
 	return m
 }
@@ -326,16 +336,16 @@ func (m *Metrics) IncLimited() {
 	m.promLimited.Inc()
 }
 
-// IncRedisErrors increments the Redis error counter.
-func (m *Metrics) IncRedisErrors() {
+// IncRedisErrors increments the Redis error counter for the given pool.
+func (m *Metrics) IncRedisErrors(pool string) {
 	atomic.AddInt64(&m.redisErrors, 1)
-	m.promRedisErrors.Inc()
+	m.promRedisErrors.WithLabelValues(pool).Inc()
 }
 
-// IncFallbackUsed increments the fallback usage counter.
-func (m *Metrics) IncFallbackUsed() {
+// IncFallbackUsed increments the fallback usage counter for the given pool.
+func (m *Metrics) IncFallbackUsed(pool string) {
 	atomic.AddInt64(&m.fallbackUsed, 1)
-	m.promFallbackUsed.Inc()
+	m.promFallbackUsed.WithLabelValues(pool).Inc()
 }
 
 // IncReadOnlyRetries increments the READONLY retry counter.

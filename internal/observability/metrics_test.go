@@ -45,7 +45,7 @@ func TestMetricsIncLimited(t *testing.T) {
 func TestMetricsIncRedisErrors(t *testing.T) {
 	t.Run("increments redis error counter", func(t *testing.T) {
 		m := NewMetrics(prometheus.NewRegistry(), 0)
-		m.IncRedisErrors()
+		m.IncRedisErrors("ratelimit")
 
 		snap := m.Snapshot()
 		assert.Equal(t, int64(1), snap.RedisErrors)
@@ -55,8 +55,8 @@ func TestMetricsIncRedisErrors(t *testing.T) {
 func TestMetricsIncFallbackUsed(t *testing.T) {
 	t.Run("increments fallback counter", func(t *testing.T) {
 		m := NewMetrics(prometheus.NewRegistry(), 0)
-		m.IncFallbackUsed()
-		m.IncFallbackUsed()
+		m.IncFallbackUsed("ratelimit")
+		m.IncFallbackUsed("ratelimit")
 
 		snap := m.Snapshot()
 		assert.Equal(t, int64(2), snap.FallbackUsed)
@@ -191,8 +191,8 @@ func TestMetricsSnapshot(t *testing.T) {
 		m.IncAllowed()
 		m.IncAllowed()
 		m.IncLimited()
-		m.IncRedisErrors()
-		m.IncFallbackUsed()
+		m.IncRedisErrors("ratelimit")
+		m.IncFallbackUsed("ratelimit")
 		m.IncReadOnlyRetries()
 		m.IncKeyExtractErrors()
 		m.IncAuthErrors()

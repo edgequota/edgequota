@@ -933,6 +933,9 @@ func ensureRequestID(r *http.Request) string {
 
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.metrics.PromRequestsInFlight.Inc()
+	defer c.metrics.PromRequestsInFlight.Dec()
+
 	start := time.Now()
 
 	// Apply per-request write deadline early, before any response bytes.
@@ -1438,7 +1441,7 @@ func (c *Chain) tryRedisLimit(w http.ResponseWriter, r *http.Request, key string
 }
 
 func (c *Chain) handleLimiterError(limErr error) {
-	c.metrics.IncRedisErrors()
+	c.metrics.IncRedisErrors("ratelimit")
 	if redis.IsReadOnlyErr(limErr) {
 		c.metrics.IncReadOnlyRetries()
 	}
@@ -1454,7 +1457,7 @@ func (c *Chain) handleLimiterError(limErr error) {
 		}
 
 		if shouldLog {
-			c.metrics.PromRedisHealthy.Set(0)
+			c.metrics.PromRedisHealthy.WithLabelValues("ratelimit").Set(0)
 			c.logger.Warn("redis became unhealthy, switching to fallback",
 				"error", limErr, "policy", c.failurePolicy)
 		}
@@ -1598,7 +1601,7 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		writeJSONError(w, fc, "service_unavailable", http.StatusText(fc), 0)
 
 	case policyInMemoryFallback:
-		c.metrics.IncFallbackUsed()
+		c.metrics.IncFallbackUsed("ratelimit")
 		if c.fallback.Allow(key) {
 			c.metrics.IncAllowed()
 			c.logger.Debug("in-memory fallback: request allowed",
@@ -1779,7 +1782,7 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		}
 	}
 
-	c.metrics.PromRedisHealthy.Set(1)
+	c.metrics.PromRedisHealthy.WithLabelValues("ratelimit").Set(1)
 	c.logger.Info("redis connection recovered")
 }
 
