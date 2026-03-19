@@ -298,6 +298,13 @@ type ServerConfig struct {
 	// transfer in either direction for this duration. 0 means unlimited.
 	// Default: "5m".
 	WebSocketIdleTimeout string `yaml:"websocket_idle_timeout" env:"WEBSOCKET_IDLE_TIMEOUT"`
+
+	// BypassPreflightAuth skips authentication and rate limiting for CORS
+	// preflight requests (OPTIONS with Origin and Access-Control-Request-Method
+	// headers). The request is still proxied to the backend, which remains
+	// responsible for returning the appropriate Access-Control-* headers.
+	// Default: false (backward compatible).
+	BypassPreflightAuth bool `yaml:"bypass_preflight_auth" env:"BYPASS_PREFLIGHT_AUTH"`
 }
 
 // ServerTLSConfig holds optional TLS termination settings.

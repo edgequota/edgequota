@@ -102,6 +102,9 @@ type Metrics struct {
 	// Global concurrency limiter.
 	PromConcurrencyRejected prometheus.Counter
 
+	// CORS preflight bypass.
+	PromPreflightBypassed prometheus.Counter
+
 	// Events emitter failures.
 	PromEventsSendFailures prometheus.Counter
 
@@ -282,6 +285,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "response_cache_body_size_bytes",
 			Help:      "Distribution of cached response body sizes in bytes.",
 			Buckets:   []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304},
+		}),
+		PromPreflightBypassed: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "preflight_bypassed_total",
+			Help:      "Number of CORS preflight requests that bypassed auth and rate limiting.",
 		}),
 		PromConcurrencyRejected: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
