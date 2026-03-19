@@ -14,17 +14,17 @@ import (
 
 func TestIsCORSPreflight(t *testing.T) {
 	tests := []struct {
-		name   string
-		method string
+		name    string
+		method  string
 		headers map[string]string
-		want   bool
+		want    bool
 	}{
 		{
 			name:   "valid preflight",
 			method: http.MethodOptions,
 			headers: map[string]string{
-				"Origin":                         "https://example.com",
-				"Access-Control-Request-Method":  "POST",
+				"Origin":                        "https://example.com",
+				"Access-Control-Request-Method": "POST",
 			},
 			want: true,
 		},

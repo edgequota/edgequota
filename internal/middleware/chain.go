@@ -943,6 +943,29 @@ func isCORSPreflight(r *http.Request) bool {
 		r.Header.Get("Access-Control-Request-Method") != ""
 }
 
+// handlePreflightBypass skips auth and rate limiting for CORS preflight
+// requests when bypass_preflight_auth is enabled. Returns true if the
+// request was handled (caller should return early).
+func (c *Chain) handlePreflightBypass(sw *statusWriter, r *http.Request, originalHost, reqID string, start time.Time) bool {
+	if !c.bypassPreflight.Load() || !isCORSPreflight(r) {
+		return false
+	}
+	c.metrics.IncAllowed()
+	c.metrics.PromPreflightBypassed.Inc()
+	backendStart := time.Now()
+	(*c.next.Load()).ServeHTTP(sw, r)
+	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+	elapsed := time.Since(start)
+	c.metrics.PromRequestDuration.WithLabelValues(
+		r.Method,
+		strconv.Itoa(sw.code),
+	).Observe(elapsed.Seconds())
+	c.emitAccessLog(r, sw, originalHost, reqID, "", "", elapsed)
+	sw.ResponseWriter = nil
+	statusWriterPool.Put(sw)
+	return true
+}
+
 // ServeHTTP processes the request through auth → rate limit → proxy.
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.metrics.PromRequestsInFlight.Inc()
@@ -971,24 +994,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	originalHost := r.Host
 	var logRLKey, logTenantID string
 
-	// CORS preflight bypass: skip auth and rate limiting, proxy directly.
-	// Browsers never attach credentials to preflight requests, so auth
-	// would always fail or waste a call, and rate-limiting them penalises
-	// legitimate clients. The backend remains responsible for CORS policy.
-	if c.bypassPreflight.Load() && isCORSPreflight(r) {
-		c.metrics.IncAllowed()
-		c.metrics.PromPreflightBypassed.Inc()
-		backendStart := time.Now()
-		(*c.next.Load()).ServeHTTP(sw, r)
-		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
-		elapsed := time.Since(start)
-		c.metrics.PromRequestDuration.WithLabelValues(
-			r.Method,
-			strconv.Itoa(sw.code),
-		).Observe(elapsed.Seconds())
-		c.emitAccessLog(r, sw, originalHost, reqID, "", "", elapsed)
-		sw.ResponseWriter = nil
-		statusWriterPool.Put(sw)
+	if c.handlePreflightBypass(sw, r, originalHost, reqID, start) {
 		return
 	}
 
