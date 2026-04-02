@@ -956,10 +956,8 @@ func (c *Chain) handlePreflightBypass(sw *statusWriter, r *http.Request, origina
 	(*c.next.Load()).ServeHTTP(sw, r)
 	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
 	elapsed := time.Since(start)
-	c.metrics.PromRequestDuration.WithLabelValues(
-		r.Method,
-		strconv.Itoa(sw.code),
-	).Observe(elapsed.Seconds())
+	c.metrics.PromRequestsTotal.WithLabelValues(r.Method, strconv.Itoa(sw.code)).Inc()
+	c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
 	c.emitAccessLog(r, sw, originalHost, reqID, "", "", elapsed)
 	sw.ResponseWriter = nil
 	statusWriterPool.Put(sw)
@@ -1009,10 +1007,8 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.concurrencySem.Release(1)
 		}
 		elapsed := time.Since(start)
-		c.metrics.PromRequestDuration.WithLabelValues(
-			r.Method,
-			strconv.Itoa(sw.code),
-		).Observe(elapsed.Seconds())
+		c.metrics.PromRequestsTotal.WithLabelValues(r.Method, strconv.Itoa(sw.code)).Inc()
+		c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
 		c.emitAccessLog(r, sw, originalHost, reqID, logRLKey, logTenantID, elapsed)
 		sw.ResponseWriter = nil
 		statusWriterPool.Put(sw)

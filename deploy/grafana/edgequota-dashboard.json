@@ -307,7 +307,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "expr": "sum(rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
           "legendFormat": ""
         }
       ]
@@ -362,7 +362,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",status_code=~\"5..\"}[$rate_interval])) / sum(rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "expr": "sum(rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\",status_code=~\"5..\"}[$rate_interval])) / sum(rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
           "legendFormat": ""
         }
       ]
@@ -657,7 +657,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "sum by (status_code) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "expr": "sum by (status_code) (rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
           "legendFormat": "{{status_code}}"
         }
       ]
@@ -762,7 +762,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "sum by (method) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "expr": "sum by (method) (rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
           "legendFormat": "{{method}}"
         }
       ]
@@ -806,7 +806,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "sum by (pod) (rate(edgequota_request_duration_seconds_count{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "expr": "sum by (pod) (rate(edgequota_requests_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
           "legendFormat": "{{pod}}"
         }
       ]

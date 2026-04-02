@@ -16,6 +16,7 @@ func TestNewMetrics(t *testing.T) {
 		assert.NotNil(t, m.promAllowed)
 		assert.NotNil(t, m.promLimited)
 		assert.NotNil(t, m.PromRequestDuration)
+		assert.NotNil(t, m.PromRequestsTotal)
 	})
 }
 

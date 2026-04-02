@@ -17,8 +17,8 @@ groups:
       - alert: EdgeQuotaHighErrorRate
         expr: |
           (
-            sum(rate(edgequota_request_duration_seconds_count{status_code=~"5.."}[5m]))
-            / sum(rate(edgequota_request_duration_seconds_count[5m]))
+            sum(rate(edgequota_requests_total{status_code=~"5.."}[5m]))
+            / sum(rate(edgequota_requests_total[5m]))
           ) > 0.05
         for: 5m
         labels:
@@ -31,8 +31,8 @@ groups:
 
       - alert: EdgeQuotaTrafficSpike
         expr: |
-          sum(rate(edgequota_request_duration_seconds_count[5m]))
-          > 2 * sum(rate(edgequota_request_duration_seconds_count[1h] offset 1h))
+          sum(rate(edgequota_requests_total[5m]))
+          > 2 * sum(rate(edgequota_requests_total[1h] offset 1h))
         for: 5m
         labels:
           severity: warning
@@ -44,7 +44,7 @@ groups:
 
       - alert: EdgeQuotaNoTraffic
         expr: |
-          sum(rate(edgequota_request_duration_seconds_count[5m])) == 0
+          sum(rate(edgequota_requests_total[5m])) == 0
           and on() sum(edgequota_build_info) > 0
         for: 10m
         labels:

@@ -51,7 +51,11 @@ type Metrics struct {
 	PromRequestsInFlight prometheus.Gauge
 
 	// Prometheus histograms.
-	PromRequestDuration *prometheus.HistogramVec
+	PromRequestDuration prometheus.Histogram
+
+	// Request counter with method/status_code labels (split from histogram
+	// to avoid high cardinality on histogram buckets).
+	PromRequestsTotal *prometheus.CounterVec
 
 	// Per-stage latency histograms for identifying bottlenecks.
 	PromAuthDuration       prometheus.Histogram
@@ -164,13 +168,17 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Name:      "key_extract_errors_total",
 			Help:      "Total number of key extraction errors.",
 		}),
-		PromRequestDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+		PromRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "requests_total",
+			Help:      "Total HTTP requests by method and status code.",
+		}, []string{"method", "status_code"}),
+		PromRequestDuration: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",
 			Name:      "request_duration_seconds",
 			Help:      "Request duration in seconds.",
-			// Edge-proxy-tuned buckets with sub-millisecond granularity.
-			Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10},
-		}, []string{"method", "status_code"}),
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 5, 10},
+		}),
 		PromAuthDuration: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",
 			Name:      "auth_duration_seconds",
