@@ -965,31 +965,33 @@ func (c *Chain) handlePreflightBypass(sw *statusWriter, r *http.Request, origina
 }
 
 // ServeHTTP processes the request through auth → rate limit → proxy.
-func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	c.metrics.PromRequestsInFlight.Inc()
-	defer c.metrics.PromRequestsInFlight.Dec()
-
-	start := time.Now()
-
-	// Apply per-request write deadline early, before any response bytes.
-	// Streaming requests (SSE, WebSocket, gRPC) get an unlimited deadline;
-	// regular requests get the configured write_timeout.
+// prepareRequest sets up the statusWriter, injects mTLS headers, records
+// transport metrics, and returns the request ID and original host.
+func (c *Chain) prepareRequest(w http.ResponseWriter, r *http.Request) (sw *statusWriter, reqID, originalHost string) {
 	c.applyWriteDeadline(w, r)
 
-	sw := statusWriterPool.Get().(*statusWriter)
+	sw = statusWriterPool.Get().(*statusWriter)
 	sw.ResponseWriter = w
 	sw.code = http.StatusOK
 	sw.written = false
 	sw.bytesWritten = 0
 
-	reqID := ensureRequestID(r)
+	reqID = ensureRequestID(r)
 	sw.Header().Set(requestIDHeader, reqID)
 
-	// Derive mTLS identity from TLS state early so that auth and
-	// rate-limit middleware can see the X-EdgeQuota-* headers.
 	mtls.InjectHeaders(r)
+	c.metrics.PromRequestsByTransport.WithLabelValues(r.Proto, tlsMode(r)).Inc()
 
-	originalHost := r.Host
+	originalHost = r.Host
+	return sw, reqID, originalHost
+}
+
+func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.metrics.PromRequestsInFlight.Inc()
+	defer c.metrics.PromRequestsInFlight.Dec()
+
+	start := time.Now()
+	sw, reqID, originalHost := c.prepareRequest(w, r)
 	var logRLKey, logTenantID string
 
 	if c.handlePreflightBypass(sw, r, originalHost, reqID, start) {
@@ -1002,13 +1004,25 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	proto := streamingProtocol(r)
+	streaming := proto != ""
+	if streaming {
+		c.metrics.PromStreamingTotal.WithLabelValues(proto).Inc()
+		c.metrics.PromStreamingInFlight.WithLabelValues(proto).Inc()
+	}
+
 	defer func() {
 		if c.concurrencySem != nil {
 			c.concurrencySem.Release(1)
 		}
 		elapsed := time.Since(start)
 		c.metrics.PromRequestsTotal.WithLabelValues(r.Method, strconv.Itoa(sw.code)).Inc()
-		c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
+		if streaming {
+			c.metrics.PromStreamingInFlight.WithLabelValues(proto).Dec()
+			c.metrics.PromStreamingDuration.WithLabelValues(proto).Observe(elapsed.Seconds())
+		} else {
+			c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
+		}
 		c.emitAccessLog(r, sw, originalHost, reqID, logRLKey, logTenantID, elapsed)
 		sw.ResponseWriter = nil
 		statusWriterPool.Put(sw)
@@ -1022,7 +1036,9 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.metrics.IncAllowed()
 		backendStart := time.Now()
 		(*c.next.Load()).ServeHTTP(sw, r)
-		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+		if !streaming {
+			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+		}
 		return
 	}
 
@@ -1080,6 +1096,32 @@ func (c *Chain) SetWriteTimeout(d time.Duration) {
 // subject to the server's write timeout or per-request context deadline.
 func isStreamingRequest(r *http.Request) bool {
 	return proxy.IsSSE(r) || proxy.IsWebSocketUpgrade(r) || proxy.IsGRPC(r)
+}
+
+// tlsMode returns a low-cardinality label for the connection's TLS state.
+func tlsMode(r *http.Request) string {
+	if r.TLS == nil {
+		return "plain"
+	}
+	if len(r.TLS.VerifiedChains) > 0 {
+		return "mtls"
+	}
+	return "tls"
+}
+
+// streamingProtocol returns the protocol label for a streaming request,
+// or "" if the request is not a streaming request.
+func streamingProtocol(r *http.Request) string {
+	switch {
+	case proxy.IsSSE(r):
+		return "sse"
+	case proxy.IsWebSocketUpgrade(r):
+		return "websocket"
+	case proxy.IsGRPC(r):
+		return "grpc"
+	default:
+		return ""
+	}
 }
 
 // applyRequestTimeout returns a context with a timeout derived from the global
@@ -1537,7 +1579,9 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 	)
 	backendStart := time.Now()
 	(*c.next.Load()).ServeHTTP(w, r.WithContext(ctx))
-	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+	if !isStreamingRequest(r) {
+		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+	}
 	proxySpan.End()
 }
 
@@ -1629,7 +1673,9 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		c.metrics.IncAllowed()
 		backendStart := time.Now()
 		(*c.next.Load()).ServeHTTP(w, r)
-		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+		if !isStreamingRequest(r) {
+			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+		}
 
 	case policyFailClosed:
 		c.metrics.IncLimited()
@@ -1643,7 +1689,9 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 				"key", key, "average", c.ratePerSecond, "burst", c.burst)
 			backendStart := time.Now()
 			(*c.next.Load()).ServeHTTP(w, r)
-			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+			if !isStreamingRequest(r) {
+				c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+			}
 		} else {
 			c.metrics.IncLimited()
 			c.logger.Debug("in-memory fallback: request rate-limited",

@@ -812,12 +812,106 @@
       ]
     },
     {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Request Rate by HTTP Protocol",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (proto) (rate(edgequota_requests_by_transport_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{proto}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Request Rate by TLS Mode",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (tls) (rate(edgequota_requests_by_transport_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{tls}}"
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "id": 20,
       "title": "Latency",
@@ -1052,6 +1146,152 @@
         "x": 0,
         "y": 39
       },
+      "id": 200,
+      "title": "Streaming Connections",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      },
+      "id": 201,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Active Streaming Connections",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (protocol) (edgequota_streaming_connections_in_flight{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"})",
+          "legendFormat": "{{protocol}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "cps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      },
+      "id": 202,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "New Streaming Connections / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (protocol) (rate(edgequota_streaming_connections_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]))",
+          "legendFormat": "{{protocol}}"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      },
+      "id": 203,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Streaming Duration (P50 / P95)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, protocol) (rate(edgequota_streaming_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "{{protocol}} p50"
+        },
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, protocol) (rate(edgequota_streaming_duration_seconds_bucket{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "legendFormat": "{{protocol}} p95"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
       "id": 30,
       "title": "Rate Limiting",
       "type": "row"
@@ -1101,7 +1341,7 @@
           "datasource": {
             "uid": "${datasource}"
           },
-          "expr": "topk(10, sum by (tenant) (rate(edgequota_tenant_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval]) + rate(edgequota_tenant_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
+          "expr": "topk(10, sum by (tenant) (rate(edgequota_tenant_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) + sum by (tenant) (rate(edgequota_tenant_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) or sum by (tenant) (rate(edgequota_tenant_requests_allowed_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])) or sum by (tenant) (rate(edgequota_tenant_requests_limited_total{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}[$rate_interval])))",
           "legendFormat": "{{tenant}}"
         }
       ]

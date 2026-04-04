@@ -106,6 +106,15 @@ type Metrics struct {
 	// Global concurrency limiter.
 	PromConcurrencyRejected prometheus.Counter
 
+	// Streaming connection metrics (SSE, WebSocket, gRPC).
+	PromStreamingInFlight *prometheus.GaugeVec
+	PromStreamingTotal    *prometheus.CounterVec
+	PromStreamingDuration *prometheus.HistogramVec
+
+	// Transport breakdown: HTTP protocol version × TLS mode.
+	// proto: "HTTP/1.1", "HTTP/2.0"; tls: "mtls", "tls", "plain".
+	PromRequestsByTransport *prometheus.CounterVec
+
 	// CORS preflight bypass.
 	PromPreflightBypassed prometheus.Counter
 
@@ -294,6 +303,27 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Help:      "Distribution of cached response body sizes in bytes.",
 			Buckets:   []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304},
 		}),
+		PromRequestsByTransport: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "requests_by_transport_total",
+			Help:      "Total requests by HTTP protocol version and TLS mode.",
+		}, []string{"proto", "tls"}),
+		PromStreamingInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "edgequota",
+			Name:      "streaming_connections_in_flight",
+			Help:      "Number of active streaming connections by protocol.",
+		}, []string{"protocol"}),
+		PromStreamingTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "streaming_connections_total",
+			Help:      "Total streaming connections by protocol.",
+		}, []string{"protocol"}),
+		PromStreamingDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "edgequota",
+			Name:      "streaming_duration_seconds",
+			Help:      "Duration of streaming connections in seconds.",
+			Buckets:   []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
+		}, []string{"protocol"}),
 		PromPreflightBypassed: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "preflight_bypassed_total",
