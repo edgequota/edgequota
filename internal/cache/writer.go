@@ -46,12 +46,14 @@ func (cw *CachingResponseWriter) WriteHeader(code int) {
 
 	ttl, ok := IsCacheable(code, cw.Header())
 	if !ok {
+		cw.ResponseWriter.Header().Set("X-Cache", "MISS")
 		cw.ResponseWriter.WriteHeader(code)
 		return
 	}
 
 	varyHeaders, varyOK := ParseVary(cw.Header())
 	if !varyOK {
+		cw.ResponseWriter.Header().Set("X-Cache", "MISS")
 		cw.ResponseWriter.WriteHeader(code)
 		return
 	}
@@ -62,6 +64,7 @@ func (cw *CachingResponseWriter) WriteHeader(code int) {
 	cw.tags = ParseSurrogateKey(cw.Header())
 	cw.buf = &bytes.Buffer{}
 
+	cw.ResponseWriter.Header().Set("X-Cache", "MISS")
 	cw.ResponseWriter.WriteHeader(code)
 }
 
@@ -113,6 +116,17 @@ func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
 	storeKey := cacheKey
 	if len(cw.vary) > 0 {
 		storeKey = cw.store.KeyFromRequest(cw.req, cw.vary)
+		if storeKey != cacheKey {
+			// Store a lightweight pointer under the base key so that
+			// serveCached() can discover the Vary headers and recompute
+			// the full cache key for lookup.
+			pointer := &Entry{
+				StatusCode: cw.statusCode,
+				Vary:       cw.vary,
+				CreatedAt:  time.Now(),
+			}
+			cw.store.Set(ctx, cacheKey, pointer, cw.ttl)
+		}
 	}
 
 	headers := cw.Header().Clone()

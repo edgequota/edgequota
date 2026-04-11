@@ -782,7 +782,7 @@ func TestProxyCacheXCacheHeader(t *testing.T) {
 	req1 := httptest.NewRequest(http.MethodGet, "/x-cache", nil)
 	rr1 := httptest.NewRecorder()
 	p.ServeHTTP(rr1, req1)
-	assert.Empty(t, rr1.Header().Get("X-Cache"), "first request should not have X-Cache: HIT")
+	assert.Equal(t, "MISS", rr1.Header().Get("X-Cache"), "first request should have X-Cache: MISS")
 
 	// Cache hit — must have X-Cache: HIT.
 	req2 := httptest.NewRequest(http.MethodGet, "/x-cache", nil)

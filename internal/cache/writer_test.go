@@ -142,12 +142,21 @@ func TestCachingResponseWriterWithVary(t *testing.T) {
 	cw.WriteHeader(http.StatusOK)
 	_, _ = cw.Write([]byte("tenant data"))
 
-	key := store.KeyFromRequest(req, []string{"X-Tenant-Id"})
-	cw.Finish(context.Background(), key)
+	// Pass the base key (as production does in proxyWithCache).
+	baseKey := store.KeyFromRequest(req, nil)
+	cw.Finish(context.Background(), baseKey)
 
-	got, ok := store.Get(context.Background(), key)
-	require.True(t, ok)
+	// Full entry stored under the vary-expanded key.
+	varyKey := store.KeyFromRequest(req, []string{"X-Tenant-Id"})
+	got, ok := store.Get(context.Background(), varyKey)
+	require.True(t, ok, "full entry should exist under vary key")
 	assert.Equal(t, []string{"X-Tenant-Id"}, got.Vary)
+	assert.Equal(t, []byte("tenant data"), got.Body)
+
+	// Pointer entry stored under base key for Vary discovery.
+	pointer, ok := store.Get(context.Background(), baseKey)
+	require.True(t, ok, "pointer entry should exist under base key")
+	assert.Equal(t, []string{"X-Tenant-Id"}, pointer.Vary)
 }
 
 func TestCachingResponseWriterWithSurrogateKey(t *testing.T) {
@@ -364,6 +373,35 @@ func TestCachingResponseWriterLargeBodyOverflowMidStream(t *testing.T) {
 	assert.False(t, ok, "body that grows past limit should not be cached")
 
 	assert.Equal(t, "1234567890AB", rec.Body.String(), "client still gets full response")
+}
+
+func TestCachingResponseWriterXCacheMissNonCacheable(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	req := httptest.NewRequest(http.MethodGet, "/no-cc", nil)
+	rec := httptest.NewRecorder()
+
+	cw := NewCachingResponseWriter(rec, store, req)
+	cw.WriteHeader(http.StatusOK)
+	_, _ = cw.Write([]byte("dynamic"))
+
+	assert.Equal(t, "MISS", rec.Header().Get("X-Cache"), "non-cacheable response should have X-Cache: MISS")
+}
+
+func TestCachingResponseWriterXCacheMissCacheable(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	req := httptest.NewRequest(http.MethodGet, "/cached", nil)
+	rec := httptest.NewRecorder()
+
+	cw := NewCachingResponseWriter(rec, store, req)
+	cw.Header().Set("Cache-Control", "max-age=60")
+	cw.WriteHeader(http.StatusOK)
+	_, _ = cw.Write([]byte("will be cached"))
+
+	assert.Equal(t, "MISS", rec.Header().Get("X-Cache"), "cacheable response on first request should have X-Cache: MISS")
 }
 
 func TestKeyFromRequestLongQuery(t *testing.T) {
