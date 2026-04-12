@@ -1,0 +1,6 @@
+package: adminv1http
+output: api/gen/http/admin/v1/admin.gen.go
+generate:
+  models: true
+  strict-server: true
+  std-http-server: true

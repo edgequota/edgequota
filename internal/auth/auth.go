@@ -131,6 +131,10 @@ type CheckResponse struct {
 	CacheMaxAgeSec *int64 `json:"cache_max_age_seconds,omitempty"`
 	// CacheNoStore prevents caching when true, even if CacheMaxAgeSec is set.
 	CacheNoStore bool `json:"cache_no_store,omitempty"`
+	// CacheTags are surrogate-key tags for targeted cache invalidation.
+	// When present, the cached auth decision is indexed by these tags so
+	// that PurgeAuthTags can evict specific entries.
+	CacheTags []string `json:"cache_tags,omitempty"`
 
 	// CacheTTLSource describes where the cache TTL decision came from.
 	// Set during TTL resolution; not serialized (json:"-") because it is only
@@ -413,6 +417,9 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 			if parsed.CacheNoStore != nil {
 				result.CacheNoStore = *parsed.CacheNoStore
 			}
+			if parsed.CacheTags != nil {
+				result.CacheTags = *parsed.CacheTags
+			}
 		}
 		// HTTP headers take precedence over body fields; source is tracked for logging.
 		resolveHTTPCacheTTL(resp.Header, result)
@@ -451,6 +458,9 @@ func checkResponseFromHTTP(r *authv1http.CheckResponse) *CheckResponse {
 	}
 	if r.CacheNoStore != nil {
 		resp.CacheNoStore = *r.CacheNoStore
+	}
+	if r.CacheTags != nil {
+		resp.CacheTags = *r.CacheTags
 	}
 	return resp
 }
@@ -494,6 +504,9 @@ func (c *Client) checkGRPC(ctx context.Context, req *CheckRequest) (*CheckRespon
 	if pbResp.CacheMaxAgeSeconds != nil {
 		v := pbResp.GetCacheMaxAgeSeconds()
 		resp.CacheMaxAgeSec = &v
+	}
+	if len(pbResp.GetCacheTags()) > 0 {
+		resp.CacheTags = pbResp.GetCacheTags()
 	}
 
 	// gRPC has no HTTP headers — set the source from body fields for logging.

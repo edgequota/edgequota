@@ -1,0 +1,101 @@
+openapi: "3.0.3"
+info:
+  title: EdgeQuota Admin API
+  description: |
+    Administrative API served on EdgeQuota's admin port (default 9090).
+    Provides cache management operations for invalidating cached responses
+    and auth decisions.
+
+    Each cache layer has its own purge endpoint so that response caching
+    and auth caching can be managed independently, even when they share
+    the same underlying Redis instance today.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+
+paths:
+  /v1/cache/purge/tags:
+    post:
+      operationId: purgeResponseCacheTags
+      summary: Purge response cache entries by surrogate-key tags.
+      description: |
+        Invalidates all cached HTTP responses tagged with any of the given
+        surrogate-key tags. Tags correspond to Surrogate-Key header values
+        that backends emit (e.g. "menu-demo", "tenant-shoro").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PurgeTagsRequest"
+      responses:
+        "204":
+          description: Matching cache entries purged.
+
+  /v1/cache/purge:
+    post:
+      operationId: purgeResponseCacheURL
+      summary: Purge a single cached response by URL.
+      description: |
+        Invalidates a single cached HTTP response by method and URL path
+        (including query string).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PurgeURLRequest"
+      responses:
+        "204":
+          description: Cache entry purged.
+        "404":
+          description: No cache entry found for the given URL.
+
+  /v1/cache/purge/auth:
+    post:
+      operationId: purgeAuthCacheTags
+      summary: Purge auth cache entries by surrogate-key tags.
+      description: |
+        Invalidates all cached auth decisions tagged with any of the given
+        tags. Tags are set by the auth service via the cache_tags field in
+        CheckResponse.
+
+        This is separate from the response cache purge to allow independent
+        management of auth and response caches.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PurgeTagsRequest"
+      responses:
+        "204":
+          description: Matching auth cache entries purged.
+
+components:
+  schemas:
+    PurgeTagsRequest:
+      type: object
+      description: Request to purge cache entries by surrogate-key tags.
+      required:
+        - tags
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+          description: Surrogate-key tags to purge.
+
+    PurgeURLRequest:
+      type: object
+      description: Request to purge a single cached response by URL.
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          description: URL path to purge (e.g. "/v1/menus/menu-demo/published").
+        method:
+          type: string
+          default: GET
+          description: HTTP method of the cached response to purge.

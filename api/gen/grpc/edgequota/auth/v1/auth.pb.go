@@ -135,7 +135,16 @@ type CheckResponse struct {
 	// cache TTL. A value of 0 with cache_no_store=false is treated as "not set".
 	CacheMaxAgeSeconds *int64 `protobuf:"varint,6,opt,name=cache_max_age_seconds,json=cacheMaxAgeSeconds,proto3,oneof" json:"cache_max_age_seconds,omitempty"`
 	// If true, the response must not be cached.
-	CacheNoStore  bool `protobuf:"varint,7,opt,name=cache_no_store,json=cacheNoStore,proto3" json:"cache_no_store,omitempty"`
+	CacheNoStore bool `protobuf:"varint,7,opt,name=cache_no_store,json=cacheNoStore,proto3" json:"cache_no_store,omitempty"`
+	// Surrogate-key tags for targeted cache invalidation.
+	// EdgeQuota indexes the cached auth decision by these tags so that a
+	// subsequent PurgeAuthTags call can evict specific entries without flushing
+	// the entire auth cache.
+	//
+	// Example: an auth service returning cache_tags = ["table-t123"] allows
+	// a downstream system to purge that specific decision when table t123 is
+	// closed, without affecting other cached auth decisions.
+	CacheTags     []string `protobuf:"bytes,9,rep,name=cache_tags,json=cacheTags,proto3" json:"cache_tags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -219,6 +228,13 @@ func (x *CheckResponse) GetCacheNoStore() bool {
 	return false
 }
 
+func (x *CheckResponse) GetCacheTags() []string {
+	if x != nil {
+		return x.CacheTags
+	}
+	return nil
+}
+
 var File_edgequota_auth_v1_auth_proto protoreflect.FileDescriptor
 
 const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
@@ -233,7 +249,7 @@ const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\x04body\x18\x05 \x01(\fR\x04body\x1a:\n" +
 	"\fHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc6\x04\n" +
 	"\rCheckResponse\x12\x18\n" +
 	"\aallowed\x18\x01 \x01(\bR\aallowed\x12\x1f\n" +
 	"\vstatus_code\x18\x02 \x01(\x05R\n" +
@@ -242,7 +258,9 @@ const file_edgequota_auth_v1_auth_proto_rawDesc = "" +
 	"\tdeny_body\x18\x04 \x01(\tR\bdenyBody\x12`\n" +
 	"\x10response_headers\x18\x03 \x03(\v25.edgequota.auth.v1.CheckResponse.ResponseHeadersEntryR\x0fresponseHeaders\x126\n" +
 	"\x15cache_max_age_seconds\x18\x06 \x01(\x03H\x00R\x12cacheMaxAgeSeconds\x88\x01\x01\x12$\n" +
-	"\x0ecache_no_store\x18\a \x01(\bR\fcacheNoStore\x1aA\n" +
+	"\x0ecache_no_store\x18\a \x01(\bR\fcacheNoStore\x12\x1d\n" +
+	"\n" +
+	"cache_tags\x18\t \x03(\tR\tcacheTags\x1aA\n" +
 	"\x13RequestHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aB\n" +

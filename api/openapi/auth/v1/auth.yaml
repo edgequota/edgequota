@@ -103,3 +103,12 @@ components:
         cache_no_store:
           type: boolean
           description: If true, the response must not be cached.
+        cache_tags:
+          type: array
+          items:
+            type: string
+          description: |
+            Surrogate-key tags for targeted cache invalidation. EdgeQuota
+            indexes the cached auth decision by these tags so that a
+            subsequent purge call can evict specific entries without flushing
+            the entire auth cache.

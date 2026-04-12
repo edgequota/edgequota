@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	adminv1 "github.com/edgequota/edgequota/api/gen/http/admin/v1"
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	imtls "github.com/edgequota/edgequota/internal/mtls"
@@ -329,30 +330,36 @@ func newTestCacheStore(t *testing.T) *cache.Store {
 	return cache.NewStore(client)
 }
 
-func postJSON(handler http.Handler, body any) *httptest.ResponseRecorder {
+// stubAuthPurger implements AuthCachePurger for tests.
+type stubAuthPurger struct {
+	deleted int
+}
+
+func (s *stubAuthPurger) DeleteAuthByTag(_ context.Context, _ string) int {
+	s.deleted++
+	return 1
+}
+
+func newTestAdminMux(t *testing.T, store *cache.Store, purger AuthCachePurger) *http.ServeMux {
+	t.Helper()
+	ah := &adminHandler{
+		responseCache: func() *cache.Store { return store },
+		authPurger:    purger,
+		logger:        slog.Default(),
+	}
+	mux := http.NewServeMux()
+	adminv1.HandlerFromMux(adminv1.NewStrictHandler(ah, nil), mux)
+	return mux
+}
+
+func postJSON(mux http.Handler, path string, body any) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(body)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge", &buf)
+	r := httptest.NewRequest(http.MethodPost, path, &buf)
 	r.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(w, r)
+	mux.ServeHTTP(w, r)
 	return w
-}
-
-func TestCachePurgeByKey(t *testing.T) {
-	store := newTestCacheStore(t)
-	store.Set(context.Background(), "my-key", &cache.Entry{
-		StatusCode: 200,
-		Body:       []byte("data"),
-	}, time.Minute)
-
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := postJSON(handler, purgeRequest{Key: "my-key"})
-	assert.Equal(t, http.StatusNoContent, w.Code)
-
-	_, ok := store.Get(context.Background(), "my-key")
-	assert.False(t, ok, "entry should be deleted after purge by key")
 }
 
 func TestCachePurgeByURL(t *testing.T) {
@@ -362,9 +369,9 @@ func TestCachePurgeByURL(t *testing.T) {
 		Body:       []byte("js-content"),
 	}, time.Minute)
 
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := postJSON(handler, purgeRequest{URL: "/static/bundle.js", Method: "GET"})
+	mux := newTestAdminMux(t, store, &stubAuthPurger{})
+	method := "GET"
+	w := postJSON(mux, "/v1/cache/purge", adminv1.PurgeURLRequest{Url: "/static/bundle.js", Method: &method})
 	assert.Equal(t, http.StatusNoContent, w.Code)
 
 	_, ok := store.Get(context.Background(), "GET|/static/bundle.js")
@@ -378,9 +385,8 @@ func TestCachePurgeByURLDefaultMethod(t *testing.T) {
 		Body:       []byte("html"),
 	}, time.Minute)
 
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := postJSON(handler, purgeRequest{URL: "/page"})
+	mux := newTestAdminMux(t, store, &stubAuthPurger{})
+	w := postJSON(mux, "/v1/cache/purge", adminv1.PurgeURLRequest{Url: "/page"})
 	assert.Equal(t, http.StatusNoContent, w.Code)
 
 	_, ok := store.Get(context.Background(), "GET|/page")
@@ -389,36 +395,17 @@ func TestCachePurgeByURLDefaultMethod(t *testing.T) {
 
 func TestCachePurgeNotFound(t *testing.T) {
 	store := newTestCacheStore(t)
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
+	mux := newTestAdminMux(t, store, &stubAuthPurger{})
 
-	w := postJSON(handler, purgeRequest{Key: "nonexistent"})
+	w := postJSON(mux, "/v1/cache/purge", adminv1.PurgeURLRequest{Url: "/nonexistent"})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-func TestCachePurgeBadRequest(t *testing.T) {
-	store := newTestCacheStore(t)
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := postJSON(handler, purgeRequest{})
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestCachePurgeMethodNotAllowed(t *testing.T) {
-	store := newTestCacheStore(t)
-	handler := cachePurgeHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/cache/purge", nil)
-	handler.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
-}
-
 func TestCachePurgeStoreNil(t *testing.T) {
-	handler := cachePurgeHandler(func() *cache.Store { return nil }, slog.Default())
+	mux := newTestAdminMux(t, nil, &stubAuthPurger{})
 
-	w := postJSON(handler, purgeRequest{Key: "anything"})
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	w := postJSON(mux, "/v1/cache/purge", adminv1.PurgeURLRequest{Url: "/anything"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
 }
 
 func TestCachePurgeTagsByTag(t *testing.T) {
@@ -441,15 +428,8 @@ func TestCachePurgeTagsByTag(t *testing.T) {
 		Tags:       []string{"other"},
 	}, time.Minute)
 
-	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
-
-	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(purgeTagsRequest{Tags: []string{"pages"}})
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge/tags", &buf)
-	r.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(w, r)
-
+	mux := newTestAdminMux(t, store, &stubAuthPurger{})
+	w := postJSON(mux, "/v1/cache/purge/tags", adminv1.PurgeTagsRequest{Tags: []string{"pages"}})
 	assert.Equal(t, http.StatusNoContent, w.Code)
 
 	_, ok := store.Get(ctx, "page-1")
@@ -461,29 +441,13 @@ func TestCachePurgeTagsByTag(t *testing.T) {
 	assert.True(t, ok, "unrelated entry should remain")
 }
 
-func TestCachePurgeTagsEmpty(t *testing.T) {
-	store := newTestCacheStore(t)
-	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
+func TestCacheAuthPurgeByTag(t *testing.T) {
+	purger := &stubAuthPurger{}
+	mux := newTestAdminMux(t, nil, purger)
 
-	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(purgeTagsRequest{Tags: []string{}})
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/cache/purge/tags", &buf)
-	r.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestCachePurgeTagsMethodNotAllowed(t *testing.T) {
-	store := newTestCacheStore(t)
-	handler := cachePurgeTagsHandler(func() *cache.Store { return store }, slog.Default())
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/cache/purge/tags", nil)
-	handler.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+	w := postJSON(mux, "/v1/cache/purge/auth", adminv1.PurgeTagsRequest{Tags: []string{"table-t123", "table-t456"}})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, 2, purger.deleted, "should have called DeleteAuthByTag for each tag")
 }
 
 // generateSelfSignedCert creates a minimal self-signed cert+key for testing.

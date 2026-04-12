@@ -170,6 +170,9 @@ const maxTTL = 7 * 24 * 3600
 // authCacheKeyPrefix is the Redis key prefix for cached auth responses.
 const authCacheKeyPrefix = "auth:cache:"
 
+// authCacheTagPrefix is the Redis key prefix for auth cache tag-to-keys sets.
+const authCacheTagPrefix = "auth:tag:"
+
 // Failure policy constants — re-exported from config for local readability.
 const (
 	policyPassthrough      = config.FailurePolicyPassThrough
@@ -733,6 +736,26 @@ func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.Check
 		defer span.End()
 	}
 	_ = c.authCacheRedis.Set(ctx, key, data, ttl).Err()
+
+	// Index by surrogate-key tags for targeted purge.
+	for _, tag := range resp.CacheTags {
+		_ = c.authCacheRedis.SAdd(ctx, authCacheTagPrefix+tag, key).Err()
+	}
+}
+
+// DeleteAuthByTag evicts all cached auth decisions tagged with the given tag.
+// Returns the number of entries deleted.
+func (c *Chain) DeleteAuthByTag(ctx context.Context, tag string) int {
+	if c.authCacheRedis == nil {
+		return 0
+	}
+	members, err := c.authCacheRedis.SMembers(ctx, authCacheTagPrefix+tag).Result()
+	if err != nil || len(members) == 0 {
+		return 0
+	}
+	n, _ := c.authCacheRedis.Del(ctx, members...).Result()
+	_ = c.authCacheRedis.Del(ctx, authCacheTagPrefix+tag)
+	return int(n)
 }
 
 func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitParams) error {

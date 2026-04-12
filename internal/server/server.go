@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	adminv1 "github.com/edgequota/edgequota/api/gen/http/admin/v1"
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/middleware"
@@ -82,7 +83,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger, chain.ResponseCache)
+	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger, chain.ResponseCache, chain)
 
 	var mtlsSrv *http.Server
 	if cfg.Server.TLS.MTLS.Enabled {
@@ -331,81 +332,8 @@ type adminRateLimiter struct {
 	done    chan struct{}
 }
 
-type purgeRequest struct {
-	Key    string `json:"key"`
-	URL    string `json:"url"`
-	Method string `json:"method"`
-}
-
-type purgeTagsRequest struct {
-	Tags []string `json:"tags"`
-}
-
-func cachePurgeHandler(getStore func() *cache.Store, logger *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		store := getStore()
-		if store == nil {
-			http.Error(w, "response cache not configured", http.StatusServiceUnavailable)
-			return
-		}
-		var req purgeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-		key := req.Key
-		if key == "" && req.URL != "" {
-			method := req.Method
-			if method == "" {
-				method = "GET"
-			}
-			key = method + "|" + req.URL
-		}
-		if key == "" {
-			http.Error(w, "key or url required", http.StatusBadRequest)
-			return
-		}
-		if store.Delete(r.Context(), key) {
-			logger.Debug("admin: cache purge", "key", key)
-			w.WriteHeader(http.StatusNoContent)
-		} else {
-			http.Error(w, "key not found", http.StatusNotFound)
-		}
-	})
-}
-
-func cachePurgeTagsHandler(getStore func() *cache.Store, logger *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		store := getStore()
-		if store == nil {
-			http.Error(w, "response cache not configured", http.StatusServiceUnavailable)
-			return
-		}
-		var req purgeTagsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-		if len(req.Tags) == 0 {
-			http.Error(w, "tags required", http.StatusBadRequest)
-			return
-		}
-		total := 0
-		for _, tag := range req.Tags {
-			total += store.DeleteByTag(r.Context(), tag)
-		}
-		logger.Debug("admin: cache purge by tags", "tags", req.Tags, "deleted", total)
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
+// Hand-written purge handlers removed — now implemented via generated
+// StrictServerInterface in admin.go.
 
 func newAdminRateLimiter(handler http.Handler, burst int64) *adminRateLimiter {
 	rl := &adminRateLimiter{handler: handler, burst: burst, done: make(chan struct{})}
@@ -464,7 +392,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger, cacheStore func() *cache.Store) (*http.Server, *adminRateLimiter) {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger, cacheStore func() *cache.Store, chain AuthCachePurger) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -506,8 +434,15 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 
 	adminMux.Handle("/v1/config", configHandler)
 	adminMux.Handle("/v1/stats", statsHandler)
-	adminMux.Handle("/v1/cache/purge", cachePurgeHandler(cacheStore, logger))
-	adminMux.Handle("/v1/cache/purge/tags", cachePurgeTagsHandler(cacheStore, logger))
+
+	// Cache purge routes — generated strict-server handler.
+	ah := &adminHandler{
+		responseCache: cacheStore,
+		authPurger:    chain,
+		logger:        logger,
+	}
+	strictHandler := adminv1.NewStrictHandler(ah, nil)
+	adminv1.HandlerFromMux(strictHandler, adminMux)
 
 	// Wrap the admin mux in a rate limiter (100 req/s burst).
 	rl := newAdminRateLimiter(adminMux, 100)

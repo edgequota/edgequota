@@ -71,4 +71,14 @@ message CheckResponse {
   optional int64 cache_max_age_seconds = 6;
   // If true, the response must not be cached.
   bool cache_no_store = 7;
+
+  // Surrogate-key tags for targeted cache invalidation.
+  // EdgeQuota indexes the cached auth decision by these tags so that a
+  // subsequent PurgeAuthTags call can evict specific entries without flushing
+  // the entire auth cache.
+  //
+  // Example: an auth service returning cache_tags = ["table-t123"] allows
+  // a downstream system to purge that specific decision when table t123 is
+  // closed, without affecting other cached auth decisions.
+  repeated string cache_tags = 9;
 }

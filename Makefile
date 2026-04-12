@@ -89,6 +89,7 @@ generate-http:
 	oapi-codegen --config oapi-codegen-auth.yaml api/openapi/auth/v1/auth.yaml
 	oapi-codegen --config oapi-codegen-ratelimit.yaml api/openapi/ratelimit/v1/ratelimit.yaml
 	oapi-codegen --config oapi-codegen-events.yaml api/openapi/events/v1/events.yaml
+	oapi-codegen --config oapi-codegen-admin.yaml api/openapi/admin/v1/admin.yaml
 	@echo "Generated HTTP types in api/gen/http/"
 
 ## proto: Generate Go code from protobuf definitions using buf
