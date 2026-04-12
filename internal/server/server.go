@@ -164,6 +164,15 @@ func buildProxy(cfg *config.Config, logger *slog.Logger) (*proxy.Proxy, error) {
 	return rp, nil
 }
 
+// skipCORSPreflight is an otelhttp.WithFilter that prevents span creation
+// for CORS preflight (OPTIONS) requests. Preflights are browser protocol
+// overhead and create noise in traces without diagnostic value.
+func skipCORSPreflight(r *http.Request) bool {
+	return r.Method != http.MethodOptions ||
+		r.Header.Get("Origin") == "" ||
+		r.Header.Get("Access-Control-Request-Method") == ""
+}
+
 func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.Logger) (*http.Server, *http3.Server) {
 	readTimeout, _ := config.ParseDuration(cfg.Server.ReadTimeout, 30*time.Second)
 	writeTimeout, _ := config.ParseDuration(cfg.Server.WriteTimeout, 30*time.Second)
@@ -189,6 +198,7 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 			return "edgequota.request"
 		}),
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+		otelhttp.WithFilter(skipCORSPreflight),
 	)
 
 	// When TLS is enabled, Go's native HTTP/2 (via NextProtos in tls.Config)
@@ -263,6 +273,7 @@ func buildMTLSServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 			return "edgequota.request"
 		}),
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+		otelhttp.WithFilter(skipCORSPreflight),
 	)
 
 	return &http.Server{

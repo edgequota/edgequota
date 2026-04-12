@@ -49,8 +49,7 @@ func InitTracing(ctx context.Context, cfg config.TracingConfig, version string) 
 
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+		resource.NewSchemaless(
 			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion(version),
 		),
