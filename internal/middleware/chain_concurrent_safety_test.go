@@ -15,14 +15,83 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestConcurrent_ServeHTTPDuringReload exercises the full hot path
+// against Reload churn — the race detector previously flagged this on
+// torn reads of primitive scalar fields (c.average, c.burst, c.prefix,
+// etc.). After moving those fields into the immutable staticParams /
+// fallbackParams snapshots, this test must pass cleanly under -race.
+func TestConcurrent_ServeHTTPDuringReload(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cacheMr := miniredis.RunT(t)
+
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer authSrv.Close()
+
+	cfg := config.Defaults()
+	cfg.Redis.Endpoints = []string{mr.Addr()}
+	cfg.Redis.Mode = config.RedisModeSingle
+	cfg.CacheRedis = &config.RedisConfig{
+		Endpoints: []string{cacheMr.Addr()},
+		Mode:      config.RedisModeSingle,
+	}
+	cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+	cfg.RateLimit.Static.Average = 100
+	cfg.RateLimit.Static.Burst = 200
+	cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
+	cfg.Auth.Enabled = true
+	cfg.Auth.HTTP.URL = authSrv.URL
+
+	chain, err := NewChain(context.Background(),
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		cfg, testLogger(), testMetrics())
+	require.NoError(t, err)
+	defer chain.Close()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	const readers = 8
+	for range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.RemoteAddr = "10.0.0.1:1234"
+				rr := httptest.NewRecorder()
+				chain.ServeHTTP(rr, req)
+			}
+		}()
+	}
+
+	const reloads = 30
+	for i := range reloads {
+		newCfg := *cfg
+		newCfg.RateLimit.Static.Average = int64(50 + i)
+		newCfg.RateLimit.Static.Burst = int64(100 + i*2)
+		if i%2 == 0 {
+			newCfg.RateLimit.FailurePolicy = config.FailurePolicyPassThrough
+		} else {
+			newCfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
+		}
+		require.NoError(t, chain.Reload(&newCfg))
+	}
+
+	close(stop)
+	wg.Wait()
+}
+
 // TestConcurrent_AuthCacheRedisAtomicReadWrite guards H1 directly:
 // authCacheRedis must be safe to read concurrently with writes. Several
 // readers and writers run for a fixed iteration count and the race
 // detector validates the absence of torn interface headers.
-//
-// A full ServeHTTP-vs-Reload test is intentionally out of scope here —
-// pre-existing races on primitive scalar fields (c.average, etc.) trip
-// the race detector independently and need their own dedicated fix.
 func TestConcurrent_AuthCacheRedisAtomicReadWrite(t *testing.T) {
 	mr := miniredis.RunT(t)
 	clientA, err := redis.NewClient(config.RedisConfig{

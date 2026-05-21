@@ -228,22 +228,18 @@ type Chain struct {
 	// proxyRef holds a typed reference to the proxy for cache injection.
 	proxyRef *proxy.Proxy
 
-	fallback       *ratelimit.InMemoryLimiter
 	globalBackstop *ratelimit.InMemoryLimiter // optional global RPS safety valve for passthrough mode
 
-	ratePerSecond float64
-	burst         int64
-	ttl           int
-	prefix        string
-	failurePolicy config.FailurePolicy
-	failureCode   int
-	average       int64
+	// staticRL is the immutable static-rate-limit snapshot. Reload builds a
+	// new value and atomically Stores it; hot-path readers Load the pointer
+	// once and read all fields from the same snapshot, guaranteeing tuple
+	// consistency (e.g. burst and ratePerSecond from the same generation).
+	staticRL atomic.Pointer[staticParams]
 
-	fallbackRatePerSec float64
-	fallbackBurst      int64
-	fallbackTTL        int
-	fallbackAverage    int64
-	fallbackLimiter    *ratelimit.InMemoryLimiter
+	// externalFallback is the immutable fallback snapshot used when the
+	// external rate-limit service is unavailable. Same atomic-swap pattern
+	// as staticRL.
+	externalFallback atomic.Pointer[fallbackParams]
 
 	// requestTimeout, urlPolicy, and accessLog are read from ServeHTTP
 	// (hot path) without holding mu, and written by Reload. Using atomic
@@ -255,7 +251,7 @@ type Chain struct {
 
 	bypassPreflight atomic.Bool
 
-	emitter        *events.Emitter
+	emitter        atomic.Pointer[events.Emitter]
 	concurrencySem *semaphore.Weighted
 
 	allowedInjectionHeaders map[string]struct{}
@@ -288,6 +284,36 @@ type rateLimitParams struct {
 	period        time.Duration
 	failurePolicy config.FailurePolicy
 	failureCode   int
+}
+
+// staticParams is an immutable snapshot of the static rate-limit configuration
+// plus its dependent in-memory fallback limiter. Reload constructs a new
+// value and atomically Stores it; readers Load once and treat the result as
+// a coherent tuple — never mix-and-match fields across snapshots.
+type staticParams struct {
+	ratePerSecond float64
+	burst         int64
+	ttl           int
+	prefix        string
+	failurePolicy config.FailurePolicy
+	failureCode   int
+	average       int64
+
+	// fallback is the in-memory limiter used when Redis is unavailable
+	// during static rate limiting. Bundled with the scalars above so that
+	// the limiter you call always matches the limits you log/return.
+	fallback *ratelimit.InMemoryLimiter
+}
+
+// fallbackParams is an immutable snapshot of the external-RL fallback
+// configuration and its in-memory limiter, used when the external rate-limit
+// service is unavailable. Same atomic-swap discipline as staticParams.
+type fallbackParams struct {
+	ratePerSecond float64
+	burst         int64
+	ttl           int
+	average       int64
+	limiter       *ratelimit.InMemoryLimiter
 }
 
 // parseBucketParams computes rate-per-second, burst, TTL, and period from a
@@ -388,14 +414,6 @@ func NewChain(
 	chain := &Chain{
 		logger:              logger,
 		metrics:             metrics,
-		fallback:            ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
-		ratePerSecond:       p.ratePerSecond,
-		burst:               p.burst,
-		ttl:                 p.ttl,
-		prefix:              prefix,
-		failurePolicy:       p.failurePolicy,
-		failureCode:         p.failureCode,
-		average:             cfg.RateLimit.Static.Average,
 		ctx:                 ctx,
 		cancel:              cancel,
 		recoveryBackoffBase: defaultRecoveryBackoffBase,
@@ -403,6 +421,16 @@ func NewChain(
 		backoffJitter:       defaultBackoffJitter,
 		tracingLevel:        cfg.Tracing.ResolvedLevel(),
 	}
+	chain.staticRL.Store(&staticParams{
+		ratePerSecond: p.ratePerSecond,
+		burst:         p.burst,
+		ttl:           p.ttl,
+		prefix:        prefix,
+		failurePolicy: p.failurePolicy,
+		failureCode:   p.failureCode,
+		average:       cfg.RateLimit.Static.Average,
+		fallback:      ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
+	})
 	for _, o := range opts {
 		o(chain)
 	}
@@ -427,11 +455,13 @@ func NewChain(
 		chain.fallbackKeyStrategy.Store(&fbKS)
 		fb := cfg.RateLimit.External.Fallback
 		fbRPS, fbBurst, fbTTL, _ := parseBucketParams(fb.Average, fb.Burst, fb.Period, "")
-		chain.fallbackRatePerSec = fbRPS
-		chain.fallbackBurst = fbBurst
-		chain.fallbackTTL = fbTTL
-		chain.fallbackAverage = fb.Average
-		chain.fallbackLimiter = ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second)
+		chain.externalFallback.Store(&fallbackParams{
+			ratePerSecond: fbRPS,
+			burst:         fbBurst,
+			ttl:           fbTTL,
+			average:       fb.Average,
+			limiter:       ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second),
+		})
 		logger.Info("external RL fallback config ready",
 			"fallback_average", fb.Average, "fallback_burst", fbBurst,
 			"fallback_period", fb.Period, "fallback_backend_url", fb.BackendURL,
@@ -456,7 +486,7 @@ func NewChain(
 			chain.allowedInjectionHeaders[http.CanonicalHeaderKey(h)] = struct{}{}
 		}
 	}
-	chain.emitter = events.NewEmitter(cfg.Events, logger, metrics)
+	chain.emitter.Store(events.NewEmitter(cfg.Events, logger, metrics))
 
 	if err := chain.initRedis(cfg, logger, p); err != nil {
 		cancel()
@@ -843,7 +873,7 @@ func (c *Chain) initRedis(cfg *config.Config, logger *slog.Logger, p rateLimitPa
 	// path is taken for the base Allow call, while AllowWithOverrides is used for
 	// per-request limits supplied by the external service.
 	if p.ratePerSecond > 0 || cfg.RateLimit.External.Enabled {
-		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.prefix, logger, c.tracingLevel == config.TracingLevelFull)
+		c.limiter = ratelimit.NewLimiter(client, p.ratePerSecond, p.burst, p.ttl, c.staticRL.Load().prefix, logger, c.tracingLevel == config.TracingLevelFull)
 	} else if client != nil {
 		_ = client.Close()
 	}
@@ -989,7 +1019,7 @@ func (c *Chain) externalLimitsFailClosed(sw *statusWriter, extLimits *ratelimit.
 	if extLimits == nil || extLimits.Average >= 0 {
 		return false
 	}
-	code := c.failureCode
+	code := c.staticRL.Load().failureCode
 	if code == 0 {
 		code = http.StatusServiceUnavailable
 	}
@@ -1123,7 +1153,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if c.average == 0 && c.externalRL.Load() == nil {
+	if c.staticRL.Load().average == 0 && c.externalRL.Load() == nil {
 		c.metrics.IncAllowed()
 		backendStart := time.Now()
 		(*c.next.Load()).ServeHTTP(sw, r)
@@ -1482,15 +1512,16 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 				return nil, resolvedKey
 			}
 			fb := c.cfg.Load().RateLimit.External.Fallback
+			fbSnap := c.externalFallback.Load()
 			c.logger.Warn("external rate limit service error, using fallback config",
 				"error", extErr,
 				"fallback_key", fbKey,
-				"fallback_average", c.fallbackAverage,
-				"fallback_burst", c.fallbackBurst,
+				"fallback_average", fbSnap.average,
+				"fallback_burst", fbSnap.burst,
 				"fallback_backend_url", fb.BackendURL)
 			return &ratelimit.ExternalLimits{
-				Average: c.fallbackAverage,
-				Burst:   c.fallbackBurst,
+				Average: fbSnap.average,
+				Burst:   fbSnap.burst,
 			}, fbKey
 		}
 		c.logger.Warn("external rate limit service error, using static config", "error", extErr)
@@ -1513,14 +1544,15 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 				return nil, resolvedKey
 			}
 			fb := c.cfg.Load().RateLimit.External.Fallback
+			fbSnap := c.externalFallback.Load()
 			c.logger.Warn("external service response missing backend_url, using fallback config",
 				"fallback_key", fbKey,
-				"fallback_average", c.fallbackAverage,
-				"fallback_burst", c.fallbackBurst,
+				"fallback_average", fbSnap.average,
+				"fallback_burst", fbSnap.burst,
 				"fallback_backend_url", fb.BackendURL)
 			return &ratelimit.ExternalLimits{
-				Average: c.fallbackAverage,
-				Burst:   c.fallbackBurst,
+				Average: fbSnap.average,
+				Burst:   fbSnap.burst,
 			}, fbKey
 		}
 		return nil, resolvedKey
@@ -1539,8 +1571,8 @@ func (c *Chain) fetchExternalLimits(r *http.Request, key string) (limits *rateli
 				"tenant_key_len", len(extLimits.TenantKey),
 				"max_len", maxTenantKeyLen)
 			c.metrics.IncTenantKeyRejected()
-			if c.emitter != nil {
-				c.emitter.Emit(events.UsageEvent{
+			if em := c.emitter.Load(); em != nil {
+				em.Emit(events.UsageEvent{
 					Key:       resolvedKey,
 					Method:    r.Method,
 					Path:      r.URL.Path,
@@ -1627,7 +1659,7 @@ func (c *Chain) handleLimiterError(limErr error) {
 		if shouldLog {
 			c.metrics.PromRedisHealthy.WithLabelValues("ratelimit").Set(0)
 			c.logger.Warn("redis became unhealthy, switching to fallback",
-				"error", limErr, "policy", c.failurePolicy)
+				"error", limErr, "policy", c.staticRL.Load().failurePolicy)
 		}
 		c.startRecoveryIfNeeded()
 	}
@@ -1679,10 +1711,11 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 // emitUsageEvent enqueues a usage event to the events emitter (if configured).
 // This is fire-and-forget and never blocks the request hot path.
 func (c *Chain) emitUsageEvent(r *http.Request, key, tenantID string, result *ratelimit.Result, statusCode int) {
-	if c.emitter == nil {
+	em := c.emitter.Load()
+	if em == nil {
 		return
 	}
-	c.emitter.Emit(events.UsageEvent{
+	em.Emit(events.UsageEvent{
 		Key:        key,
 		TenantKey:  tenantID,
 		Method:     r.Method,
@@ -1726,8 +1759,9 @@ func (c *Chain) serveRateLimited(w http.ResponseWriter, result *ratelimit.Result
 // "failclosed" during an active attack). When no override is present, the
 // static config values are used.
 func (c *Chain) resolveFailurePolicy(extLimits *ratelimit.ExternalLimits) (config.FailurePolicy, int) {
-	fp := c.failurePolicy
-	fc := c.failureCode
+	snap := c.staticRL.Load()
+	fp := snap.failurePolicy
+	fc := snap.failureCode
 
 	if extLimits == nil {
 		return fp, fc
@@ -1737,7 +1771,7 @@ func (c *Chain) resolveFailurePolicy(extLimits *ratelimit.ExternalLimits) (confi
 		if extLimits.FailurePolicy.Valid() {
 			fp = extLimits.FailurePolicy
 			c.logger.Debug("failure policy overridden by external service",
-				"static", c.failurePolicy, "override", fp)
+				"static", snap.failurePolicy, "override", fp)
 		} else {
 			c.logger.Warn("external service returned invalid failure_policy, ignoring",
 				"value", extLimits.FailurePolicy)
@@ -1753,12 +1787,13 @@ func (c *Chain) resolveFailurePolicy(extLimits *ratelimit.ExternalLimits) (confi
 
 func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request, key string, extLimits *ratelimit.ExternalLimits) {
 	fp, fc := c.resolveFailurePolicy(extLimits)
+	snap := c.staticRL.Load()
 
 	switch fp {
 	case policyPassthrough:
 		if c.globalBackstop != nil && !c.globalBackstop.Allow("__global__") {
 			c.metrics.IncLimited()
-			c.serveRateLimited(w, &ratelimit.Result{RetryAfter: time.Second, Limit: c.burst})
+			c.serveRateLimited(w, &ratelimit.Result{RetryAfter: time.Second, Limit: snap.burst})
 			return
 		}
 		c.metrics.IncAllowed()
@@ -1774,10 +1809,10 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 
 	case policyInMemoryFallback:
 		c.metrics.IncFallbackUsed("ratelimit")
-		if c.fallback.Allow(key) {
+		if snap.fallback.Allow(key) {
 			c.metrics.IncAllowed()
 			c.logger.Debug("in-memory fallback: request allowed",
-				"key", key, "average", c.ratePerSecond, "burst", c.burst)
+				"key", key, "average", snap.ratePerSecond, "burst", snap.burst)
 			backendStart := time.Now()
 			(*c.next.Load()).ServeHTTP(w, r)
 			if !isStreamingRequest(r) {
@@ -1786,10 +1821,10 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		} else {
 			c.metrics.IncLimited()
 			c.logger.Debug("in-memory fallback: request rate-limited",
-				"key", key, "average", c.ratePerSecond, "burst", c.burst)
+				"key", key, "average", snap.ratePerSecond, "burst", snap.burst)
 			c.serveRateLimited(w, &ratelimit.Result{
 				RetryAfter: time.Second,
-				Limit:      c.burst,
+				Limit:      snap.burst,
 			})
 		}
 	}
@@ -1919,10 +1954,11 @@ func (c *Chain) recoveryRetry(backoff *time.Duration, attempt, maxAttempts int, 
 }
 
 func (c *Chain) recoveryInstall(client redis.Client) {
+	snap := c.staticRL.Load()
 	// In external RL mode, a limiter is required even when ratePerSecond=0 so that
 	// tryRedisLimit can apply per-request limits from the external service. Only skip
 	// limiter creation when neither static rate limiting nor external RL is active.
-	if c.ratePerSecond <= 0 && !c.cfg.Load().RateLimit.External.Enabled {
+	if snap.ratePerSecond <= 0 && !c.cfg.Load().RateLimit.External.Enabled {
 		c.mu.Lock()
 		old := c.swapLimiterLocked(nil)
 		c.redisUnhealthy = false
@@ -1935,7 +1971,7 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		return
 	}
 
-	limiter := ratelimit.NewLimiter(client, c.ratePerSecond, c.burst, c.ttl, c.prefix, c.logger, c.tracingLevel == config.TracingLevelFull)
+	limiter := ratelimit.NewLimiter(client, snap.ratePerSecond, snap.burst, snap.ttl, snap.prefix, c.logger, c.tracingLevel == config.TracingLevelFull)
 
 	c.mu.Lock()
 	old := c.swapLimiterLocked(limiter)
@@ -2035,7 +2071,9 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 
 	c.keyStrategy.Store(&newKS) // Atomic store — read by ServeHTTP without holding mu.
 
-	// Rebuild fallback key strategy when external RL is enabled.
+	// Rebuild fallback key strategy and external-fallback snapshot when
+	// external RL is enabled.
+	var oldExternalFB *fallbackParams
 	if newCfg.RateLimit.External.Enabled {
 		fbKS, fbErr := ratelimit.NewKeyStrategy(newCfg.RateLimit.External.Fallback.KeyStrategy)
 		if fbErr != nil {
@@ -2044,41 +2082,46 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		c.fallbackKeyStrategy.Store(&fbKS)
 		fb := newCfg.RateLimit.External.Fallback
 		fbRPS, fbBurst, fbTTL, _ := parseBucketParams(fb.Average, fb.Burst, fb.Period, "")
-		c.fallbackRatePerSec = fbRPS
-		c.fallbackBurst = fbBurst
-		c.fallbackTTL = fbTTL
-		c.fallbackAverage = fb.Average
-		oldFBL := c.fallbackLimiter
-		c.fallbackLimiter = ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second)
-		if oldFBL != nil {
-			oldFBL.Close()
-		}
+		oldExternalFB = c.externalFallback.Swap(&fallbackParams{
+			ratePerSecond: fbRPS,
+			burst:         fbBurst,
+			ttl:           fbTTL,
+			average:       fb.Average,
+			limiter:       ratelimit.NewInMemoryLimiter(fbRPS, fbBurst, time.Duration(fbTTL)*time.Second),
+		})
 	}
+
+	// Build the new static-RL snapshot, including a fresh fallback limiter
+	// sized to the new params. Swap it in atomically; Close the prior
+	// fallback limiter after the swap and outside any lock.
+	newStatic := &staticParams{
+		ratePerSecond: p.ratePerSecond,
+		burst:         p.burst,
+		ttl:           p.ttl,
+		prefix:        prefix,
+		failurePolicy: p.failurePolicy,
+		failureCode:   p.failureCode,
+		average:       newCfg.RateLimit.Static.Average,
+		fallback:      ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second),
+	}
+	oldStatic := c.staticRL.Swap(newStatic)
 
 	c.mu.Lock()
 	prevCfg := c.cfg.Load() // Capture previous config before overwriting.
-	c.ratePerSecond = p.ratePerSecond
-	c.burst = p.burst
-	c.ttl = p.ttl
-	c.prefix = prefix
-	c.failurePolicy = p.failurePolicy
-	c.failureCode = p.failureCode
-	c.average = newCfg.RateLimit.Static.Average
-	c.cfg.Store(newCfg) // Atomic store — recoveryLoop reads c.cfg without the mutex.
+	c.cfg.Store(newCfg)     // Atomic store — recoveryLoop reads c.cfg without the mutex.
 
-	// Rebuild limiter with new params but same Redis client if available.
+	// Rebuild Redis limiter with new params but same Redis client if available.
 	if c.limiter != nil {
 		oldLim := c.limiter
 		c.limiter = ratelimit.NewLimiter(oldLim.Client(), p.ratePerSecond, p.burst, p.ttl, prefix, c.logger, c.tracingLevel == config.TracingLevelFull)
 	}
-
-	// Rebuild fallback limiter with new parameters.
-	oldFB := c.fallback
-	c.fallback = ratelimit.NewInMemoryLimiter(p.ratePerSecond, p.burst, time.Duration(p.ttl)*time.Second)
 	c.mu.Unlock()
 
-	if oldFB != nil {
-		oldFB.Close()
+	if oldStatic != nil && oldStatic.fallback != nil {
+		oldStatic.fallback.Close()
+	}
+	if oldExternalFB != nil && oldExternalFB.limiter != nil {
+		oldExternalFB.limiter.Close()
 	}
 
 	c.reloadExternalRL(newCfg)
@@ -2114,8 +2157,7 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	c.accessLog.Store(newCfg.Logging.AccessLogEnabled())
 
 	// Recreate emitter if events config changed.
-	oldEmitter := c.emitter
-	c.emitter = events.NewEmitter(newCfg.Events, c.logger, c.metrics)
+	oldEmitter := c.emitter.Swap(events.NewEmitter(newCfg.Events, c.logger, c.metrics))
 	if oldEmitter != nil {
 		_ = oldEmitter.Close()
 	}
@@ -2231,14 +2273,17 @@ func (c *Chain) closeResources(redisClient redis.Client) error {
 	if ext := c.externalRL.Load(); ext != nil {
 		collect(ext.Close())
 	}
-	if c.fallback != nil {
-		c.fallback.Close()
+	if snap := c.staticRL.Load(); snap != nil && snap.fallback != nil {
+		snap.fallback.Close()
+	}
+	if fb := c.externalFallback.Load(); fb != nil && fb.limiter != nil {
+		fb.limiter.Close()
 	}
 	if c.globalBackstop != nil {
 		c.globalBackstop.Close()
 	}
-	if c.emitter != nil {
-		collect(c.emitter.Close())
+	if em := c.emitter.Load(); em != nil {
+		collect(em.Close())
 	}
 
 	return firstErr
