@@ -281,9 +281,19 @@ func (st *streamingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 // Proxy is a multi-protocol reverse proxy that transparently forwards
 // HTTP, gRPC, SSE, and WebSocket traffic to a backend service.
 type Proxy struct {
-	backendURL          *url.URL
-	httpProxy           *httputil.ReverseProxy
-	http2Transport      *http2.Transport
+	backendURL *url.URL
+	httpProxy  *httputil.ReverseProxy
+
+	// Backend transports — captured so Close can release their idle pools
+	// and (for QUIC) the underlying UDP socket. httpTransport / http2Transport
+	// have no Close (only CloseIdleConnections); httpProxy holds the
+	// chained RoundTripper which may be a streamingTransport wrapper.
+	httpTransport  *http.Transport
+	http2Transport *http2.Transport
+	http3Transport *http3.Transport
+	quicTransport  *quic.Transport
+	udpConn        *net.UDPConn
+
 	logger              *slog.Logger
 	backendTLSInsecure  bool
 	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
@@ -294,6 +304,15 @@ type Proxy struct {
 	wsIdleTimeout       time.Duration       // 0 = no idle timeout
 	allowedWSOrigins    map[string]struct{} // nil = allow all origins
 	cache               *cache.Store        // nil when response caching is disabled
+
+	// inflight tracks non-WebSocket request lifetime so Close can wait for
+	// drain. WebSocket sessions are excluded — they hijack the connection
+	// out of the http.Server stack and are unaffected by transport close.
+	// SSE / long streaming HTTP responses remain inside ServeHTTP and DO
+	// keep inflight alive; Close pairs the wait with a context deadline so
+	// pathologically long streams cannot block teardown forever.
+	inflight  sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -340,20 +359,23 @@ func New(
 		return nil, err
 	}
 
-	httpTransport, h2Transport, h3Transport := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure, p.denyPrivateNetworks)
+	ts := buildTransports(schemeHint, transportCfg, timeout, maxIdleConns, idleConnTimeout, p.backendTLSInsecure, p.denyPrivateNetworks)
 	wsDialTimeout, _ := config.ParseDuration(transportCfg.WebSocketDialTimeout, 10*time.Second)
 
 	// Wrap transports with streaming byte-counting when a body size limit is
 	// configured. This replaces httputil.ReverseProxy's default buffering with
 	// a streaming approach that applies back-pressure via io.Pipe semantics.
-	var h1RT http.RoundTripper = httpTransport
-	var h2RT http.RoundTripper = h2Transport
-	h3RT := h3Transport
+	var h1RT http.RoundTripper = ts.h1
+	var h2RT http.RoundTripper = ts.h2
+	var h3RT http.RoundTripper
+	if ts.h3 != nil {
+		h3RT = ts.h3
+	}
 	if p.maxRequestBodySize > 0 {
-		h1RT = &streamingTransport{inner: httpTransport, maxBytes: p.maxRequestBodySize}
-		h2RT = &streamingTransport{inner: h2Transport, maxBytes: p.maxRequestBodySize}
-		if h3Transport != nil {
-			h3RT = &streamingTransport{inner: h3Transport, maxBytes: p.maxRequestBodySize}
+		h1RT = &streamingTransport{inner: ts.h1, maxBytes: p.maxRequestBodySize}
+		h2RT = &streamingTransport{inner: ts.h2, maxBytes: p.maxRequestBodySize}
+		if ts.h3 != nil {
+			h3RT = &streamingTransport{inner: ts.h3, maxBytes: p.maxRequestBodySize}
 		}
 	}
 
@@ -361,7 +383,11 @@ func New(
 	rp := buildReverseProxy(target, defaultRT, h1RT, h2RT, h3RT, protoMode, logger)
 
 	p.httpProxy = rp
-	p.http2Transport = h2Transport
+	p.httpTransport = ts.h1
+	p.http2Transport = ts.h2
+	p.http3Transport = ts.h3
+	p.quicTransport = ts.quicT
+	p.udpConn = ts.udpConn
 	p.wsDialTimeout = wsDialTimeout
 
 	return p, nil
@@ -457,6 +483,18 @@ func probeBackendProtocol(
 	return h1
 }
 
+// transportSet is the full set of backend transport resources built for a
+// single Proxy. Held by the Proxy so that Close can release them. h3,
+// quicT, and udpConn are nil when HTTP/3 isn't applicable (cleartext
+// backend) or its UDP buffer sizing is unconfigured.
+type transportSet struct {
+	h1      *http.Transport
+	h2      *http2.Transport
+	h3      *http3.Transport
+	quicT   *quic.Transport
+	udpConn *net.UDPConn
+}
+
 func buildTransports(
 	targetScheme string,
 	cfg config.TransportConfig,
@@ -465,7 +503,7 @@ func buildTransports(
 	idleConnTimeout time.Duration,
 	tlsInsecure bool,
 	denyPrivateNetworks bool,
-) (*http.Transport, *http2.Transport, http.RoundTripper) {
+) transportSet {
 	dialTimeout, _ := config.ParseDuration(cfg.DialTimeout, 30*time.Second)
 	dialKeepAlive, _ := config.ParseDuration(cfg.DialKeepAlive, 30*time.Second)
 	tlsHandshakeTimeout, _ := config.ParseDuration(cfg.TLSHandshakeTimeout, 10*time.Second)
@@ -548,9 +586,9 @@ func buildTransports(
 		PingTimeout:     h2PingTimeout,
 	}
 
-	var h3 http.RoundTripper
+	ts := transportSet{h1: h1, h2: h2}
 	if !backendIsCleartext {
-		h3t := &http3.Transport{
+		ts.h3 = &http3.Transport{
 			TLSClientConfig: backendTLS,
 		}
 		if cfg.H3UDPReceiveBufferSize > 0 || cfg.H3UDPSendBufferSize > 0 {
@@ -562,20 +600,20 @@ func buildTransports(
 				if cfg.H3UDPSendBufferSize > 0 {
 					_ = udpConn.SetWriteBuffer(cfg.H3UDPSendBufferSize)
 				}
-				qt := &quic.Transport{Conn: udpConn}
-				h3t.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qCfg *quic.Config) (*quic.Conn, error) {
+				ts.udpConn = udpConn
+				ts.quicT = &quic.Transport{Conn: udpConn}
+				ts.h3.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qCfg *quic.Config) (*quic.Conn, error) {
 					udpAddr, err := net.ResolveUDPAddr("udp", addr)
 					if err != nil {
 						return nil, err
 					}
-					return qt.DialEarly(ctx, udpAddr, tlsCfg, qCfg)
+					return ts.quicT.DialEarly(ctx, udpAddr, tlsCfg, qCfg)
 				}
 			}
 		}
-		h3 = h3t
 	}
 
-	return h1, h2, h3
+	return ts
 }
 
 // setForwardingHeaders adds standard proxy forwarding headers (Host, Proto)
@@ -663,9 +701,15 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 // which counts bytes during streaming rather than buffering the entire body.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if IsWebSocketUpgrade(r) {
+		// WebSocket hijacks the underlying conn — the long-lived session
+		// no longer flows through this Proxy's transports. Tracking it
+		// in inflight would make Close block forever on idle WS sessions.
 		p.handleWebSocket(w, r)
 		return
 	}
+
+	p.inflight.Add(1)
+	defer p.inflight.Done()
 
 	// For gRPC, ensure TE: trailers is preserved (it's a hop-by-hop header
 	// that httputil.ReverseProxy would normally strip).
@@ -684,6 +728,49 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.httpProxy.ServeHTTP(w, r)
+}
+
+// Close drains in-flight non-WebSocket requests (up to the context
+// deadline) and then releases the backend transports. Idle TCP/H2
+// connections are released via CloseIdleConnections, which never
+// interrupts an active stream — so SSE and long-lived chunked responses
+// that finish before ctx.Done() complete normally. The QUIC transport
+// and its UDP socket ARE fully closed, which terminates any active
+// HTTP/3 streams remaining at ctx.Done(); callers that depend on
+// long-lived HTTP/3 streams should set a generous deadline.
+//
+// Idempotent. WebSocket sessions hijacked from this Proxy survive Close
+// because they own their underlying net.Conn directly.
+func (p *Proxy) Close(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		p.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Deadline hit — proceed to release transports regardless.
+	}
+
+	p.closeOnce.Do(func() {
+		if p.httpTransport != nil {
+			p.httpTransport.CloseIdleConnections()
+		}
+		if p.http2Transport != nil {
+			p.http2Transport.CloseIdleConnections()
+		}
+		if p.http3Transport != nil {
+			p.http3Transport.CloseIdleConnections()
+		}
+		if p.quicTransport != nil {
+			_ = p.quicTransport.Close()
+		}
+		if p.udpConn != nil {
+			_ = p.udpConn.Close()
+		}
+	})
+	return nil
 }
 
 // proxyWithCache wraps the upstream call with a CachingResponseWriter so that

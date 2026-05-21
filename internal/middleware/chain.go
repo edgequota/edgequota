@@ -153,6 +153,15 @@ func cryptoRandFloat64() float64 {
 	return float64(binary.BigEndian.Uint64(buf[:])>>11) / (1 << 53)
 }
 
+// defaultProxyCloseTimeout caps how long SwapProxy waits for the old
+// proxy's in-flight non-WebSocket requests to drain before forcibly
+// releasing its backend transports. Long-lived chunked/SSE streams
+// inside ServeHTTP are bounded by this value across a reload — five
+// minutes covers the vast majority of legitimate long-poll / SSE
+// sessions while preventing a hung backend from leaking transports
+// indefinitely.
+const defaultProxyCloseTimeout = 5 * time.Minute
+
 // Default recovery backoff configuration.
 var (
 	defaultRecoveryBackoffBase = time.Second
@@ -276,6 +285,11 @@ type Chain struct {
 	// package-level defaults at construction; tests override these on
 	// individual Chain instances to avoid data races with goroutines
 	// from other tests reading the same values.
+	// proxyCloseTimeout bounds how long SwapProxy waits for the old proxy
+	// to drain in-flight requests before releasing its transports.
+	// Defaults to defaultProxyCloseTimeout.
+	proxyCloseTimeout time.Duration
+
 	recoveryBackoffBase time.Duration
 	recoveryBackoffMax  time.Duration
 	backoffJitter       func(time.Duration) time.Duration
@@ -421,6 +435,7 @@ func NewChain(
 		metrics:             metrics,
 		ctx:                 ctx,
 		cancel:              cancel,
+		proxyCloseTimeout:   defaultProxyCloseTimeout,
 		recoveryBackoffBase: defaultRecoveryBackoffBase,
 		recoveryBackoffMax:  defaultRecoveryBackoffMax,
 		backoffJitter:       defaultBackoffJitter,
@@ -2239,10 +2254,33 @@ func (c *Chain) validateBackendURL(u *url.URL) error {
 	return proxy.ValidateBackendURL(u, c.urlPolicy.Load().(proxy.BackendURLPolicy))
 }
 
-// SwapProxy atomically replaces the downstream proxy handler.
-// Used for hot-reloading backend configuration changes.
-func (c *Chain) SwapProxy(next http.Handler) {
-	c.next.Store(&next)
+// SwapProxy atomically replaces the downstream proxy handler. The
+// previous proxy is released asynchronously: a background goroutine
+// waits for its in-flight non-WebSocket requests to drain (up to
+// c.proxyCloseTimeout) and then calls Close on its backend transports.
+// Hijacked WebSocket sessions on the old proxy are not tracked and
+// survive across the swap.
+//
+// Reload returns immediately — proxy teardown happens in the background.
+func (c *Chain) SwapProxy(next *proxy.Proxy) {
+	var handler http.Handler = next
+	oldHandlerPtr := c.next.Swap(&handler)
+	if oldHandlerPtr == nil {
+		return
+	}
+	oldProxy, ok := (*oldHandlerPtr).(*proxy.Proxy)
+	if !ok || oldProxy == nil {
+		return
+	}
+	timeout := c.proxyCloseTimeout
+	if timeout <= 0 {
+		timeout = defaultProxyCloseTimeout
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(c.ctx, timeout)
+		defer cancel()
+		_ = oldProxy.Close(ctx)
+	}()
 }
 
 func (c *Chain) Close() error {
