@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -452,6 +453,32 @@ func TestExternalClientClose(t *testing.T) {
 			done:        make(chan struct{}),
 		}
 		assert.NoError(t, c.Close())
+	})
+
+	t.Run("double close does not panic", func(t *testing.T) {
+		c := &ExternalClient{
+			maxBreakers: defaultMaxCircuitBreakers,
+			done:        make(chan struct{}),
+		}
+		assert.NoError(t, c.Close())
+		assert.NoError(t, c.Close())
+	})
+
+	t.Run("concurrent close does not panic", func(t *testing.T) {
+		c := &ExternalClient{
+			maxBreakers: defaultMaxCircuitBreakers,
+			done:        make(chan struct{}),
+		}
+		const n = 16
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for range n {
+			go func() {
+				defer wg.Done()
+				_ = c.Close()
+			}()
+		}
+		wg.Wait()
 	})
 }
 
