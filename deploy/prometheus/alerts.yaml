@@ -17,7 +17,7 @@ groups:
       - alert: EdgeQuotaHighErrorRate
         expr: |
           (
-            sum(rate(edgequota_requests_total{status_code=~"5.."}[5m]))
+            sum(rate(edgequota_requests_total{status_code="5xx"}[5m]))
             / sum(rate(edgequota_requests_total[5m]))
           ) > 0.05
         for: 5m
