@@ -180,7 +180,7 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 		PromRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "edgequota",
 			Name:      "requests_total",
-			Help:      "Total HTTP requests by method and status code.",
+			Help:      "Total HTTP requests by method and status code family (1xx/2xx/3xx/4xx/5xx/unknown).",
 		}, []string{"method", "status_code"}),
 		PromRequestDuration: factory.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "edgequota",

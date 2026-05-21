@@ -275,3 +275,20 @@ groups:
             Last config reload was {{ $value | humanizeDuration }} ago
             for {{ $labels.pod }}. This is informational — may be expected
             if config rarely changes.
+
+      # --- Goroutine / heap leaks ---
+
+      - alert: EdgeQuotaGoroutineGrowth
+        expr: deriv(go_goroutines[15m]) > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EdgeQuota goroutines growing on {{ $labels.pod }}"
+          description: >-
+            Goroutine count is growing at more than 1/sec, sustained over
+            30 minutes. Classic signature of a goroutine leak — e.g.
+            transports not closed on SwapProxy, recovery loops not
+            joined, or HTTP/2 ping goroutines left dangling. Pull a
+            /debug/pprof/goroutine?debug=2 from the affected pod to
+            identify the leaked stack.

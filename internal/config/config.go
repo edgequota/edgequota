@@ -1043,7 +1043,7 @@ func Defaults() *Config {
 		Admin: AdminConfig{
 			Address:      ":9090",
 			ReadTimeout:  "5s",
-			WriteTimeout: "10s",
+			WriteTimeout: "60s",
 			IdleTimeout:  "30s",
 		},
 		Backend: BackendConfig{
