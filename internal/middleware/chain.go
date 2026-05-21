@@ -2003,8 +2003,13 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 		oldFB.Close()
 	}
 
-	c.reloadAuth(prevCfg, newCfg)
 	c.reloadExternalRL(newCfg)
+	c.reloadAuth(prevCfg, newCfg)
+	// Keep the auth cache pointed at the (possibly rebuilt) cache client.
+	// reloadExternalRL closes and replaces c.cacheRedis when external RL is
+	// enabled, so authCacheRedis must be re-read regardless of whether the
+	// auth config itself changed.
+	c.authCacheRedis = c.cacheRedis
 
 	// Update URL policy (atomic — read from ServeHTTP without holding mu).
 	c.urlPolicy.Store(proxy.BackendURLPolicy{
@@ -2063,7 +2068,6 @@ func (c *Chain) reloadAuth(prevCfg, newCfg *config.Config) {
 	if oldAuth != nil {
 		_ = oldAuth.Close()
 	}
-	c.authCacheRedis = c.cacheRedis
 }
 
 // reloadExternalRL rebuilds the external rate-limit client if enabled.
