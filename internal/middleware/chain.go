@@ -221,8 +221,13 @@ type Chain struct {
 	authCacheRedis atomic.Pointer[redis.Client]
 
 	// responseCache is the CDN-style response cache store, backed by Redis.
-	// When nil, response caching is disabled.
-	responseCache      *cache.Store
+	// When nil, response caching is disabled. Read on every cacheable
+	// request and re-pointed by installResponseCache (NewChain + recovery
+	// loop), so an atomic.Pointer keeps the swap race-free.
+	responseCache atomic.Pointer[cache.Store]
+
+	// responseCacheRedis is only touched by installResponseCache (under
+	// c.mu) and Chain.Close (after cancel), so c.mu is sufficient.
 	responseCacheRedis redis.Client
 
 	// proxyRef holds a typed reference to the proxy for cache injection.
@@ -592,7 +597,7 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 	store.OnPurge = c.metrics.PromRespCachePurge.Inc
 	store.OnBodySize = c.metrics.PromRespCacheBodySize.Observe
 
-	c.responseCache = store
+	c.responseCache.Store(store)
 	if c.proxyRef != nil {
 		c.proxyRef.SetCache(store)
 	}
@@ -653,8 +658,11 @@ func (c *Chain) responseCacheRecoveryLoop(
 // from) the dedicated cache_redis and stores the result in c.cacheRedis;
 // every subsequent call returns that same client immediately.
 func (c *Chain) resolveCacheRedis(cfg *config.Config, logger *slog.Logger) redis.Client {
-	if c.cacheRedis != nil {
-		return c.cacheRedis
+	c.mu.RLock()
+	existing := c.cacheRedis
+	c.mu.RUnlock()
+	if existing != nil {
+		return existing
 	}
 
 	// Dedicated cache_redis configured — create a separate connection.
@@ -664,24 +672,25 @@ func (c *Chain) resolveCacheRedis(cfg *config.Config, logger *slog.Logger) redis
 			logger.Warn("dedicated cache redis unavailable, falling back to main redis",
 				"error", err)
 		} else {
+			c.mu.Lock()
 			c.cacheRedis = cacheClient
 			c.cacheRedisOwned = true
+			c.mu.Unlock()
 			logger.Info("dedicated cache redis connected",
 				"mode", cfg.CacheRedis.Mode,
 				"endpoints", cfg.CacheRedis.Endpoints)
-			return c.cacheRedis
+			return cacheClient
 		}
 	}
 
 	// Fall back to the main rate-limit Redis client. This is a borrowed
 	// reference; the limiter retains ownership and is responsible for Close.
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.limiter != nil {
 		c.cacheRedis = c.limiter.Client()
 		c.cacheRedisOwned = false
 	}
-	c.mu.RUnlock()
-
 	return c.cacheRedis
 }
 
@@ -2047,9 +2056,7 @@ func (c *Chain) RedisPinger() observability.Pinger {
 // ResponseCache returns the current response cache store, or nil if
 // response caching is disabled. Used by the admin PURGE endpoints.
 func (c *Chain) ResponseCache() *cache.Store {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.responseCache
+	return c.responseCache.Load()
 }
 
 // Close shuts down the middleware chain and releases all resources.
