@@ -134,7 +134,8 @@ type ExternalClient struct {
 	cbResetTimeout time.Duration
 
 	// done is closed by Close() to stop the background eviction goroutine.
-	done chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 
 	logger *slog.Logger
 
@@ -958,14 +959,8 @@ func (ec *ExternalClient) redis() redis.Client {
 // Close shuts down the external client and releases resources, including
 // the background circuit breaker eviction goroutine.
 func (ec *ExternalClient) Close() error {
-	// Stop the background eviction goroutine.
 	if ec.done != nil {
-		select {
-		case <-ec.done:
-			// Already closed.
-		default:
-			close(ec.done)
-		}
+		ec.closeOnce.Do(func() { close(ec.done) })
 	}
 
 	if ec.httpClient != nil {
