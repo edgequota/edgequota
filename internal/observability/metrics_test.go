@@ -210,3 +210,28 @@ func TestMetricsSnapshot(t *testing.T) {
 		assert.Equal(t, int64(1), snap.AuthDenied)
 	})
 }
+
+func TestStatusFamily(t *testing.T) {
+	cases := []struct {
+		code int
+		want string
+	}{
+		{0, "unknown"},
+		{99, "unknown"},
+		{100, "1xx"},
+		{199, "1xx"},
+		{200, "2xx"},
+		{299, "2xx"},
+		{300, "3xx"},
+		{399, "3xx"},
+		{400, "4xx"},
+		{499, "4xx"},
+		{500, "5xx"},
+		{599, "5xx"},
+		{600, "unknown"},
+		{-1, "unknown"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, StatusFamily(c.code), "code=%d", c.code)
+	}
+}

@@ -518,3 +518,29 @@ func (m *Metrics) SetTLSReloadTimestamp() {
 func (m *Metrics) SetMTLSCAReloadTimestamp() {
 	m.PromMTLSCALastReload.SetToCurrentTime()
 }
+
+// StatusFamily collapses an HTTP status code to its family label
+// ("1xx".."5xx"). Codes outside the standard 100-599 range are bucketed as
+// "unknown" so the label vector stays bounded even when an upstream returns
+// a garbage code.
+//
+// Bucketing here keeps the requests_total label cardinality at a small
+// constant: previously every raw status code seen since pod start was
+// retained in the *CounterVec, which grew without bound and contributed to
+// the inter-pod memory spread observed on long-running pods.
+func StatusFamily(code int) string {
+	switch {
+	case code >= 100 && code < 200:
+		return "1xx"
+	case code >= 200 && code < 300:
+		return "2xx"
+	case code >= 300 && code < 400:
+		return "3xx"
+	case code >= 400 && code < 500:
+		return "4xx"
+	case code >= 500 && code < 600:
+		return "5xx"
+	default:
+		return "unknown"
+	}
+}
