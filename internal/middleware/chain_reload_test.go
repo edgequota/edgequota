@@ -44,8 +44,8 @@ func TestChainReload_UpdatesRateLimitParams(t *testing.T) {
 	cfg := baseCfg()
 	chain := newTestChain(t, cfg)
 
-	assert.Equal(t, int64(50), chain.burst)
-	assert.Equal(t, int64(100), chain.average)
+	assert.Equal(t, int64(50), chain.staticRL.Load().burst)
+	assert.Equal(t, int64(100), chain.staticRL.Load().average)
 
 	// Reload with different params.
 	newCfg := baseCfg()
@@ -57,9 +57,10 @@ func TestChainReload_UpdatesRateLimitParams(t *testing.T) {
 	err := chain.Reload(newCfg)
 	require.NoError(t, err)
 
-	assert.Equal(t, int64(5), chain.burst)
-	assert.Equal(t, int64(10), chain.average)
-	assert.Equal(t, config.FailurePolicyFailClosed, chain.failurePolicy)
+	snap := chain.staticRL.Load()
+	assert.Equal(t, int64(5), snap.burst)
+	assert.Equal(t, int64(10), snap.average)
+	assert.Equal(t, config.FailurePolicyFailClosed, snap.failurePolicy)
 }
 
 func TestChainReload_UpdatesKeyStrategy(t *testing.T) {
@@ -103,7 +104,7 @@ func TestChainReload_MinTTLKnob(t *testing.T) {
 	chain := newTestChain(t, cfg)
 
 	// Default TTL for 100 req/s, 1s period should be 2.
-	assert.Equal(t, 2, chain.ttl)
+	assert.Equal(t, 2, chain.staticRL.Load().ttl)
 
 	// Reload with min_ttl = 30s.
 	newCfg := baseCfg()
@@ -112,5 +113,5 @@ func TestChainReload_MinTTLKnob(t *testing.T) {
 	err := chain.Reload(newCfg)
 	require.NoError(t, err)
 
-	assert.GreaterOrEqual(t, chain.ttl, 30, "TTL should be at least 30 with min_ttl=30s")
+	assert.GreaterOrEqual(t, chain.staticRL.Load().ttl, 30, "TTL should be at least 30 with min_ttl=30s")
 }

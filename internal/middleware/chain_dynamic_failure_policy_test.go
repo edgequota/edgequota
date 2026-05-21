@@ -286,11 +286,12 @@ func TestDynamicFailurePolicyOverride(t *testing.T) {
 // TestResolveFailurePolicy unit-tests the policy resolution logic directly.
 func TestResolveFailurePolicy(t *testing.T) {
 	makeChain := func(policy config.FailurePolicy, code int) *Chain {
-		return &Chain{
+		c := &Chain{logger: testLogger()}
+		c.staticRL.Store(&staticParams{
 			failurePolicy: policy,
 			failureCode:   code,
-			logger:        testLogger(),
-		}
+		})
+		return c
 	}
 
 	t.Run("nil extLimits returns static config", func(t *testing.T) {
