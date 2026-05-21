@@ -214,7 +214,11 @@ type Chain struct {
 	// authCacheRedis is the Redis client used to cache auth responses. It
 	// reuses cacheRedis when available, falling back to the main limiter client.
 	// Nil when no Redis is configured (auth caching silently disabled).
-	authCacheRedis redis.Client
+	//
+	// Stored as atomic.Pointer because the auth cache is read on every
+	// authenticated request and written by Reload — without atomicity those
+	// can race and tear the interface header, causing a nil-deref panic.
+	authCacheRedis atomic.Pointer[redis.Client]
 
 	// responseCache is the CDN-style response cache store, backed by Redis.
 	// When nil, response caching is disabled.
@@ -484,10 +488,11 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("auth client: %w", authErr)
 		}
 		c.authClient.Store(authClient)
-		c.authCacheRedis = c.resolveCacheRedis(cfg, logger)
-		if c.authCacheRedis != nil {
+		authCache := c.resolveCacheRedis(cfg, logger)
+		c.storeAuthCacheRedis(authCache)
+		if authCache != nil {
 			logger.Info("authentication enabled with response caching",
-				"cache_backend", cacheBackendName(c.authCacheRedis))
+				"cache_backend", cacheBackendName(authCache))
 		} else {
 			logger.Info("authentication enabled")
 		}
@@ -673,6 +678,30 @@ func (c *Chain) releaseCacheRedis() error {
 	return nil
 }
 
+// loadAuthCacheRedis atomically reads the auth-cache redis client. Returns
+// nil when auth caching is disabled or temporarily released across a
+// reload.
+func (c *Chain) loadAuthCacheRedis() redis.Client {
+	ptr := c.authCacheRedis.Load()
+	if ptr == nil {
+		return nil
+	}
+	return *ptr
+}
+
+// storeAuthCacheRedis atomically replaces the auth-cache redis client.
+// Pass nil to clear (auth caching becomes a no-op until a fresh client
+// is stored). The Chain does not own this client — it is either an
+// alias to a dedicated cache_redis or to the limiter's client, both of
+// which are closed by their owners.
+func (c *Chain) storeAuthCacheRedis(client redis.Client) {
+	if client == nil {
+		c.authCacheRedis.Store(nil)
+		return
+	}
+	c.authCacheRedis.Store(&client)
+}
+
 func cacheBackendName(c redis.Client) string {
 	if c != nil {
 		return "redis"
@@ -730,7 +759,8 @@ func authCacheKey(req *auth.CheckRequest) string {
 // Returns nil on cache miss or when Redis is unavailable.
 // When tracingLevel is "full", the Redis GET is wrapped in an OTel span.
 func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckResponse {
-	if c.authCacheRedis == nil {
+	client := c.loadAuthCacheRedis()
+	if client == nil {
 		return nil
 	}
 	if c.tracingLevel == config.TracingLevelFull {
@@ -741,7 +771,7 @@ func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckRes
 		)
 		defer span.End()
 	}
-	data, err := c.authCacheRedis.Get(ctx, key).Bytes()
+	data, err := client.Get(ctx, key).Bytes()
 	if err != nil {
 		return nil
 	}
@@ -756,7 +786,8 @@ func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckRes
 // No-ops when Redis is unavailable or TTL is zero.
 // When tracingLevel is "full", the Redis SET is wrapped in an OTel span.
 func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.CheckResponse, ttl time.Duration) {
-	if c.authCacheRedis == nil || ttl <= 0 {
+	client := c.loadAuthCacheRedis()
+	if client == nil || ttl <= 0 {
 		return
 	}
 	data, err := json.Marshal(resp)
@@ -771,26 +802,27 @@ func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.Check
 		)
 		defer span.End()
 	}
-	_ = c.authCacheRedis.Set(ctx, key, data, ttl).Err()
+	_ = client.Set(ctx, key, data, ttl).Err()
 
 	// Index by surrogate-key tags for targeted purge.
 	for _, tag := range resp.CacheTags {
-		_ = c.authCacheRedis.SAdd(ctx, authCacheTagPrefix+tag, key).Err()
+		_ = client.SAdd(ctx, authCacheTagPrefix+tag, key).Err()
 	}
 }
 
 // DeleteAuthByTag evicts all cached auth decisions tagged with the given tag.
 // Returns the number of entries deleted.
 func (c *Chain) DeleteAuthByTag(ctx context.Context, tag string) int {
-	if c.authCacheRedis == nil {
+	client := c.loadAuthCacheRedis()
+	if client == nil {
 		return 0
 	}
-	members, err := c.authCacheRedis.SMembers(ctx, authCacheTagPrefix+tag).Result()
+	members, err := client.SMembers(ctx, authCacheTagPrefix+tag).Result()
 	if err != nil || len(members) == 0 {
 		return 0
 	}
-	n, _ := c.authCacheRedis.Del(ctx, members...).Result()
-	_ = c.authCacheRedis.Del(ctx, authCacheTagPrefix+tag)
+	n, _ := client.Del(ctx, members...).Result()
+	_ = client.Del(ctx, authCacheTagPrefix+tag)
 	return int(n)
 }
 
@@ -1914,15 +1946,22 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		_ = old.Close()
 	}
 
-	// When the external RL client uses the main Redis for caching (no
-	// dedicated cache_redis), inject the recovered client so ext RL caching
-	// starts working even if Redis was unavailable at startup.
-	c.mu.RLock()
-	cacheStillUnset := c.cacheRedis == nil
-	c.mu.RUnlock()
-	if cacheStillUnset {
+	// If the cache client is a borrowed alias to the limiter's redis (no
+	// dedicated cache_redis), the swap above just closed the alias's
+	// underlying connection. Re-point cacheRedis, authCacheRedis, and the
+	// external RL client at the fresh limiter.Client() so cache reads
+	// survive the recovery.
+	newClient := limiter.Client()
+	c.mu.Lock()
+	rebindBorrowed := !c.cacheRedisOwned
+	if rebindBorrowed {
+		c.cacheRedis = newClient
+	}
+	c.mu.Unlock()
+	if rebindBorrowed {
+		c.storeAuthCacheRedis(newClient)
 		if ext := c.externalRL.Load(); ext != nil {
-			ext.SetRedisClient(limiter.Client())
+			ext.SetRedisClient(newClient)
 			c.logger.Info("external RL cache redis updated via main recovery")
 		}
 	}
@@ -2047,8 +2086,12 @@ func (c *Chain) Reload(newCfg *config.Config) error {
 	// Keep the auth cache pointed at the (possibly rebuilt) cache client.
 	// reloadExternalRL closes and replaces c.cacheRedis when external RL is
 	// enabled, so authCacheRedis must be re-read regardless of whether the
-	// auth config itself changed.
-	c.authCacheRedis = c.cacheRedis
+	// auth config itself changed. Atomic store: every authenticated request
+	// reads authCacheRedis on the hot path.
+	c.mu.RLock()
+	cur := c.cacheRedis
+	c.mu.RUnlock()
+	c.storeAuthCacheRedis(cur)
 
 	// Update URL policy (atomic — read from ServeHTTP without holding mu).
 	c.urlPolicy.Store(proxy.BackendURLPolicy{

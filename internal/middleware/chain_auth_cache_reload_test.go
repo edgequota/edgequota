@@ -55,7 +55,7 @@ func TestReload_AuthCacheTracksFreshCacheClient(t *testing.T) {
 	require.NoError(t, err)
 	defer chain.Close()
 
-	require.NotNil(t, chain.authCacheRedis, "auth cache redis must be initialized")
+	require.NotNil(t, chain.loadAuthCacheRedis(), "auth cache redis must be initialized")
 	require.NotNil(t, chain.cacheRedis, "cache redis must be initialized when external RL is enabled")
 
 	t.Run("auth config unchanged: authCacheRedis still tracks fresh cacheRedis after reload", func(t *testing.T) {
@@ -65,7 +65,7 @@ func TestReload_AuthCacheTracksFreshCacheClient(t *testing.T) {
 		newCfg := *cfg
 		require.NoError(t, chain.Reload(&newCfg))
 
-		assert.Same(t, chain.cacheRedis, chain.authCacheRedis,
+		assert.Same(t, chain.cacheRedis, chain.loadAuthCacheRedis(),
 			"authCacheRedis must equal cacheRedis (the fresh client) after reload")
 		require.NoError(t, chain.cacheRedis.Ping(context.Background()).Err(),
 			"cacheRedis must be a live client, not the closed one")
@@ -81,7 +81,7 @@ func TestReload_AuthCacheTracksFreshCacheClient(t *testing.T) {
 		newCfg.Auth.HTTP.URL = newAuthSrv.URL
 		require.NoError(t, chain.Reload(&newCfg))
 
-		assert.Same(t, chain.cacheRedis, chain.authCacheRedis)
+		assert.Same(t, chain.cacheRedis, chain.loadAuthCacheRedis())
 		require.NoError(t, chain.cacheRedis.Ping(context.Background()).Err())
 	})
 }
