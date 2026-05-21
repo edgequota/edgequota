@@ -535,7 +535,13 @@ func (c *Chain) initResponseCache(cfg *config.Config, logger *slog.Logger) {
 }
 
 func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, client redis.Client) {
+	c.mu.Lock()
+	old := c.responseCacheRedis
 	c.responseCacheRedis = client
+	c.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 
 	maxBody := cfg.Cache.ParseMaxBodySize()
 	store := cache.NewStore(client,
