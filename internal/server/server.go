@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"sync/atomic"
 	"time"
@@ -434,6 +435,14 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 
 	adminMux.Handle("/v1/config", configHandler)
 	adminMux.Handle("/v1/stats", statsHandler)
+
+	// pprof endpoints for live heap/goroutine/profile diagnosis. The admin
+	// listener is internal and already gated by adminRateLimiter below.
+	adminMux.HandleFunc("/debug/pprof/", pprof.Index)
+	adminMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	adminMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	adminMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	adminMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	// Cache purge routes — generated strict-server handler.
 	ah := &adminHandler{
