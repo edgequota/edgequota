@@ -202,10 +202,14 @@ type Chain struct {
 	limiter        *ratelimit.Limiter
 	redisUnhealthy bool
 
-	// cacheRedis is a dedicated Redis client for caching external rate limit
-	// responses. When cache_redis is configured, this is a separate connection;
-	// otherwise it is nil and the main rate-limit Redis client is reused.
-	cacheRedis redis.Client
+	// cacheRedis is the Redis client used for caching external rate limit
+	// responses. It is either a dedicated client (when cache_redis is
+	// configured) or an alias to the main limiter's client (otherwise).
+	// cacheRedisOwned distinguishes the two — only owned clients may be
+	// Closed by the cache code paths; the alias must not be closed because
+	// the limiter still owns it.
+	cacheRedis      redis.Client
+	cacheRedisOwned bool
 
 	// authCacheRedis is the Redis client used to cache auth responses. It
 	// reuses cacheRedis when available, falling back to the main limiter client.
@@ -494,10 +498,7 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 
 		extClient, extErr := ratelimit.NewExternalClient(cfg.RateLimit.External, cacheClient, logger, c.tracingLevel)
 		if extErr != nil {
-			if c.cacheRedis != nil {
-				_ = c.cacheRedis.Close()
-				c.cacheRedis = nil
-			}
+			_ = c.releaseCacheRedis()
 			return fmt.Errorf("external ratelimit client: %w", extErr)
 		}
 		extClient.SetMetricHooks(
@@ -608,8 +609,11 @@ func (c *Chain) responseCacheRecoveryLoop(
 
 // resolveCacheRedis returns a Redis client for caching external rate limit
 // responses. If cache_redis is explicitly configured, a dedicated client is
-// created and stored in c.cacheRedis so it can be closed separately. Otherwise,
-// the main rate-limit Redis client is reused.
+// created and stored in c.cacheRedis with cacheRedisOwned=true so it can be
+// closed separately. Otherwise, the main rate-limit Redis client is aliased
+// with cacheRedisOwned=false — the alias must NOT be closed via c.cacheRedis,
+// because the limiter still owns it.
+//
 // resolveCacheRedis is idempotent: the first call connects to (or falls back
 // from) the dedicated cache_redis and stores the result in c.cacheRedis;
 // every subsequent call returns that same client immediately.
@@ -626,6 +630,7 @@ func (c *Chain) resolveCacheRedis(cfg *config.Config, logger *slog.Logger) redis
 				"error", err)
 		} else {
 			c.cacheRedis = cacheClient
+			c.cacheRedisOwned = true
 			logger.Info("dedicated cache redis connected",
 				"mode", cfg.CacheRedis.Mode,
 				"endpoints", cfg.CacheRedis.Endpoints)
@@ -633,14 +638,39 @@ func (c *Chain) resolveCacheRedis(cfg *config.Config, logger *slog.Logger) redis
 		}
 	}
 
-	// Fall back to the main rate-limit Redis client.
+	// Fall back to the main rate-limit Redis client. This is a borrowed
+	// reference; the limiter retains ownership and is responsible for Close.
 	c.mu.RLock()
 	if c.limiter != nil {
 		c.cacheRedis = c.limiter.Client()
+		c.cacheRedisOwned = false
 	}
 	c.mu.RUnlock()
 
 	return c.cacheRedis
+}
+
+// releaseCacheRedis closes c.cacheRedis if and only if it is an owned
+// dedicated client, then clears the pointer so resolveCacheRedis can
+// re-establish it. Calling this on a borrowed alias is a no-op apart
+// from clearing the pointer — the limiter retains ownership of the
+// underlying client and is responsible for its Close.
+//
+// The pointer swap is done under c.mu to be race-free against
+// recoveryInstall reading c.cacheRedis. The Close call itself is done
+// outside the lock to avoid holding mu across a network round-trip.
+func (c *Chain) releaseCacheRedis() error {
+	c.mu.Lock()
+	owned := c.cacheRedisOwned
+	client := c.cacheRedis
+	c.cacheRedis = nil
+	c.cacheRedisOwned = false
+	c.mu.Unlock()
+
+	if owned && client != nil {
+		return client.Close()
+	}
+	return nil
 }
 
 func cacheBackendName(c redis.Client) string {
@@ -1887,7 +1917,10 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 	// When the external RL client uses the main Redis for caching (no
 	// dedicated cache_redis), inject the recovered client so ext RL caching
 	// starts working even if Redis was unavailable at startup.
-	if c.cacheRedis == nil {
+	c.mu.RLock()
+	cacheStillUnset := c.cacheRedis == nil
+	c.mu.RUnlock()
+	if cacheStillUnset {
 		if ext := c.externalRL.Load(); ext != nil {
 			ext.SetRedisClient(limiter.Client())
 			c.logger.Info("external RL cache redis updated via main recovery")
@@ -2082,14 +2115,11 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 		return
 	}
 
-	// Close the previous dedicated cache Redis client (if any) before
-	// creating a new one. This prevents connection leaks across reloads.
-	// The dedicated client is only set when cache_redis is explicitly
-	// configured, so closing it does not affect the main limiter's client.
-	if c.cacheRedis != nil {
-		_ = c.cacheRedis.Close()
-		c.cacheRedis = nil
-	}
+	// Release the previous cache client before re-resolving. releaseCacheRedis
+	// only Closes when the client was owned (dedicated cache_redis); when it
+	// was a borrowed alias to the limiter's client the underlying connection
+	// stays alive — the limiter retains ownership.
+	_ = c.releaseCacheRedis()
 
 	cacheClient := c.resolveCacheRedis(newCfg, c.logger)
 	newExt, extErr := ratelimit.NewExternalClient(newCfg.RateLimit.External, cacheClient, c.logger, c.tracingLevel)
@@ -2145,9 +2175,10 @@ func (c *Chain) closeResources(redisClient redis.Client) error {
 	if redisClient != nil {
 		collect(redisClient.Close())
 	}
-	if c.cacheRedis != nil {
-		collect(c.cacheRedis.Close())
-	}
+	// releaseCacheRedis is a no-op when the cache client is a borrowed
+	// alias to the limiter — that connection is already closed via
+	// redisClient above.
+	collect(c.releaseCacheRedis())
 	if c.responseCacheRedis != nil {
 		collect(c.responseCacheRedis.Close())
 	}
