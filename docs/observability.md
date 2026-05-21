@@ -19,7 +19,7 @@ Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exp
 | `edgequota_auth_errors_total` | Auth service call errors | Auth service timeout, connection error, or non-HTTP error |
 | `edgequota_auth_denied_total` | Requests denied by auth service | Auth service returns non-200 status |
 | `edgequota_key_extract_errors_total` | Key extraction failures | Missing required header, malformed remote address |
-| `edgequota_requests_total` | Total HTTP requests | Labels: `method`, `status_code`. Split from histogram to avoid bucket cardinality. |
+| `edgequota_requests_total` | Total HTTP requests | Labels: `method`, `status_code` (family-bucketed: `1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`unknown`). Bucketing keeps the series count bounded over long pod lifetimes. |
 | `edgequota_tenant_requests_allowed_total` | Per-tenant allowed requests | Label: `tenant`. Capped at `max_tenant_labels`; excess tenants aggregated under `__overflow__`. |
 | `edgequota_tenant_requests_limited_total` | Per-tenant rate-limited requests | Label: `tenant`. Same cardinality cap as above. |
 | `edgequota_tenant_label_overflow_total` | Tenant label cap exceeded | A request's tenant was bucketed under `__overflow__` |

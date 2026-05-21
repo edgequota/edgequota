@@ -2557,12 +2557,53 @@
       ]
     },
     {
+      "datasource": {
+        "uid": "${datasource}"
+      },
+      "description": "Go heap in-use vs container working-set memory. A large flat delta between this and the Memory (Working Set) panel above indicates unmanaged memory (TLS session caches, idle TCP buffers, QUIC state) — useful for spotting transport / connection pool leaks across pods of different ages.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "decbytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 129
+      },
+      "id": 200,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "title": "Heap In-Use",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "uid": "${datasource}"
+          },
+          "expr": "go_memstats_heap_inuse_bytes{cluster=~\"$cluster\",namespace=\"$namespace\",job=~\"$job\",pod=~\"$pod\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 129
+        "y": 137
       },
       "id": 90,
       "title": "Config & TLS Reloads",
@@ -2598,7 +2639,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 130
+        "y": 138
       },
       "id": 91,
       "options": {
@@ -2652,7 +2693,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 130
+        "y": 138
       },
       "id": 92,
       "options": {
@@ -2706,7 +2747,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 130
+        "y": 138
       },
       "id": 93,
       "options": {
@@ -2759,7 +2800,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 134
+        "y": 142
       },
       "id": 94,
       "options": {

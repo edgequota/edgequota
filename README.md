@@ -500,7 +500,7 @@ All protocols are served on a single port (`:8080` by default).
 | `edgequota_auth_errors_total` | Counter | Auth service call errors |
 | `edgequota_auth_denied_total` | Counter | Requests denied by auth service |
 | `edgequota_key_extract_errors_total` | Counter | Key extraction failures |
-| `edgequota_requests_total` | Counter | Total HTTP requests by method and status code |
+| `edgequota_requests_total` | Counter | Total HTTP requests by method and status code family (`1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`unknown`) |
 | `edgequota_request_duration_seconds` | Histogram | End-to-end request latency |
 
 ### Health Probes (`:9090`)
