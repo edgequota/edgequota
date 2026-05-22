@@ -182,7 +182,8 @@ func (l *Limiter) Allow(ctx context.Context, key string) (*Result, error) {
 
 	if l.traceRedis {
 		var span oteltrace.Span
-		ctx, span = limiterTracer.Start(ctx, "edgequota.redis.ratelimit",
+		ctx, span = limiterTracer.Start(
+			ctx, "edgequota.redis.ratelimit",
 			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
 			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
 		)
@@ -216,7 +217,8 @@ func (l *Limiter) AllowWithOverrides(ctx context.Context, key string, ratePerSec
 
 	if l.traceRedis {
 		var span oteltrace.Span
-		ctx, span = limiterTracer.Start(ctx, "edgequota.redis.ratelimit",
+		ctx, span = limiterTracer.Start(
+			ctx, "edgequota.redis.ratelimit",
 			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
 			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
 		)

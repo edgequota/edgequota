@@ -195,7 +195,8 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	//     which the chain's child spans (auth, external_rl, proxy, redis)
 	//     automatically nest under.
 	// otelhttp uses the global TextMapPropagator registered by InitTracing.
-	tracedChain := otelhttp.NewHandler(chain, "edgequota.request",
+	tracedChain := otelhttp.NewHandler(
+		chain, "edgequota.request",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			return "edgequota.request"
 		}),
@@ -270,7 +271,8 @@ func buildMTLSServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	readTimeout, _ := config.ParseDuration(cfg.Server.ReadTimeout, 30*time.Second)
 	idleTimeout, _ := config.ParseDuration(cfg.Server.IdleTimeout, 120*time.Second)
 
-	tracedChain := otelhttp.NewHandler(chain, "edgequota.request",
+	tracedChain := otelhttp.NewHandler(
+		chain, "edgequota.request",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			return "edgequota.request"
 		}),

@@ -13,7 +13,8 @@ func buildAndLoadImage() {
 	// Build EdgeQuota image.
 	info("Building EdgeQuota Docker image...")
 
-	if err := runStream("docker", "build",
+	if err := runStream(
+		"docker", "build",
 		"-t", imageName,
 		"-f", filepath.Join(projectDir, "Dockerfile"),
 		"--build-arg", "VERSION=e2e",
@@ -26,7 +27,8 @@ func buildAndLoadImage() {
 	info("Building testbackend Docker image...")
 
 	testbackendDir := filepath.Join(getE2EDir(), "testbackend")
-	if err := runStream("docker", "build",
+	if err := runStream(
+		"docker", "build",
 		"-t", testbackendImageName,
 		"-f", filepath.Join(testbackendDir, "Dockerfile"),
 		testbackendDir,
@@ -38,7 +40,8 @@ func buildAndLoadImage() {
 	info("Building mockextrl Docker image...")
 
 	mockextrlDir := filepath.Join(getE2EDir(), "mockextrl")
-	if err := runStream("docker", "build",
+	if err := runStream(
+		"docker", "build",
 		"-t", mockextrlImageName,
 		"-f", filepath.Join(mockextrlDir, "Dockerfile"),
 		mockextrlDir,
