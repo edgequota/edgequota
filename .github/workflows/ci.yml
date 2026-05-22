@@ -57,7 +57,11 @@ jobs:
           cache: true
 
       - name: Run tests with race detector
-        run: go test -count=1 -race -coverprofile=coverage.out -timeout=120s $(go list ./... | grep -v '/api/gen/' | grep -v '/cmd/')
+        # 300s covers the middleware package under -race on GH-hosted
+        # runners (~50-55s locally, ~2x slower on CI). The concurrent
+        # ServeHTTP/Reload stress test alone takes ~5s and the redis
+        # recovery suite waits on backoff.
+        run: go test -count=1 -race -coverprofile=coverage.out -timeout=300s $(go list ./... | grep -v '/api/gen/' | grep -v '/cmd/')
 
       - name: Check coverage threshold (80%)
         run: |

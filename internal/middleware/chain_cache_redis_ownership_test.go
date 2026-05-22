@@ -56,7 +56,7 @@ func TestReload_BorrowedCacheRedisSurvivesExternalRLReload(t *testing.T) {
 	chain.mu.RUnlock()
 
 	// Reload triggers reloadExternalRL → releaseCacheRedis. The previous
-	// behaviour closed limiterClientBefore here. The current behaviour must
+	// behavior closed limiterClientBefore here. The current behavior must
 	// keep it alive.
 	require.NoError(t, chain.Reload(cfg))
 
