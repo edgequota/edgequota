@@ -600,7 +600,8 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 	}
 
 	maxBody := cfg.Cache.ParseMaxBodySize()
-	store := cache.NewStore(client,
+	store := cache.NewStore(
+		client,
 		cache.WithMaxBodySize(maxBody),
 		cache.WithLogger(logger),
 	)
@@ -819,7 +820,8 @@ func (c *Chain) getAuthFromCache(ctx context.Context, key string) *auth.CheckRes
 	}
 	if c.tracingLevel == config.TracingLevelFull {
 		var span oteltrace.Span
-		ctx, span = redisTracer.Start(ctx, "edgequota.redis.auth_cache_get",
+		ctx, span = redisTracer.Start(
+			ctx, "edgequota.redis.auth_cache_get",
 			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
 			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
 		)
@@ -850,7 +852,8 @@ func (c *Chain) setAuthInCache(ctx context.Context, key string, resp *auth.Check
 	}
 	if c.tracingLevel == config.TracingLevelFull {
 		var span oteltrace.Span
-		ctx, span = redisTracer.Start(ctx, "edgequota.redis.auth_cache_set",
+		ctx, span = redisTracer.Start(
+			ctx, "edgequota.redis.auth_cache_set",
 			oteltrace.WithSpanKind(oteltrace.SpanKindClient),
 			oteltrace.WithAttributes(attribute.String("db.system", "redis")),
 		)
@@ -981,7 +984,8 @@ func (c *Chain) emitAccessLog(r *http.Request, sw *statusWriter, originalHost, r
 	if p := proxy.BackendProtocolFromContext(r.Context()); p != "" {
 		resolvedBackendProto = p
 	}
-	c.logger.Info("access",
+	c.logger.Info(
+		"access",
 		"method", r.Method,
 		"host", originalHost,
 		"path", r.URL.Path,
@@ -1411,13 +1415,15 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 	ttl := resp.ResolveCacheTTL()
 	switch {
 	case ttl > 0:
-		c.logger.Debug("auth response cached",
+		c.logger.Debug(
+			"auth response cached",
 			"ttl", ttl.String(),
 			"source", resp.CacheTTLSource,
 		)
 		c.setAuthInCache(r.Context(), cacheKey, resp, ttl)
 	case resp.CacheTTLSource != "":
-		c.logger.Debug("auth response not cached",
+		c.logger.Debug(
+			"auth response not cached",
 			"source", resp.CacheTTLSource,
 		)
 	}

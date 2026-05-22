@@ -341,7 +341,8 @@ func buildExternalRLTransport(lvl config.TracingLevel) http.RoundTripper {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if lvl == config.TracingLevelExternal || lvl == config.TracingLevelFull {
-		return otelhttp.NewTransport(base,
+		return otelhttp.NewTransport(
+			base,
 			otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
 				return "edgequota.external_rl.http"
 			}),
@@ -419,7 +420,8 @@ func NewExternalClient(cfg config.ExternalRLConfig, redisClient redis.Client, lo
 			creds = insecure.NewCredentials()
 		}
 
-		conn, dialErr := grpc.NewClient(cfg.GRPC.Address,
+		conn, dialErr := grpc.NewClient(
+			cfg.GRPC.Address,
 			grpc.WithTransportCredentials(creds),
 			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024)), // 64 KiB — bound response size from external service.

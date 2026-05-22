@@ -279,7 +279,8 @@ func NewClient(cfg config.AuthConfig, tracingLevel ...config.TracingLevel) (*Cli
 		lvl = tracingLevel[0]
 	}
 	if lvl == config.TracingLevelExternal || lvl == config.TracingLevelFull {
-		baseTransport = otelhttp.NewTransport(baseTransport,
+		baseTransport = otelhttp.NewTransport(
+			baseTransport,
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return "edgequota.auth.http"
 			}),
@@ -328,7 +329,8 @@ func NewClient(cfg config.AuthConfig, tracingLevel ...config.TracingLevel) (*Cli
 			creds = insecure.NewCredentials()
 		}
 
-		conn, dialErr := grpc.NewClient(cfg.GRPC.Address,
+		conn, dialErr := grpc.NewClient(
+			cfg.GRPC.Address,
 			grpc.WithTransportCredentials(creds),
 			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024)), // 64 KiB — bound response size from auth service.

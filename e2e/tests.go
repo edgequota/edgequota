@@ -961,7 +961,8 @@ func doGRPCEchoCall(addr, message string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(addr,
+	conn, err := grpc.NewClient(
+		addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(jsonCodec{})),
 	)

@@ -18,7 +18,8 @@ func terraformApply() {
 
 	info("Applying Terraform configuration (Redis + EdgeQuota instances)...")
 
-	if err := streamInDir(tfDir, "terraform", "apply",
+	if err := streamInDir(
+		tfDir, "terraform", "apply",
 		"-auto-approve",
 		"-var", "namespace="+namespace,
 		"-var", "edgequota_image="+imageName,
@@ -40,7 +41,8 @@ func terraformDestroy() {
 
 	info("Destroying Terraform infrastructure...")
 
-	if err := streamInDir(tfDir, "terraform", "destroy",
+	if err := streamInDir(
+		tfDir, "terraform", "destroy",
 		"-auto-approve",
 		"-var", "namespace="+namespace,
 		"-var", "edgequota_image="+imageName,

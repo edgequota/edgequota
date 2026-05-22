@@ -19,7 +19,8 @@ func ensureMinikube() {
 
 	info("Starting minikube cluster (qemu2 + socket_vmnet)...")
 
-	if err := runStream("minikube", "start",
+	if err := runStream(
+		"minikube", "start",
 		"--cpus=4",
 		"--memory=8192",
 		"--driver=qemu2",
