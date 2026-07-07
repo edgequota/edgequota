@@ -31,7 +31,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // Server is the main EdgeQuota server.
@@ -204,15 +203,12 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		otelhttp.WithFilter(skipCORSPreflight),
 	)
 
-	// When TLS is enabled, Go's native HTTP/2 (via NextProtos in tls.Config)
-	// handles h2 negotiation. h2c.NewHandler is only needed for cleartext
-	// HTTP/2 upgrades (e.g. gRPC without TLS).
-	var mainHandler http.Handler
-	if cfg.Server.TLS.Enabled {
-		mainHandler = tracedChain
-	} else {
-		mainHandler = h2c.NewHandler(tracedChain, &http2.Server{})
-	}
+	// When TLS is enabled, HTTP/2 is negotiated via ALPN (http2.ConfigureServer
+	// in Run + NextProtos in the tls.Config). For the cleartext listener,
+	// unencrypted HTTP/2 (h2c, e.g. gRPC without TLS) is enabled via the
+	// server's Protocols field below — the Go 1.24+ replacement for the
+	// deprecated h2c.NewHandler.
+	mainHandler := tracedChain
 
 	var h3srv *http3.Server
 	if cfg.Server.TLS.HTTP3Enabled {
@@ -259,6 +255,16 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		BaseContext: func(_ net.Listener) context.Context {
 			return context.Background()
 		},
+	}
+
+	if !cfg.Server.TLS.Enabled {
+		// Cleartext listener: enable HTTP/1.1 + unencrypted HTTP/2 (h2c) so
+		// gRPC / HTTP2-without-TLS clients work. Native replacement for the
+		// deprecated h2c.NewHandler wrapper.
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		srv.Protocols = protocols
 	}
 
 	return srv, h3srv
