@@ -94,6 +94,17 @@ func TestMetricsIncAuthErrors(t *testing.T) {
 	})
 }
 
+func TestMetricsIncAuthCanceled(t *testing.T) {
+	t.Run("increments auth canceled counter without touching auth errors", func(t *testing.T) {
+		m := NewMetrics(prometheus.NewRegistry(), 0)
+		m.IncAuthCanceled()
+
+		snap := m.Snapshot()
+		assert.Equal(t, int64(1), snap.AuthCanceled)
+		assert.Equal(t, int64(0), snap.AuthErrors)
+	})
+}
+
 func TestMetricsIncAuthDenied(t *testing.T) {
 	t.Run("increments auth denied counter", func(t *testing.T) {
 		m := NewMetrics(prometheus.NewRegistry(), 0)

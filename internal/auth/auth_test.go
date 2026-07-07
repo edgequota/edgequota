@@ -12,6 +12,8 @@ import (
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestNewClient(t *testing.T) {
@@ -37,6 +39,78 @@ func TestNewClient(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "5s", c.timeout.String())
 		require.NoError(t, c.Close())
+	})
+}
+
+func TestIsCanceled(t *testing.T) {
+	t.Run("nil is not a cancellation", func(t *testing.T) {
+		assert.False(t, IsCanceled(nil))
+	})
+
+	t.Run("context.Canceled is a cancellation", func(t *testing.T) {
+		assert.True(t, IsCanceled(context.Canceled))
+		assert.True(t, IsCanceled(fmt.Errorf("auth http request: %w", context.Canceled)))
+	})
+
+	t.Run("grpc codes.Canceled is a cancellation", func(t *testing.T) {
+		err := status.Error(codes.Canceled, "context canceled")
+		assert.True(t, IsCanceled(err))
+		assert.True(t, IsCanceled(fmt.Errorf("auth grpc check: %w", err)))
+	})
+
+	t.Run("timeouts are NOT cancellations", func(t *testing.T) {
+		assert.False(t, IsCanceled(context.DeadlineExceeded))
+		assert.False(t, IsCanceled(status.Error(codes.DeadlineExceeded, "deadline exceeded")))
+	})
+
+	t.Run("real service errors are NOT cancellations", func(t *testing.T) {
+		assert.False(t, IsCanceled(status.Error(codes.Unavailable, "connection refused")))
+		assert.False(t, IsCanceled(fmt.Errorf("dial tcp: connection refused")))
+	})
+}
+
+func TestCheckCircuitBreaker(t *testing.T) {
+	t.Run("real failures trip the breaker then short-circuit", func(t *testing.T) {
+		// A server we immediately close, so every call is a connection error.
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := srv.URL
+		srv.Close()
+
+		c := &Client{
+			httpURL:    url,
+			httpClient: http.DefaultClient,
+			timeout:    2e9,
+			cb:         newCircuitBreaker(3, time.Minute),
+		}
+
+		for i := 0; i < 3; i++ {
+			_, err := c.Check(context.Background(), &CheckRequest{Method: "GET", Path: "/"})
+			require.Error(t, err)
+			require.False(t, IsCanceled(err))
+		}
+		// Threshold reached: the next call is short-circuited without contacting
+		// the backend.
+		_, err := c.Check(context.Background(), &CheckRequest{Method: "GET", Path: "/"})
+		require.ErrorIs(t, err, ErrCircuitOpen)
+	})
+
+	t.Run("client cancellations do NOT trip the breaker", func(t *testing.T) {
+		c := &Client{
+			httpURL:    "http://127.0.0.1:1/auth",
+			httpClient: http.DefaultClient,
+			timeout:    2e9,
+			cb:         newCircuitBreaker(3, time.Minute),
+		}
+
+		// Far exceed the threshold with canceled contexts (client disconnects).
+		for i := 0; i < 10; i++ {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // the request context is already done before the call
+			_, err := c.Check(ctx, &CheckRequest{Method: "GET", Path: "/"})
+			require.Error(t, err)
+			require.True(t, IsCanceled(err), "want a cancellation error, got %v", err)
+		}
+		assert.False(t, c.cb.isOpen(), "breaker must stay closed despite client cancellations")
 	})
 }
 
