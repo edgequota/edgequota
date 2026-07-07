@@ -37,6 +37,7 @@ type Metrics struct {
 	keyExtractErrors int64
 	authErrors       int64
 	authDenied       int64
+	authCanceled     int64
 
 	// Prometheus counters for scraping.
 	promAllowed      prometheus.Counter
@@ -45,6 +46,7 @@ type Metrics struct {
 	promFallbackUsed *prometheus.CounterVec
 	promAuthErrors   prometheus.Counter
 	promAuthDenied   prometheus.Counter
+	promAuthCanceled prometheus.Counter
 	promKeyErrors    prometheus.Counter
 
 	// In-flight request tracking.
@@ -171,6 +173,11 @@ func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
 			Namespace: "edgequota",
 			Name:      "auth_denied_total",
 			Help:      "Total number of requests denied by auth service.",
+		}),
+		promAuthCanceled: factory.NewCounter(prometheus.CounterOpts{
+			Namespace: "edgequota",
+			Name:      "auth_canceled_total",
+			Help:      "Total number of auth checks aborted because the client canceled the request (client disconnect / shutdown). Not an auth-service failure — tracked separately from auth_errors_total.",
 		}),
 		promKeyErrors: factory.NewCounter(prometheus.CounterOpts{
 			Namespace: "edgequota",
@@ -417,6 +424,14 @@ func (m *Metrics) IncAuthDenied() {
 	m.promAuthDenied.Inc()
 }
 
+// IncAuthCanceled increments the counter of auth checks aborted by client
+// cancellation (client disconnect / shutdown). These are not auth-service
+// failures, so they are counted here instead of auth_errors_total.
+func (m *Metrics) IncAuthCanceled() {
+	atomic.AddInt64(&m.authCanceled, 1)
+	m.promAuthCanceled.Inc()
+}
+
 // IncTenantKeyRejected increments the counter for tenant keys rejected by
 // validation. This fires when the external rate-limit service returns a
 // tenant_key that violates length or charset constraints.
@@ -485,6 +500,7 @@ type MetricsSnapshot struct {
 	KeyExtractErrors int64
 	AuthErrors       int64
 	AuthDenied       int64
+	AuthCanceled     int64
 }
 
 // Snapshot returns the current counter values.
@@ -498,6 +514,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		KeyExtractErrors: atomic.LoadInt64(&m.keyExtractErrors),
 		AuthErrors:       atomic.LoadInt64(&m.authErrors),
 		AuthDenied:       atomic.LoadInt64(&m.authDenied),
+		AuthCanceled:     atomic.LoadInt64(&m.authCanceled),
 	}
 }
 

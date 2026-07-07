@@ -381,10 +381,14 @@ func TestServerTLSHTTP2(t *testing.T) {
 	})
 
 	t.Run("cleartext still supports h2c upgrade", func(t *testing.T) {
-		backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Backend must speak h2c: when the inbound request is HTTP/2, the proxy's
+		// protocolAwareTransport forwards it to the backend as prior-knowledge
+		// h2c (see the h2-over-TLS case above). h2c.NewHandler also serves plain
+		// HTTP/1.1, so the HTTP/1.1 assertion below still holds.
+		backendServer := httptest.NewServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, "ok")
-		}))
+		}), &http2.Server{}))
 		defer backendServer.Close()
 
 		proxyAddr := freeAddr(t)
@@ -429,6 +433,26 @@ func TestServerTLSHTTP2(t *testing.T) {
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		body, _ := io.ReadAll(resp.Body)
 		assert.Equal(t, "ok", string(body))
+
+		// And a prior-knowledge h2c client (HTTP/2 over cleartext) must actually
+		// negotiate HTTP/2. This is the behavior the h2c.NewHandler ->
+		// http.Server.Protocols (SetUnencryptedHTTP2) migration must preserve;
+		// a plain HTTP/1.1 check alone would not catch a broken h2c path.
+		h2cClient := &http.Client{
+			Transport: &http2.Transport{
+				AllowHTTP: true,
+				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, addr)
+				},
+			},
+			Timeout: 5 * time.Second,
+		}
+		defer h2cClient.CloseIdleConnections()
+		h2Resp, h2Err := h2cClient.Get("http://" + proxyAddr + "/")
+		require.NoError(t, h2Err)
+		defer h2Resp.Body.Close()
+		assert.Equal(t, http.StatusOK, h2Resp.StatusCode)
+		assert.Equal(t, 2, h2Resp.ProtoMajor, "cleartext request must be served over HTTP/2 (h2c) after the Protocols migration")
 
 		cancel()
 		<-done

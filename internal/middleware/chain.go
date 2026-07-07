@@ -1397,12 +1397,25 @@ func (c *Chain) checkAuth(w http.ResponseWriter, r *http.Request, ac *auth.Clien
 	}
 	resp, err := ac.Check(r.Context(), authReq)
 	if err != nil {
-		c.logger.Error("auth service error", "error", err)
-		c.metrics.IncAuthErrors()
+		// A canceled request context means the client disconnected (or the
+		// process is shutting down) mid-check — the auth backend did not fail.
+		// Count it separately and skip the error log/metric so a burst of client
+		// disconnects (e.g. a deploy-driven reconnect wave) cannot masquerade as
+		// an auth-service outage. The circuit breaker already ignores these (see
+		// auth.Client.Check); the configured failure policy below still applies.
+		canceled := auth.IsCanceled(err)
+		if canceled {
+			c.metrics.IncAuthCanceled()
+		} else {
+			c.logger.Error("auth service error", "error", err)
+			c.metrics.IncAuthErrors()
+		}
 
 		// Apply the configured auth failure policy.
 		if c.cfg.Load().Auth.FailurePolicy == config.AuthFailurePolicyFailOpen {
-			c.logger.Warn("auth service unreachable, allowing request (failure_policy=failopen)")
+			if !canceled {
+				c.logger.Warn("auth service unreachable, allowing request (failure_policy=failopen)")
+			}
 			return true
 		}
 		// Default: failclosed — reject the request.

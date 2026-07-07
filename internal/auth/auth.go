@@ -30,8 +30,10 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // ErrCircuitOpen is returned when the auth circuit breaker is open and the
@@ -99,6 +101,22 @@ func (cb *circuitBreaker) recordSuccess() {
 	defer cb.mu.Unlock()
 	cb.failures = 0
 	cb.open = false
+}
+
+// IsCanceled reports whether err is a request-context cancellation — the client
+// disconnected or the process is shutting down — rather than an auth-service
+// failure. It covers both the raw context.Canceled (HTTP backend) and the gRPC
+// codes.Canceled status the AuthService client returns when the inbound context
+// is canceled. context.DeadlineExceeded / codes.DeadlineExceeded are genuine
+// timeouts and are deliberately NOT treated as cancellations.
+func IsCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return status.Code(err) == codes.Canceled
 }
 
 // CheckRequest represents the data sent to the external auth service.
@@ -363,6 +381,15 @@ func (c *Client) Check(ctx context.Context, req *CheckRequest) (*CheckResponse, 
 	}
 
 	if err != nil {
+		// A canceled request context means the caller (client) went away or the
+		// process is shutting down mid-check — the auth service did not fail, so
+		// it must not count toward the circuit breaker. Otherwise a burst of
+		// client disconnects (e.g. a deploy-driven reconnect wave) trips the
+		// breaker and short-circuits every subsequent request. A genuine timeout
+		// surfaces as context.DeadlineExceeded and still counts as a failure.
+		if IsCanceled(err) {
+			return nil, err
+		}
 		c.cb.recordFailure()
 		return nil, err
 	}

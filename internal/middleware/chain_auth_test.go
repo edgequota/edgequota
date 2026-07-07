@@ -106,6 +106,43 @@ func TestChainServeHTTPWithAuth(t *testing.T) {
 		assert.Equal(t, int64(1), snap.AuthErrors)
 	})
 
+	t.Run("client cancellation counts separately and is not an auth error", func(t *testing.T) {
+		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer authServer.Close()
+
+		cfg := config.Defaults()
+		cfg.RateLimit.Static.BackendURL = "http://backend:8080"
+		cfg.RateLimit.Static.Average = 0
+		cfg.Auth.Enabled = true
+		cfg.Auth.HTTP.URL = authServer.URL
+		metrics := testMetrics()
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		chain, err := NewChain(context.Background(), next, cfg, testLogger(), metrics)
+		require.NoError(t, err)
+		defer chain.Close()
+
+		// Simulate a client that disconnected before the request was served: the
+		// request context is already canceled, so the auth check aborts with
+		// context.Canceled rather than a real auth-service failure.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+
+		snap := metrics.Snapshot()
+		assert.Equal(t, int64(1), snap.AuthCanceled, "client cancellation should increment AuthCanceled")
+		assert.Equal(t, int64(0), snap.AuthErrors, "client cancellation must NOT count as an auth error")
+		// Enforcement is unchanged: failclosed still denies rather than silently
+		// allowing (the 503 goes to an already-gone client).
+		assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	})
+
 	t.Run("denies with custom response headers from auth service", func(t *testing.T) {
 		authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
