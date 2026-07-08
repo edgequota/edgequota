@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,20 +283,21 @@ func TestProxyClose_BurstSwapsAreSerializable(t *testing.T) {
 	p, err := New(backend.URL, 30*time.Second, 10, 60*time.Second, config.TransportConfig{}, quietLogger())
 	require.NoError(t, err)
 
-	var wg atomic.Int32
-	done := make(chan struct{})
 	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
 	for range goroutines {
-		wg.Add(1)
 		go func() {
-			defer func() {
-				if wg.Add(-1) == 0 {
-					close(done)
-				}
-			}()
+			defer wg.Done()
 			_ = p.Close(context.Background())
 		}()
 	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
