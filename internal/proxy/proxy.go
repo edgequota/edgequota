@@ -640,14 +640,24 @@ func setForwardingHeaders(req *http.Request) {
 	}
 }
 
-// setForwardedFor adds X-Forwarded-For from RemoteAddr when not already present.
-// Called only by the WebSocket handler, which bypasses httputil.ReverseProxy
-// (the ReverseProxy already adds X-Forwarded-For on the HTTP path).
+// setForwardedFor appends the observed client IP (from RemoteAddr) to the
+// X-Forwarded-For chain for the WebSocket handler, which bypasses
+// httputil.ReverseProxy (the ReverseProxy already does this on the HTTP path).
+//
+// It must APPEND rather than set-if-absent: a client can send its own
+// X-Forwarded-For, and trusting that verbatim on the edge lets it spoof the
+// rate-limit key / downstream client-IP. Appending keeps the right-most hop —
+// the one we actually observed — authoritative, matching the HTTP path so
+// trustedIPDepth-based keying behaves identically for both protocols.
 func setForwardedFor(req *http.Request) {
-	if req.Header.Get("X-Forwarded-For") == "" {
-		if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
+	clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return
+	}
+	if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+		req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+	} else {
+		req.Header.Set("X-Forwarded-For", clientIP)
 	}
 }
 
