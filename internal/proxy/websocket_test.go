@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,5 +188,75 @@ func TestHandleWebSocket(t *testing.T) {
 		require.NoError(t, err)
 		// Will get either 502 (connection refused) or timeout.
 		assert.True(t, strings.Contains(statusLine, "502") || strings.Contains(statusLine, "500"))
+	})
+}
+
+// halfCloseConn is a net.Conn whose CloseWrite records the call. It is
+// deliberately NOT a *net.TCPConn, standing in for a *tls.Conn (wss://).
+type halfCloseConn struct {
+	readErr       error
+	closeWriteHit atomic.Bool
+}
+
+func (c *halfCloseConn) Read([]byte) (int, error)         { return 0, c.readErr }
+func (c *halfCloseConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (c *halfCloseConn) Close() error                     { return nil }
+func (c *halfCloseConn) CloseWrite() error                { c.closeWriteHit.Store(true); return nil }
+func (c *halfCloseConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *halfCloseConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *halfCloseConn) SetDeadline(time.Time) error      { return nil }
+func (c *halfCloseConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *halfCloseConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestRelayWebSocketHalfClose(t *testing.T) {
+	t.Run("half-closes non-TCP (TLS) conns via the CloseWrite interface", func(t *testing.T) {
+		p := &Proxy{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		client := &halfCloseConn{readErr: io.EOF}
+		backend := &halfCloseConn{readErr: io.EOF}
+
+		p.relayWebSocket(client, backend)
+
+		assert.True(t, client.closeWriteHit.Load(), "client CloseWrite should be called on a non-TCP conn")
+		assert.True(t, backend.closeWriteHit.Load(), "backend CloseWrite should be called on a non-TCP conn")
+	})
+}
+
+// keepAliveRecorder is a net.Conn (via embedded nil interface — unused methods
+// are never called) that records keepalive configuration.
+type keepAliveRecorder struct {
+	net.Conn
+	enabled atomic.Bool
+	period  time.Duration
+}
+
+func (c *keepAliveRecorder) SetKeepAlive(v bool) error                { c.enabled.Store(v); return nil }
+func (c *keepAliveRecorder) SetKeepAlivePeriod(d time.Duration) error { c.period = d; return nil }
+
+// tlsLikeConn stands in for *tls.Conn: it exposes the underlying socket via
+// NetConn() but does not itself implement SetKeepAlive.
+type tlsLikeConn struct {
+	net.Conn
+	inner net.Conn
+}
+
+func (c *tlsLikeConn) NetConn() net.Conn { return c.inner }
+
+func TestEnableWSKeepAlive(t *testing.T) {
+	t.Run("enables keepalive on a direct TCP-like conn", func(t *testing.T) {
+		rec := &keepAliveRecorder{}
+		enableWSKeepAlive(rec)
+		assert.True(t, rec.enabled.Load())
+		assert.Equal(t, wsKeepAlivePeriod, rec.period)
+	})
+
+	t.Run("unwraps a TLS-like conn via NetConn", func(t *testing.T) {
+		rec := &keepAliveRecorder{}
+		enableWSKeepAlive(&tlsLikeConn{inner: rec})
+		assert.True(t, rec.enabled.Load())
+		assert.Equal(t, wsKeepAlivePeriod, rec.period)
+	})
+
+	t.Run("no-op on a conn without keepalive support", func(t *testing.T) {
+		assert.NotPanics(t, func() { enableWSKeepAlive(&halfCloseConn{}) })
 	})
 }

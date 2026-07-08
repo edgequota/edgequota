@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -417,6 +419,43 @@ func TestIsClientDisconnect(t *testing.T) {
 		assert.False(t, isClientDisconnect(
 			&testErr{msg: "some generic error"},
 		))
+	})
+
+	t.Run("detects canceled context", func(t *testing.T) {
+		assert.True(t, isClientDisconnect(context.Canceled))
+	})
+
+	t.Run("detects wrapped canceled context", func(t *testing.T) {
+		assert.True(t, isClientDisconnect(fmt.Errorf("proxy: %w", context.Canceled)))
+	})
+
+	t.Run("deadline exceeded is not a client disconnect", func(t *testing.T) {
+		assert.False(t, isClientDisconnect(context.DeadlineExceeded))
+	})
+}
+
+func TestSetForwardedFor(t *testing.T) {
+	t.Run("sets observed IP when header absent", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.7:5555"
+		setForwardedFor(req)
+		assert.Equal(t, "203.0.113.7", req.Header.Get("X-Forwarded-For"))
+	})
+
+	t.Run("appends observed IP so a client-supplied value cannot spoof the right-most hop", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.7:5555"
+		req.Header.Set("X-Forwarded-For", "1.2.3.4") // spoofed by the client
+		setForwardedFor(req)
+		assert.Equal(t, "1.2.3.4, 203.0.113.7", req.Header.Get("X-Forwarded-For"))
+	})
+
+	t.Run("leaves header unchanged when RemoteAddr has no port", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.7" // no port → SplitHostPort errors
+		req.Header.Set("X-Forwarded-For", "1.2.3.4")
+		setForwardedFor(req)
+		assert.Equal(t, "1.2.3.4", req.Header.Get("X-Forwarded-For"))
 	})
 }
 

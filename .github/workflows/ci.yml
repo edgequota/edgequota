@@ -16,10 +16,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so `buf breaking --against '.git#ref=<base.sha>'` can
+          # resolve the PR base commit from the local repo.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
+          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
+          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
+          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
+          # which pulls the latest patch at build time and needs no pin.)
+          go-version: "1.26.5"
           cache: true
 
       - name: Run golangci-lint
@@ -43,7 +52,10 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
       - name: Run buf breaking
         if: github.event_name == 'pull_request'
-        run: buf breaking --against '${{ github.event.pull_request.base.sha }}'
+        # `.git#ref=<sha>` treats the base commit as a git ref (not a filesystem
+        # path); the bare-SHA form made buf look for a directory named <sha> and
+        # fail with "had no .proto files" on every PR.
+        run: buf breaking --against '.git#ref=${{ github.event.pull_request.base.sha }}'
 
   test:
     name: Test
@@ -53,7 +65,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
+          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
+          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
+          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
+          # which pulls the latest patch at build time and needs no pin.)
+          go-version: "1.26.5"
           cache: true
 
       - name: Run tests with race detector
@@ -107,7 +124,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
+          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
+          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
+          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
+          # which pulls the latest patch at build time and needs no pin.)
+          go-version: "1.26.5"
           cache: true
 
       - name: Build binary
@@ -124,7 +146,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
+          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
+          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
+          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
+          # which pulls the latest patch at build time and needs no pin.)
+          go-version: "1.26.5"
           cache: true
 
       - name: Run govulncheck

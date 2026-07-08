@@ -11,6 +11,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -313,6 +314,14 @@ type Proxy struct {
 	// pathologically long streams cannot block teardown forever.
 	inflight  sync.WaitGroup
 	closeOnce sync.Once
+
+	// closeMu fences inflight.Add against Close's inflight.Wait. Without it a
+	// request that loaded this proxy just before a hot-reload swap could call
+	// Add concurrently with Wait (a sync.WaitGroup misuse) and then have its
+	// transport released mid-flight. ServeHTTP takes RLock to admit; Close takes
+	// the write lock to set closing before waiting.
+	closeMu sync.RWMutex
+	closing bool
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -639,14 +648,24 @@ func setForwardingHeaders(req *http.Request) {
 	}
 }
 
-// setForwardedFor adds X-Forwarded-For from RemoteAddr when not already present.
-// Called only by the WebSocket handler, which bypasses httputil.ReverseProxy
-// (the ReverseProxy already adds X-Forwarded-For on the HTTP path).
+// setForwardedFor appends the observed client IP (from RemoteAddr) to the
+// X-Forwarded-For chain for the WebSocket handler, which bypasses
+// httputil.ReverseProxy (the ReverseProxy already does this on the HTTP path).
+//
+// It must APPEND rather than set-if-absent: a client can send its own
+// X-Forwarded-For, and trusting that verbatim on the edge lets it spoof the
+// rate-limit key / downstream client-IP. Appending keeps the right-most hop —
+// the one we actually observed — authoritative, matching the HTTP path so
+// trustedIPDepth-based keying behaves identically for both protocols.
 func setForwardedFor(req *http.Request) {
-	if req.Header.Get("X-Forwarded-For") == "" {
-		if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-			req.Header.Set("X-Forwarded-For", clientIP)
-		}
+	clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return
+	}
+	if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+		req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+	} else {
+		req.Header.Set("X-Forwarded-For", clientIP)
 	}
 }
 
@@ -683,10 +702,15 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 		},
 		FlushInterval: -1, // Flush immediately for SSE and streaming.
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
-			logger.Error("proxy error", "error", proxyErr, "path", req.URL.Path)
-			if !isClientDisconnect(proxyErr) {
-				rw.WriteHeader(http.StatusBadGateway)
+			// Client disconnects (incl. a canceled request context) are not
+			// backend failures: don't log them at ERROR — which floods on
+			// reconnect waves — and don't write a 502 to a client that's gone.
+			if isClientDisconnect(proxyErr) {
+				logger.Debug("proxy client disconnected", "error", proxyErr, "path", req.URL.Path)
+				return
 			}
+			logger.Error("proxy error", "error", proxyErr, "path", req.URL.Path)
+			rw.WriteHeader(http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Del("Alt-Svc")
@@ -708,7 +732,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admit under RLock so Add can never race Close's Wait. If the proxy is
+	// draining (being swapped out on a config reload), reject rather than admit
+	// a request whose transport is about to be released — rare and retryable.
+	p.closeMu.RLock()
+	if p.closing {
+		p.closeMu.RUnlock()
+		http.Error(w, "proxy draining", http.StatusServiceUnavailable)
+		return
+	}
 	p.inflight.Add(1)
+	p.closeMu.RUnlock()
 	defer p.inflight.Done()
 
 	// For gRPC, ensure TE: trailers is preserved (it's a hop-by-hop header
@@ -742,6 +776,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Idempotent. WebSocket sessions hijacked from this Proxy survive Close
 // because they own their underlying net.Conn directly.
 func (p *Proxy) Close(ctx context.Context) error {
+	// Stop admitting new requests before waiting, so inflight.Add can never run
+	// concurrently with the Wait below (the write lock blocks until every
+	// in-progress admission has released its RLock, i.e. finished its Add).
+	p.closeMu.Lock()
+	p.closing = true
+	p.closeMu.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		p.inflight.Wait()
@@ -761,7 +802,11 @@ func (p *Proxy) Close(ctx context.Context) error {
 			p.http2Transport.CloseIdleConnections()
 		}
 		if p.http3Transport != nil {
-			p.http3Transport.CloseIdleConnections()
+			// Full Close (not just CloseIdleConnections): the QUIC transport and
+			// UDP socket below are hard-closed anyway, so release the HTTP/3
+			// RoundTripper's connections and internal state too — otherwise a
+			// config hot-reload leaks it each time the proxy is swapped out.
+			_ = p.http3Transport.Close()
 		}
 		if p.quicTransport != nil {
 			_ = p.quicTransport.Close()
@@ -906,6 +951,11 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = clientConn.Close() }()
 
+	// Detect a dead/half-open peer even without an application idle timeout, so
+	// an abandoned session cannot block the relay forever and leak resources.
+	enableWSKeepAlive(clientConn)
+	enableWSKeepAlive(backendConn)
+
 	p.relayWebSocket(clientConn, backendConn)
 }
 
@@ -952,6 +1002,43 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 // relayWebSocket copies data bidirectionally between client and backend.
 // When maxWSTransferBytes > 0, each direction is capped to that many bytes.
 // When wsIdleTimeout > 0, connections with no activity are closed.
+// closeWriter is implemented by both *net.TCPConn and *tls.Conn. Asserting on
+// it (rather than the concrete *net.TCPConn) lets the WebSocket relay propagate
+// a half-close on TLS connections too — without it, a wss:// peer never learns
+// one direction ended cleanly and the session tears down prematurely.
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// keepAliveConn is implemented directly by *net.TCPConn and reached through
+// *tls.Conn via NetConn().
+type keepAliveConn interface {
+	SetKeepAlive(bool) error
+	SetKeepAlivePeriod(time.Duration) error
+}
+
+// wsKeepAlivePeriod bounds how long a dead/half-open WebSocket peer can go
+// undetected. It matters most when wsIdleTimeout is 0 (no application idle
+// timeout): without TCP keepalive a vanished peer would block the relay's
+// io.Copy forever, leaking the goroutines, conns, and buffers.
+const wsKeepAlivePeriod = 30 * time.Second
+
+// enableWSKeepAlive turns on TCP keepalive for a hijacked/dialed WebSocket
+// conn, unwrapping *tls.Conn to reach the underlying socket. Best-effort: a
+// conn that supports neither is left as-is.
+func enableWSKeepAlive(conn net.Conn) {
+	target := conn
+	if u, ok := conn.(interface{ NetConn() net.Conn }); ok {
+		if inner := u.NetConn(); inner != nil {
+			target = inner
+		}
+	}
+	if ka, ok := target.(keepAliveConn); ok {
+		_ = ka.SetKeepAlive(true)
+		_ = ka.SetKeepAlivePeriod(wsKeepAlivePeriod)
+	}
+}
+
 func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -984,8 +1071,8 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 		if _, cpErr := io.CopyBuffer(clientConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: backend→client copy ended", "error", cpErr)
 		}
-		if tc, tcOK := clientConn.(*net.TCPConn); tcOK {
-			if cwErr := tc.CloseWrite(); cwErr != nil {
+		if cw, ok := clientConn.(closeWriter); ok {
+			if cwErr := cw.CloseWrite(); cwErr != nil {
 				p.logger.Debug("websocket: client CloseWrite", "error", cwErr)
 			}
 		}
@@ -1002,8 +1089,8 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 		if _, cpErr := io.CopyBuffer(backendConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: client→backend copy ended", "error", cpErr)
 		}
-		if tc, tcOK := backendConn.(*net.TCPConn); tcOK {
-			if cwErr := tc.CloseWrite(); cwErr != nil {
+		if cw, ok := backendConn.(closeWriter); ok {
+			if cwErr := cw.CloseWrite(); cwErr != nil {
 				p.logger.Debug("websocket: backend CloseWrite", "error", cwErr)
 			}
 		}
@@ -1132,6 +1219,13 @@ func singleJoiningSlash(a, b string) string {
 func isClientDisconnect(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A canceled request context means the inbound client went away (disconnect
+	// or shutdown) and canceled the in-flight upstream call — not a backend
+	// failure. This mirrors the auth path's client-cancel handling. Deadline
+	// exceeded is deliberately excluded: that is a real upstream timeout.
+	if errors.Is(err, context.Canceled) {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "client disconnected") ||
