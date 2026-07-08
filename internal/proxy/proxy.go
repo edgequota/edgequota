@@ -968,6 +968,14 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 // relayWebSocket copies data bidirectionally between client and backend.
 // When maxWSTransferBytes > 0, each direction is capped to that many bytes.
 // When wsIdleTimeout > 0, connections with no activity are closed.
+// closeWriter is implemented by both *net.TCPConn and *tls.Conn. Asserting on
+// it (rather than the concrete *net.TCPConn) lets the WebSocket relay propagate
+// a half-close on TLS connections too — without it, a wss:// peer never learns
+// one direction ended cleanly and the session tears down prematurely.
+type closeWriter interface {
+	CloseWrite() error
+}
+
 func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1000,8 +1008,8 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 		if _, cpErr := io.CopyBuffer(clientConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: backend→client copy ended", "error", cpErr)
 		}
-		if tc, tcOK := clientConn.(*net.TCPConn); tcOK {
-			if cwErr := tc.CloseWrite(); cwErr != nil {
+		if cw, ok := clientConn.(closeWriter); ok {
+			if cwErr := cw.CloseWrite(); cwErr != nil {
 				p.logger.Debug("websocket: client CloseWrite", "error", cwErr)
 			}
 		}
@@ -1018,8 +1026,8 @@ func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {
 		if _, cpErr := io.CopyBuffer(backendConn, src, *bufp); cpErr != nil {
 			p.logger.Debug("websocket: client→backend copy ended", "error", cpErr)
 		}
-		if tc, tcOK := backendConn.(*net.TCPConn); tcOK {
-			if cwErr := tc.CloseWrite(); cwErr != nil {
+		if cw, ok := backendConn.(closeWriter); ok {
+			if cwErr := cw.CloseWrite(); cwErr != nil {
 				p.logger.Debug("websocket: backend CloseWrite", "error", cwErr)
 			}
 		}
