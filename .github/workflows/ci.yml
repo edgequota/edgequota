@@ -16,6 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so `buf breaking --against '.git#ref=<base.sha>'` can
+          # resolve the PR base commit from the local repo.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -43,7 +47,10 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
       - name: Run buf breaking
         if: github.event_name == 'pull_request'
-        run: buf breaking --against '${{ github.event.pull_request.base.sha }}'
+        # `.git#ref=<sha>` treats the base commit as a git ref (not a filesystem
+        # path); the bare-SHA form made buf look for a directory named <sha> and
+        # fail with "had no .proto files" on every PR.
+        run: buf breaking --against '.git#ref=${{ github.event.pull_request.base.sha }}'
 
   test:
     name: Test
