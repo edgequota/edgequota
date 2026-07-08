@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -417,6 +419,18 @@ func TestIsClientDisconnect(t *testing.T) {
 		assert.False(t, isClientDisconnect(
 			&testErr{msg: "some generic error"},
 		))
+	})
+
+	t.Run("detects canceled context", func(t *testing.T) {
+		assert.True(t, isClientDisconnect(context.Canceled))
+	})
+
+	t.Run("detects wrapped canceled context", func(t *testing.T) {
+		assert.True(t, isClientDisconnect(fmt.Errorf("proxy: %w", context.Canceled)))
+	})
+
+	t.Run("deadline exceeded is not a client disconnect", func(t *testing.T) {
+		assert.False(t, isClientDisconnect(context.DeadlineExceeded))
 	})
 }
 

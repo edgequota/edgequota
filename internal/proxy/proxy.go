@@ -11,6 +11,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -683,10 +684,15 @@ func buildReverseProxy(target *url.URL, defaultRT, h1RT, h2RT, h3RT http.RoundTr
 		},
 		FlushInterval: -1, // Flush immediately for SSE and streaming.
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
-			logger.Error("proxy error", "error", proxyErr, "path", req.URL.Path)
-			if !isClientDisconnect(proxyErr) {
-				rw.WriteHeader(http.StatusBadGateway)
+			// Client disconnects (incl. a canceled request context) are not
+			// backend failures: don't log them at ERROR — which floods on
+			// reconnect waves — and don't write a 502 to a client that's gone.
+			if isClientDisconnect(proxyErr) {
+				logger.Debug("proxy client disconnected", "error", proxyErr, "path", req.URL.Path)
+				return
 			}
+			logger.Error("proxy error", "error", proxyErr, "path", req.URL.Path)
+			rw.WriteHeader(http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Del("Alt-Svc")
@@ -1132,6 +1138,13 @@ func singleJoiningSlash(a, b string) string {
 func isClientDisconnect(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A canceled request context means the inbound client went away (disconnect
+	// or shutdown) and canceled the in-flight upstream call — not a backend
+	// failure. This mirrors the auth path's client-cancel handling. Deadline
+	// exceeded is deliberately excluded: that is a real upstream timeout.
+	if errors.Is(err, context.Canceled) {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "client disconnected") ||
