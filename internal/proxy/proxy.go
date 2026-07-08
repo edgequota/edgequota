@@ -951,6 +951,11 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = clientConn.Close() }()
 
+	// Detect a dead/half-open peer even without an application idle timeout, so
+	// an abandoned session cannot block the relay forever and leak resources.
+	enableWSKeepAlive(clientConn)
+	enableWSKeepAlive(backendConn)
+
 	p.relayWebSocket(clientConn, backendConn)
 }
 
@@ -1003,6 +1008,35 @@ func (p *Proxy) dialWebSocketBackend(r *http.Request) (net.Conn, error) {
 // one direction ended cleanly and the session tears down prematurely.
 type closeWriter interface {
 	CloseWrite() error
+}
+
+// keepAliveConn is implemented directly by *net.TCPConn and reached through
+// *tls.Conn via NetConn().
+type keepAliveConn interface {
+	SetKeepAlive(bool) error
+	SetKeepAlivePeriod(time.Duration) error
+}
+
+// wsKeepAlivePeriod bounds how long a dead/half-open WebSocket peer can go
+// undetected. It matters most when wsIdleTimeout is 0 (no application idle
+// timeout): without TCP keepalive a vanished peer would block the relay's
+// io.Copy forever, leaking the goroutines, conns, and buffers.
+const wsKeepAlivePeriod = 30 * time.Second
+
+// enableWSKeepAlive turns on TCP keepalive for a hijacked/dialed WebSocket
+// conn, unwrapping *tls.Conn to reach the underlying socket. Best-effort: a
+// conn that supports neither is left as-is.
+func enableWSKeepAlive(conn net.Conn) {
+	target := conn
+	if u, ok := conn.(interface{ NetConn() net.Conn }); ok {
+		if inner := u.NetConn(); inner != nil {
+			target = inner
+		}
+	}
+	if ka, ok := target.(keepAliveConn); ok {
+		_ = ka.SetKeepAlive(true)
+		_ = ka.SetKeepAlivePeriod(wsKeepAlivePeriod)
+	}
 }
 
 func (p *Proxy) relayWebSocket(clientConn, backendConn net.Conn) {

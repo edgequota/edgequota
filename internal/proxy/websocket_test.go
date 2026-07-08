@@ -220,3 +220,43 @@ func TestRelayWebSocketHalfClose(t *testing.T) {
 		assert.True(t, backend.closeWriteHit.Load(), "backend CloseWrite should be called on a non-TCP conn")
 	})
 }
+
+// keepAliveRecorder is a net.Conn (via embedded nil interface — unused methods
+// are never called) that records keepalive configuration.
+type keepAliveRecorder struct {
+	net.Conn
+	enabled atomic.Bool
+	period  time.Duration
+}
+
+func (c *keepAliveRecorder) SetKeepAlive(v bool) error                { c.enabled.Store(v); return nil }
+func (c *keepAliveRecorder) SetKeepAlivePeriod(d time.Duration) error { c.period = d; return nil }
+
+// tlsLikeConn stands in for *tls.Conn: it exposes the underlying socket via
+// NetConn() but does not itself implement SetKeepAlive.
+type tlsLikeConn struct {
+	net.Conn
+	inner net.Conn
+}
+
+func (c *tlsLikeConn) NetConn() net.Conn { return c.inner }
+
+func TestEnableWSKeepAlive(t *testing.T) {
+	t.Run("enables keepalive on a direct TCP-like conn", func(t *testing.T) {
+		rec := &keepAliveRecorder{}
+		enableWSKeepAlive(rec)
+		assert.True(t, rec.enabled.Load())
+		assert.Equal(t, wsKeepAlivePeriod, rec.period)
+	})
+
+	t.Run("unwraps a TLS-like conn via NetConn", func(t *testing.T) {
+		rec := &keepAliveRecorder{}
+		enableWSKeepAlive(&tlsLikeConn{inner: rec})
+		assert.True(t, rec.enabled.Load())
+		assert.Equal(t, wsKeepAlivePeriod, rec.period)
+	})
+
+	t.Run("no-op on a conn without keepalive support", func(t *testing.T) {
+		assert.NotPanics(t, func() { enableWSKeepAlive(&halfCloseConn{}) })
+	})
+}
