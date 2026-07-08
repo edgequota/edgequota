@@ -777,7 +777,11 @@ func (p *Proxy) Close(ctx context.Context) error {
 			p.http2Transport.CloseIdleConnections()
 		}
 		if p.http3Transport != nil {
-			p.http3Transport.CloseIdleConnections()
+			// Full Close (not just CloseIdleConnections): the QUIC transport and
+			// UDP socket below are hard-closed anyway, so release the HTTP/3
+			// RoundTripper's connections and internal state too — otherwise a
+			// config hot-reload leaks it each time the proxy is swapped out.
+			_ = p.http3Transport.Close()
 		}
 		if p.quicTransport != nil {
 			_ = p.quicTransport.Close()

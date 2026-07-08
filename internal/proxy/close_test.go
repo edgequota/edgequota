@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,20 @@ func TestProxyClose_Idempotent(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, p.Close(ctx))
+	require.NoError(t, p.Close(ctx))
+	require.NoError(t, p.Close(ctx))
+}
+
+// TestProxyClose_ReleasesHTTP3Transport verifies Close fully closes the HTTP/3
+// RoundTripper (not just its idle conns) so a config hot-reload doesn't leak it,
+// and that doing so stays panic-free and idempotent.
+func TestProxyClose_ReleasesHTTP3Transport(t *testing.T) {
+	p := &Proxy{
+		logger:         quietLogger(),
+		http3Transport: &http3.Transport{},
+	}
+
+	ctx := context.Background()
 	require.NoError(t, p.Close(ctx))
 	require.NoError(t, p.Close(ctx))
 }
