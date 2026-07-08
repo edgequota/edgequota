@@ -314,6 +314,14 @@ type Proxy struct {
 	// pathologically long streams cannot block teardown forever.
 	inflight  sync.WaitGroup
 	closeOnce sync.Once
+
+	// closeMu fences inflight.Add against Close's inflight.Wait. Without it a
+	// request that loaded this proxy just before a hot-reload swap could call
+	// Add concurrently with Wait (a sync.WaitGroup misuse) and then have its
+	// transport released mid-flight. ServeHTTP takes RLock to admit; Close takes
+	// the write lock to set closing before waiting.
+	closeMu sync.RWMutex
+	closing bool
 }
 
 // New creates a new multi-protocol reverse proxy targeting the given backend URL.
@@ -724,7 +732,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admit under RLock so Add can never race Close's Wait. If the proxy is
+	// draining (being swapped out on a config reload), reject rather than admit
+	// a request whose transport is about to be released — rare and retryable.
+	p.closeMu.RLock()
+	if p.closing {
+		p.closeMu.RUnlock()
+		http.Error(w, "proxy draining", http.StatusServiceUnavailable)
+		return
+	}
 	p.inflight.Add(1)
+	p.closeMu.RUnlock()
 	defer p.inflight.Done()
 
 	// For gRPC, ensure TE: trailers is preserved (it's a hop-by-hop header
@@ -758,6 +776,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Idempotent. WebSocket sessions hijacked from this Proxy survive Close
 // because they own their underlying net.Conn directly.
 func (p *Proxy) Close(ctx context.Context) error {
+	// Stop admitting new requests before waiting, so inflight.Add can never run
+	// concurrently with the Wait below (the write lock blocks until every
+	// in-progress admission has released its RLock, i.e. finished its Add).
+	p.closeMu.Lock()
+	p.closing = true
+	p.closeMu.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		p.inflight.Wait()

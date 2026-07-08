@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +53,54 @@ func TestProxyClose_ReleasesHTTP3Transport(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, p.Close(ctx))
 	require.NoError(t, p.Close(ctx))
+}
+
+// TestProxyClose_RejectsAfterDraining proves that once Close has marked the
+// proxy draining, a new request is rejected with 503 instead of being admitted
+// into inflight (whose transport is about to be released).
+func TestProxyClose_RejectsAfterDraining(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := New(backend.URL, 30*time.Second, 10, 60*time.Second, config.TransportConfig{}, quietLogger())
+	require.NoError(t, err)
+
+	require.NoError(t, p.Close(context.Background()))
+
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+// TestProxyClose_ConcurrentServeAndClose hammers ServeHTTP while Close runs to
+// exercise the inflight.Add/Wait fence under -race. Each request must end as
+// either served (200) or drained (503) — never a torn transport or a data race.
+func TestProxyClose_ConcurrentServeAndClose(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := New(backend.URL, 30*time.Second, 10, 60*time.Second, config.TransportConfig{}, quietLogger())
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+			if rr.Code != http.StatusOK && rr.Code != http.StatusServiceUnavailable {
+				t.Errorf("unexpected status %d", rr.Code)
+			}
+		}()
+	}
+
+	require.NoError(t, p.Close(context.Background()))
+	wg.Wait()
 }
 
 // TestProxyClose_WaitsForInflightHTTPRequests proves that an in-flight
