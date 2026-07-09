@@ -26,10 +26,6 @@ spec:
     metadata:
       labels:
         app: edgequota
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 60
       containers:
@@ -103,6 +99,8 @@ spec:
       targetPort: admin
       protocol: TCP
 ```
+
+> **Metrics:** EdgeQuota pushes OpenTelemetry metrics over OTLP to the collector (the same endpoint as tracing) — there is no `/metrics` endpoint to scrape, so no `prometheus.io/scrape` annotations or `ServiceMonitor` are needed. Emission is controlled by `metrics.enabled` (env `METRICS_ENABLED`, default `true` in dev/stage), independent of tracing but sharing its OTLP transport. See [Observability](observability.md#metrics).
 
 ### ConfigMap
 
@@ -447,17 +445,23 @@ spec:
 
 ### Custom Metrics (Advanced)
 
-For more precise autoscaling, use Prometheus metrics via the Prometheus adapter:
+For more precise autoscaling, drive the HPA from EdgeQuota's own throughput. Metrics are pushed over OTLP to the collector; a Prometheus-compatible backend surfaces the rate-limit decisions counter (dotted `edgequota.ratelimit.decisions`, filtered to the `allowed` decision) for a custom-metrics adapter:
 
 ```yaml
 metrics:
   - type: Pods
     pods:
       metric:
-        name: edgequota_requests_allowed_total
+        # Rate-limit "allowed" decisions per pod. On a Prometheus-compatible backend
+        # the series is surfaced as otel_metric_name="edgequota.ratelimit.decisions"
+        # with attribute edgequota_ratelimit_decision="allowed".
+        name: edgequota_ratelimit_decisions
+        selector:
+          matchLabels:
+            edgequota_ratelimit_decision: allowed
       target:
         type: AverageValue
-        averageValue: "1000"  # Scale up at 1000 req/s per pod
+        averageValue: "1000"  # Scale up at 1000 allowed req/s per pod
 ```
 
 ### Scaling Considerations
@@ -492,7 +496,7 @@ spec:
     - ports:
         - port: 8080    # Proxy traffic
           protocol: TCP
-        - port: 9090    # Admin (metrics scraping)
+        - port: 9090    # Admin (health probes, /v1/stats, pprof)
           protocol: TCP
   egress:
     - to:
@@ -542,7 +546,7 @@ spec:
 
 - [Configuration Reference](configuration.md) -- Full config reference.
 - [Helm Chart](helm-chart.md) -- Deploying with the official Helm chart.
-- [Observability](observability.md) -- Prometheus, probes, and Grafana dashboards.
+- [Observability](observability.md) -- OpenTelemetry metrics, probes, and dashboards.
 - [Security](security.md) -- Container hardening and network policies.
 - [Architecture](architecture.md) -- Scaling model and failure modes.
 - [Troubleshooting](troubleshooting.md) -- Common deployment issues.

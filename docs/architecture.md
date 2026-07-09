@@ -49,7 +49,7 @@ It receives all inbound traffic, applies policy decisions, caches eligible respo
                          │                   │
                          ▼                   ▼
                     Redis Cluster       Admin Server
-                    (counters +         :9090/metrics
+                    (counters +         :9090/v1/stats
                      response cache)    :9090/healthz
                                         :9090/readyz
                                         :9090/startz
@@ -82,7 +82,7 @@ The server manages two HTTP listeners:
 | Listener | Default Port | Purpose |
 |----------|-------------|---------|
 | Main | `:8080` (TCP + optional UDP for HTTP/3) | Proxy traffic |
-| Admin | `:9090` (TCP) | Health probes, Prometheus metrics |
+| Admin | `:9090` (TCP) | Health probes, admin API |
 
 The main listener uses `h2c.NewHandler` to support cleartext HTTP/2 (required for gRPC without TLS) while also accepting HTTP/1.1 connections. When TLS is enabled with `http3_enabled: true`, an additional QUIC/UDP listener is started on the same address.
 
@@ -185,7 +185,7 @@ Supports HTTP (JSON POST) and gRPC (`edgequota.auth.v1.AuthService/Check`) backe
 
 Four subsystems:
 
-- **Metrics** — Prometheus counters and histograms with atomic fast-path counters for the hot path.
+- **Metrics** — OpenTelemetry counters and histograms pushed over OTLP, with atomic fast-path counters for the hot path.
 - **Health** — Startup, liveness, and readiness endpoints backed by atomic flags.
 - **Logging** — Structured logging via `log/slog` (JSON or text format).
 - **Tracing** — OpenTelemetry with OTLP HTTP export and configurable sample rate.
@@ -253,7 +253,7 @@ Client ──► EdgeQuota
 | Auth service timeout | Request delayed | Configurable timeout; auth can be disabled |
 | Auth service down | Requests blocked or passed | Fail-open/fail-closed is determined by the auth service HTTP status |
 | Backend unreachable | 502 Bad Gateway | Proxy error handler returns 502; client disconnects are detected |
-| Key extraction fails | Request rejected | 500 Internal Server Error; `key_extract_errors_total` metric incremented |
+| Key extraction fails | Request rejected | 500 Internal Server Error; `edgequota.key_extract.errors` metric incremented |
 | In-memory fallback full | Eviction of oldest keys | ~10% of keys evicted when 65,536 cap is reached |
 
 ### Recovery Loop
@@ -332,7 +332,7 @@ EdgeQuota is designed for microsecond-level overhead on the critical path:
 | External rate limit service call | 1–10 ms (cached: 0 μs) |
 | Proxy overhead (header copy + routing) | < 50 μs |
 
-The hot path avoids allocations by using atomic counters for metrics. Prometheus counters are incremented alongside atomic counters but are only scraped periodically.
+The hot path avoids allocations by using atomic counters for metrics. OpenTelemetry counters are recorded alongside the atomic counters and pushed over OTLP.
 
 ---
 

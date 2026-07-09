@@ -54,13 +54,13 @@ EdgeQuota retries Redis connections indefinitely with capped exponential backoff
 1. **`rate_limit.static.average` is 0**: this disables rate limiting entirely.
 2. **`failure_policy: passThrough`**: if Redis is down, all requests are allowed.
 3. **External rate limit service returns `average: 0`**: this means "unlimited" for that key.
-4. **Check metrics**: `edgequota_redis_errors_total` indicates Redis connectivity problems.
+4. **Check metrics**: `edgequota.redis.errors` indicates Redis connectivity problems.
 
 ### In-memory fallback is active
 
-When `edgequota_fallback_used_total` is incrementing, Redis is unreachable and the in-memory fallback limiter is active. This provides approximate per-instance rate limiting until Redis recovers.
+When `edgequota.ratelimit.fallback_used` is incrementing, Redis is unreachable and the in-memory fallback limiter is active. This provides approximate per-instance rate limiting until Redis recovers.
 
-The recovery loop runs in the background and reconnects automatically. Monitor `edgequota_redis_healthy` (0 = unhealthy, 1 = healthy).
+The recovery loop runs in the background and reconnects automatically. Monitor `edgequota.redis.healthy` (0 = unhealthy, 1 = healthy).
 
 ### Redis log format is inconsistent
 
@@ -148,11 +148,11 @@ The auth service can inject headers into the upstream request via `request_heade
 
 ### Events are being dropped
 
-When `edgequota_events_dropped_total` is incrementing, the ring buffer is full. Increase `events.buffer_size` or decrease `events.flush_interval` to flush more frequently.
+When `edgequota.events.dropped` is incrementing, the ring buffer is full. Increase `events.buffer_size` or decrease `events.flush_interval` to flush more frequently.
 
 ### Events fail to send
 
-When `edgequota_events_send_failures_total` is incrementing, the events receiver is not responding with 2xx. Check:
+When `edgequota.events.send_failures` is incrementing, the events receiver is not responding with 2xx. Check:
 
 1. The receiver URL is correct and reachable.
 2. Custom headers (authentication) are configured correctly.
@@ -172,7 +172,7 @@ Certain headers cannot be set as custom event headers because they would break H
 
 ### Low cache hit rate
 
-When `edgequota_response_cache_hits_total` is low relative to `edgequota_response_cache_misses_total`:
+When `edgequota.response_cache.lookups` with `edgequota.cache.result=hit` is low relative to `edgequota.cache.result=miss`:
 
 1. **Backend not returning `Cache-Control`**: EdgeQuota only caches responses with explicit `Cache-Control: max-age=N` or `Cache-Control: public, max-age=N`. Responses without cache directives are never cached.
 2. **Backend returning `no-store` or `private`**: These directives prevent caching. Check the backend's response headers with `curl -I`.
@@ -184,7 +184,7 @@ When `edgequota_response_cache_hits_total` is low relative to `edgequota_respons
 
 1. **Wrong key format**: Purge by key requires the exact internal cache key format (`METHOD|PATH?QUERY|Headers`). Use the access log `rl_key` field to find the correct key.
 2. **Tag not set**: Tag-based purge requires the backend to return `Surrogate-Key` or `Cache-Tag` headers. Verify the backend includes these headers.
-3. **Redis connectivity**: Purge operations write to Redis. Check `edgequota_response_cache_store_errors_total` for Redis failures.
+3. **Redis connectivity**: Purge operations write to Redis. Check `edgequota.redis.errors` (`edgequota.redis.pool=response_cache`) for Redis failures.
 
 ### Stale content being served
 
@@ -193,10 +193,10 @@ When `edgequota_response_cache_hits_total` is low relative to `edgequota_respons
 
 ### Cache store errors
 
-When `edgequota_response_cache_store_errors_total` is incrementing:
+When `edgequota.redis.errors` (`edgequota.redis.pool=response_cache`) is incrementing, response-cache writes are failing:
 
 1. **Redis memory full**: The response cache Redis may be out of memory. Check `redis INFO memory`.
-2. **Redis connectivity**: Check `edgequota_redis_errors_total` and Redis logs.
+2. **Redis connectivity**: Check `edgequota.redis.errors` and Redis logs.
 3. **Response too large for Redis**: Extremely large responses may exceed Redis's `proto-max-bulk-len`. Consider lowering `cache.max_body_size`.
 
 ### Cache not enabled
@@ -252,16 +252,16 @@ Check which stage is the bottleneck:
 
 | Metric | Stage |
 |--------|-------|
-| `edgequota_auth_duration_seconds` | Auth service |
-| `edgequota_external_rl_duration_seconds` | External rate limit service |
-| `edgequota_backend_duration_seconds` | Backend proxy |
-| `edgequota_request_duration_seconds` | End-to-end |
+| `edgequota.auth.duration` | Auth service |
+| `edgequota.external_ratelimit.duration` | External rate limit service |
+| `edgequota.backend.duration` | Backend proxy |
+| `http.server.request.duration` | End-to-end |
 
 If auth or external RL latency is high, check the external service performance and consider increasing timeout values.
 
 ### 503 from concurrency limiter
 
-When `edgequota_concurrent_requests_rejected_total` is incrementing, `server.max_concurrent_requests` is being exceeded. Either increase the limit or scale out to more replicas.
+When `edgequota.concurrency.rejected` is incrementing, `server.max_concurrent_requests` is being exceeded. Either increase the limit or scale out to more replicas.
 
 ### Redis latency spikes
 
@@ -297,11 +297,9 @@ curl http://localhost:9090/v1/config | jq .
 curl http://localhost:9090/v1/stats | jq .
 ```
 
-### Check Prometheus metrics
+### Inspect metrics
 
-```bash
-curl http://localhost:9090/metrics | grep edgequota_
-```
+EdgeQuota no longer exposes a Prometheus `/metrics` scrape endpoint — metrics are pushed over OTLP to the collector (the same endpoint as tracing). For a quick counter snapshot without a backend, use the admin server's `/v1/stats` (shown above), which returns the atomic counters (`allowed`, `limited`, `redis_errors`, `fallback_used`, `readonly_retries`, `key_extract_errors`, `auth_errors`, `auth_denied`, `auth_canceled`). For the full metric set, query the observability backend (Dash0), where names are surfaced dotted-verbatim as `otel_metric_name` (e.g. `otel_metric_name="edgequota.requests"`) scoped by `service_name="edgequota"`.
 
 ### Test rate limiting
 

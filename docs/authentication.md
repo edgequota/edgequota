@@ -192,7 +192,7 @@ EdgeQuota forwards all client headers to the auth service, including those that 
 
 When the auth service does not respond within the timeout, EdgeQuota:
 
-1. Increments `edgequota_auth_errors_total`.
+1. Records `edgequota.auth.outcomes` with `edgequota.auth.outcome=error`.
 2. Applies the configured `failure_policy`.
 
 #### Circuit Breaker
@@ -208,7 +208,7 @@ EdgeQuota includes a built-in circuit breaker for the auth service to prevent ca
 **Lifecycle:**
 
 1. **Closed** (normal) — all requests are forwarded to the auth service.
-2. **Open** — after 5 consecutive failures, the breaker opens. Requests immediately receive the `failure_policy` result without waiting for the timeout. `edgequota_auth_errors_total` is still incremented.
+2. **Open** — after 5 consecutive failures, the breaker opens. Requests immediately receive the `failure_policy` result without waiting for the timeout. `edgequota.auth.outcomes` (`edgequota.auth.outcome=error`) is still recorded.
 3. **Half-open** — after 30 s, one probe request is forwarded. If it succeeds, the breaker closes. If it fails, the breaker re-opens for another 30 s.
 
 The circuit breaker is transparent to clients — the `failure_policy` determines what the client sees while the breaker is open.

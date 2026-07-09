@@ -21,7 +21,7 @@ EdgeQuota is an edge-native reverse proxy that enforces distributed rate limitin
 
 - [Deployment](deployment.md) -- Kubernetes deployment, horizontal scaling, Redis topology, HA, autoscaling, and production sizing.
 - [Deployment Scenarios](deployment-scenarios.md) -- Common deployment patterns: static RL only, auth + static RL, external RL (FE/assets), and auth + external RL.
-- [Observability](observability.md) -- Prometheus metrics, health probes, structured logging, OpenTelemetry tracing, and Grafana dashboards.
+- [Observability](observability.md) -- OpenTelemetry metrics, health probes, structured logging, OpenTelemetry tracing, and dashboards.
 - [Security](security.md) -- Threat model, SSRF protection, header trust, Redis security, TLS, and container hardening.
 
 ## Ecosystem

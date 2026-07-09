@@ -247,7 +247,6 @@ EdgeQuota exposes operational endpoints on the admin server (default: `:9090`):
 | `/startz` | GET | Startup probe |
 | `/healthz` | GET | Liveness probe |
 | `/readyz` | GET | Readiness probe. Pass `?deep=true` to actively ping Redis. |
-| `/metrics` | GET | Prometheus metrics |
 | `/v1/config` | GET | Current sanitized configuration (secrets redacted) |
 | `/v1/stats` | GET | Runtime statistics (atomic counter snapshot) |
 

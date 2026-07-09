@@ -1,108 +1,81 @@
 # Observability
 
-This document describes EdgeQuota's Prometheus metrics, health endpoints, structured logging, OpenTelemetry tracing, and suggested Grafana dashboards.
+This document describes EdgeQuota's OpenTelemetry metrics, health endpoints, structured logging, OpenTelemetry tracing, and suggested dashboards.
 
 ---
 
-## Prometheus Metrics
+## Metrics
 
-Metrics are exposed on the admin server at `GET :9090/metrics` in Prometheus exposition format.
+EdgeQuota emits **portable OpenTelemetry metrics** and **pushes them over OTLP** to the configured collector (the same endpoint as tracing — see [Metrics configuration](#configuration-1)). There is **no Prometheus `/metrics` scrape endpoint**: names are dotted OTel semconv identifiers (no `_total`/`_seconds` suffixes; the unit is a separate field), attributes replace Prometheus labels, and the five `*.duration` histograms carry **exemplars** that link a data point back to the trace that recorded it.
+
+> **PromQL note (Dash0 / OTLP→Prometheus backends):** the metric name is surfaced **dotted, verbatim** as the value of `otel_metric_name` (e.g. `otel_metric_name="edgequota.ratelimit.decisions"` — no `_total`/`_bucket`), while attribute **keys** are surfaced with dots replaced by underscores (e.g. `edgequota_ratelimit_decision="allowed"`). Scope queries by `service_name="edgequota"`.
 
 ### Counters
 
-| Metric | Description | When Incremented |
-|--------|-------------|-----------------|
-| `edgequota_requests_allowed_total` | Requests that passed rate limiting | Every request allowed by the token bucket |
-| `edgequota_requests_limited_total` | Requests rejected by rate limiting | Every 429 response from rate limiting |
-| `edgequota_redis_errors_total` | Redis operation errors | Redis connection failures, timeouts, command errors |
-| `edgequota_fallback_used_total` | In-memory fallback activations | Every request handled by the in-memory limiter when Redis is down |
-| `edgequota_auth_errors_total` | Auth service call errors | Auth service timeout, connection error, or non-HTTP error |
-| `edgequota_auth_denied_total` | Requests denied by auth service | Auth service returns non-200 status |
-| `edgequota_key_extract_errors_total` | Key extraction failures | Missing required header, malformed remote address |
-| `edgequota_requests_total` | Total HTTP requests | Labels: `method`, `status_code` (family-bucketed: `1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`unknown`). Bucketing keeps the series count bounded over long pod lifetimes. |
-| `edgequota_tenant_requests_allowed_total` | Per-tenant allowed requests | Label: `tenant`. Capped at `max_tenant_labels`; excess tenants aggregated under `__overflow__`. |
-| `edgequota_tenant_requests_limited_total` | Per-tenant rate-limited requests | Label: `tenant`. Same cardinality cap as above. |
-| `edgequota_tenant_label_overflow_total` | Tenant label cap exceeded | A request's tenant was bucketed under `__overflow__` |
-| `edgequota_tenant_key_rejected_total` | Tenant key validation failures | External RL service returned an invalid `tenant_key` (length > 256 or invalid characters) |
-| `edgequota_events_dropped_total` | Events dropped from ring buffer | Ring buffer overflow; oldest events overwritten |
-| `edgequota_events_send_failures_total` | Event batch send failures | Batch failed to send after all retries |
-| `edgequota_concurrent_requests_rejected_total` | Concurrency limit rejections | `max_concurrent_requests` exceeded; request received 503 |
-| `edgequota_external_rl_semaphore_rejected_total` | External RL semaphore rejections | `max_concurrent_requests` for external RL calls exceeded |
-| `edgequota_external_rl_singleflight_shared_total` | Singleflight shared results | A concurrent cache miss shared the result of another in-flight external call |
-| `edgequota_external_rl_cache_hits_total` | External RL cache hits | External RL lookup served from fresh Redis cache |
-| `edgequota_external_rl_cache_misses_total` | External RL cache misses | External RL lookup required a service call (cache miss) |
-| `edgequota_external_rl_cache_stale_hits_total` | External RL stale cache hits | External RL lookup served from stale cache (circuit open, semaphore full, or fetch error) |
-| `edgequota_response_cache_hits_total` | Response cache hits | Request served from the CDN-style response cache |
-| `edgequota_response_cache_misses_total` | Response cache misses | Request missed the cache and was proxied to the backend |
-| `edgequota_response_cache_stale_hits_total` | Response cache stale hits | Stale cache entry revalidated via conditional request (304 Not Modified) |
-| `edgequota_response_cache_stores_total` | Response cache stores | Backend response stored in cache |
-| `edgequota_response_cache_skips_total` | Response cache skips | Response skipped from caching (no-store, too large, streaming, non-cacheable status) |
-| `edgequota_response_cache_purges_total` | Response cache purge operations | Purge executed (by key or by tag) |
+| Metric | Attributes | Description |
+|--------|-----------|-------------|
+| `edgequota.requests` | `http.request.method`, `edgequota.status_class` (`2xx`..`5xx`/`unknown`), `network.protocol.version` | Traffic source of truth — recorded on every terminal path, including streaming and preflight |
+| `edgequota.ratelimit.decisions` | `edgequota.ratelimit.decision` (`allowed`\|`limited`) | Rate-limit decisions (replaces `requests_allowed_total`/`requests_limited_total`) |
+| `edgequota.ratelimit.fallback_used` | `edgequota.redis.pool` | In-memory fallback activations when Redis is down |
+| `edgequota.concurrency.rejected` | — | `max_concurrent_requests` 503s (their only home — they return before the traffic counter) |
+| `edgequota.key_extract.errors` | — | Rate-limit key extraction failures |
+| `edgequota.tenant_key.rejected` | — | External RL service returned an invalid `tenant_key` |
+| `edgequota.auth.outcomes` | `edgequota.auth.outcome` (`error`\|`denied`\|`canceled`) | External auth outcomes (`canceled` = client disconnect, not an auth failure) |
+| `edgequota.external_ratelimit.cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | External RL cache lookups |
+| `edgequota.external_ratelimit.semaphore_rejected` | — | External RL requests rejected by the concurrency semaphore |
+| `edgequota.external_ratelimit.singleflight_shared` | — | External RL requests that shared a singleflight result |
+| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | Response-cache lookups |
+| `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations |
+| `edgequota.redis.errors` | `edgequota.redis.pool` | Redis operation errors |
+| `edgequota.redis.readonly_retries` | — | Redis `READONLY` retries (replica failover) |
+| `edgequota.connections` | `network.protocol.name`, `network.protocol.version`, `edgequota.tls.mode` (`mtls`\|`tls`\|`plain`) | Requests by protocol and TLS mode |
+| `edgequota.streaming.connections` | `edgequota.stream.protocol` | Streaming connections opened (SSE/WS/gRPC) |
+| `edgequota.events.dropped` | — | Usage events dropped from the ring buffer |
+| `edgequota.events.send_failures` | — | Event batches that failed after all retries |
+| `edgequota.cors.preflight_bypassed` | — | CORS preflights that bypassed auth + rate limiting |
 
-### Gauges
+### Up/down counters (gauges)
 
-| Metric | Description |
-|--------|-------------|
-| `edgequota_redis_healthy` | Whether Redis is reachable: `1` = healthy, `0` = unhealthy. Updated by the recovery loop. |
-| `edgequota_build_info` | Build information (value always 1). Labels: `version`, `goversion`. |
-| `edgequota_config_last_reload_timestamp_seconds` | Unix timestamp of the last successful config reload. |
-| `edgequota_tls_last_reload_timestamp_seconds` | Unix timestamp of the last successful TLS certificate reload. |
-| `edgequota_mtls_ca_last_reload_timestamp_seconds` | Unix timestamp of the last successful mTLS CA certificate reload. |
+| Metric | Attributes | Description |
+|--------|-----------|-------------|
+| `http.server.active_requests` | — | In-flight HTTP requests |
+| `edgequota.streaming.active_connections` | `edgequota.stream.protocol` | Active streaming connections |
+
+### Observable gauges
+
+| Metric | Attributes | Description |
+|--------|-----------|-------------|
+| `edgequota.redis.healthy` | `edgequota.redis.pool` (`ratelimit`\|`external_rl_cache`\|`response_cache`) | `1` = reachable, `0` = unhealthy |
+| `edgequota.reload.last_success.timestamp` | `edgequota.reload.target` (`config`\|`tls`\|`mtls_ca`) | Unix seconds of the last successful reload (`0` until the first) |
 
 ### Histograms
 
-| Metric | Labels | Buckets | Description |
-|--------|--------|---------|-------------|
-| `edgequota_request_duration_seconds` | — | 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 5, 10 | End-to-end request latency including auth, rate limit check, and proxy time |
-| `edgequota_auth_duration_seconds` | — | 0.0005–5s | Latency of external auth checks |
-| `edgequota_external_rl_duration_seconds` | — | 0.0005–5s | Latency of external rate limit service calls |
-| `edgequota_backend_duration_seconds` | — | 0.001–30s | Latency of backend proxy calls |
-| `edgequota_ratelimit_remaining_tokens` | — | 0–1000 | Distribution of remaining tokens across rate-limit checks |
-| `edgequota_response_cache_body_size_bytes` | — | 100–10M | Distribution of cached response body sizes |
+| Metric | Unit | Attributes | Exemplars | Description |
+|--------|------|-----------|-----------|-------------|
+| `http.server.request.duration` | s | `http.request.method`, `http.response.status_code`, `network.protocol.*`, `http.route` | ✅ | End-to-end request latency — **emitted automatically by otelhttp** (not hand-rolled). Its `_count` excludes streaming/preflight; use `edgequota.requests` for traffic. |
+| `edgequota.auth.duration` | s | — | ✅ | External auth check latency |
+| `edgequota.external_ratelimit.duration` | s | — | ✅ | External rate-limit call latency |
+| `edgequota.backend.duration` | s | — | ✅ | Backend proxy latency |
+| `edgequota.streaming.duration` | s | `edgequota.stream.protocol` | ✅ | Streaming connection lifetime |
+| `edgequota.ratelimit.remaining_tokens` | `{token}` | — | — | Distribution of remaining tokens per rate-limit check |
+| `edgequota.response_cache.body.size` | `By` | — | — | Cached response body sizes |
 
-### Go Runtime Metrics
+Explicit histogram bucket boundaries (seconds/bytes/tokens) are preserved from the previous Prometheus histograms via SDK Views, so `by(le)` quantile queries remain accurate across the migration.
 
-The admin server also exposes standard Go and process metrics via `collectors.NewGoCollector()` and `collectors.NewProcessCollector()`:
+### Go runtime metrics
 
-| Metric | Description |
-|--------|-------------|
-| `go_goroutines` | Number of active goroutines |
-| `go_memstats_alloc_bytes` | Current heap allocation |
-| `go_gc_duration_seconds` | GC pause duration |
-| `process_cpu_seconds_total` | Total CPU time |
-| `process_resident_memory_bytes` | Resident memory size |
-| `process_open_fds` | Open file descriptors |
+Go runtime and GC metrics are emitted via the portable `go.opentelemetry.io/contrib/instrumentation/runtime` instrumentation (the OTel replacement for the removed `go_*`/`process_*` Prometheus collectors): `go.goroutine.count`, `go.memory.used`, `go.memory.allocated`, `go.memory.gc.goal`, `go.processor.limit`, `go.config.gogc`. Container CPU/memory come from the platform's kubelet/cAdvisor pipeline.
 
-### Scrape Configuration
+### Configuration
 
-For Kubernetes-native scraping, add annotations to the pod:
+Metrics are enabled independently of tracing but **share the OTLP transport** (endpoint/protocol/insecure) from the [`tracing`](#configuration) block:
 
 ```yaml
-metadata:
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
-    prometheus.io/path: "/metrics"
+metrics:
+  enabled: true    # env: METRICS_ENABLED — default true in dev/stage (helm/TF)
 ```
 
-For Prometheus Operator, use a ServiceMonitor:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: edgequota
-  labels:
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: edgequota
-  endpoints:
-    - port: admin
-      path: /metrics
-      interval: 15s
-```
+When `metrics.enabled` is false the MeterProvider is left no-op (no exporter, no push). Metrics can run with tracing off and vice-versa. Dropped in the migration: per-tenant metrics (`max_tenant_labels` removed — use traces/ClickHouse for per-tenant analysis) and `build_info` (now the `service.name`/`service.version` resource attributes).
 
 ---
 
@@ -327,9 +300,9 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 
 ---
 
-## Grafana Dashboard
+## Dashboard
 
-A comprehensive, importable Grafana dashboard is available at [`deploy/grafana/edgequota-dashboard.json`](../deploy/grafana/edgequota-dashboard.json).
+The canonical dashboard definition lives in the repo under `deploy/observability/` (vendor-neutral; the infra observability stack mirrors it — the repo is the source of truth, infra never ahead). It is being converted to the new dotted OTel metric names as part of the observability rollout, validated against the names actually surfaced by the backend once the metrics land on dev.
 
 **Sections:**
 
@@ -358,7 +331,7 @@ A comprehensive, importable Grafana dashboard is available at [`deploy/grafana/e
 
 ## Alerting Rules
 
-Production-ready Prometheus alerting rules are available at [`deploy/prometheus/alerts.yaml`](../deploy/prometheus/alerts.yaml).
+The canonical alerting rules live in the repo under `deploy/observability/` (mirrored by the infra observability stack). They query the dotted OTel metric names (via the backend's `otel_metric_name` surface) and are finalized during the observability rollout.
 
 | Alert | Severity | Condition |
 |-------|----------|-----------|
@@ -369,7 +342,7 @@ Production-ready Prometheus alerting rules are available at [`deploy/prometheus/
 | EdgeQuotaBackendLatencyHigh | warning | Backend P95 > 5s |
 | EdgeQuotaHighRateLimitRatio | warning | > 50% of requests rate-limited |
 | EdgeQuotaConcurrencyRejections | warning | Requests rejected by concurrency limit |
-| EdgeQuotaRedisUnhealthy | critical | `edgequota_redis_healthy == 0` |
+| EdgeQuotaRedisUnhealthy | critical | `edgequota.redis.healthy == 0` |
 | EdgeQuotaRedisErrors | warning | Redis errors > 1/s |
 | EdgeQuotaFallbackActive | warning | In-memory fallback in use |
 | EdgeQuotaAuthErrors | critical | Auth service returning errors |
@@ -407,7 +380,8 @@ curl http://localhost:9090/v1/stats | jq .
   "readonly_retries": 0,
   "key_extract_errors": 0,
   "auth_errors": 0,
-  "auth_denied": 3
+  "auth_denied": 3,
+  "auth_canceled": 1
 }
 ```
 

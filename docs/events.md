@@ -225,7 +225,7 @@ When the ring buffer is full, new events overwrite the oldest entries. This is a
 
 When events are dropped, EdgeQuota increments:
 
-- The `edgequota_events_dropped_total` Prometheus counter
+- The `edgequota.events.dropped` OpenTelemetry counter
 - A rate-limited warning log (once per flush interval)
 
 ### Retry Logic
@@ -238,7 +238,7 @@ When a send fails, the batch is retried with exponential backoff:
 | 2 | `retry_backoff * 2` (200ms) |
 | 3 | `retry_backoff * 4` (400ms) |
 
-After `max_retries` attempts, the batch is discarded and `edgequota_events_send_failures_total` is incremented.
+After `max_retries` attempts, the batch is discarded and `edgequota.events.send_failures` is incremented.
 
 ---
 
@@ -246,8 +246,10 @@ After `max_retries` attempts, the batch is discarded and `edgequota_events_send_
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `edgequota_events_dropped_total` | Counter | Events dropped due to ring buffer overflow |
-| `edgequota_events_send_failures_total` | Counter | Event batches that failed after all retries |
+| `edgequota.events.dropped` | Counter | Events dropped due to ring buffer overflow |
+| `edgequota.events.send_failures` | Counter | Event batches that failed after all retries |
+
+These are portable OpenTelemetry metrics pushed over OTLP (no Prometheus `/metrics` scrape endpoint); on a Prometheus-compatible backend the names are surfaced dotted verbatim as `otel_metric_name`. See [Observability](observability.md#metrics) for the full model.
 
 ---
 
@@ -316,4 +318,4 @@ func main() {
 
 - [Configuration Reference](configuration.md) -- Full `events` config section.
 - [API Reference](api-reference.md) -- Proto and OpenAPI definitions for the events service.
-- [Observability](observability.md) -- Events-related Prometheus metrics.
+- [Observability](observability.md) -- Events-related OpenTelemetry metrics.

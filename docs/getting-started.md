@@ -54,8 +54,10 @@ curl http://localhost:9090/healthz
 curl http://localhost:9090/readyz
 curl http://localhost:9090/startz
 
-# Prometheus metrics
-curl http://localhost:9090/metrics
+# Runtime stats snapshot (atomic counters: allowed, limited, redis_errors, ...)
+curl http://localhost:9090/v1/stats
+
+# Metrics are pushed to the OTLP collector, not scraped — there is no /metrics endpoint.
 ```
 
 ---
@@ -140,10 +142,6 @@ spec:
     metadata:
       labels:
         app: edgequota
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 60
       containers:
