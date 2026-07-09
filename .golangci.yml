@@ -93,3 +93,10 @@ linters:
           - revive
           - staticcheck
           - govet
+      # G101 is entropy-based and false-positives on the dotted OTel metric-name
+      # constants in this file (e.g. "edgequota.redis.errors"). They are metric
+      # identifiers, not credentials.
+      - path: internal/observability/metrics\.go
+        text: G101
+        linters:
+          - gosec

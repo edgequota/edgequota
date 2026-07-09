@@ -557,13 +557,13 @@ func (c *Chain) initClients(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("external ratelimit client: %w", extErr)
 		}
 		extClient.SetMetricHooks(
-			c.metrics.PromExtRLSemaphoreRejected.Inc,
-			c.metrics.PromExtRLSingleflightShared.Inc,
+			c.metrics.IncExtRLSemaphoreRejected,
+			c.metrics.IncExtRLSingleflightShared,
 		)
 		extClient.SetCacheMetricHooks(
-			c.metrics.PromExtRLCacheHit.Inc,
-			c.metrics.PromExtRLCacheMiss.Inc,
-			c.metrics.PromExtRLCacheStaleHit.Inc,
+			c.metrics.IncExtRLCacheHit,
+			c.metrics.IncExtRLCacheMiss,
+			c.metrics.IncExtRLCacheStaleHit,
 		)
 		c.externalRL.Store(extClient)
 		logger.Info("external rate limit service enabled",
@@ -605,13 +605,13 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 		cache.WithMaxBodySize(maxBody),
 		cache.WithLogger(logger),
 	)
-	store.OnHit = c.metrics.PromRespCacheHit.Inc
-	store.OnMiss = c.metrics.PromRespCacheMiss.Inc
-	store.OnStaleHit = c.metrics.PromRespCacheStaleHit.Inc
-	store.OnStore = c.metrics.PromRespCacheStore.Inc
-	store.OnSkip = c.metrics.PromRespCacheSkip.Inc
-	store.OnPurge = c.metrics.PromRespCachePurge.Inc
-	store.OnBodySize = c.metrics.PromRespCacheBodySize.Observe
+	store.OnHit = c.metrics.IncRespCacheHit
+	store.OnMiss = c.metrics.IncRespCacheMiss
+	store.OnStaleHit = c.metrics.IncRespCacheStaleHit
+	store.OnStore = c.metrics.IncRespCacheStore
+	store.OnSkip = c.metrics.IncRespCacheSkip
+	store.OnPurge = c.metrics.IncRespCachePurge
+	store.OnBodySize = c.metrics.ObserveRespCacheBodySize
 
 	c.responseCache.Store(store)
 	if c.proxyRef != nil {
@@ -1012,7 +1012,7 @@ func (c *Chain) fetchExternalLimitsWithSpan(r *http.Request, key string) (*ratel
 		ctx, extSpan := tracer.Start(r.Context(), "edgequota.external_rl")
 		extStart := time.Now()
 		limits, resolved := c.fetchExternalLimits(r.WithContext(ctx), key)
-		c.metrics.PromExternalRLDuration.Observe(time.Since(extStart).Seconds())
+		c.metrics.ObserveExternalRLDuration(ctx, time.Since(extStart).Seconds())
 		extSpan.End()
 		return limits, resolved
 	}
@@ -1026,7 +1026,7 @@ func (c *Chain) acquireConcurrency(sw *statusWriter) bool {
 	if c.concurrencySem == nil || c.concurrencySem.TryAcquire(1) {
 		return true
 	}
-	c.metrics.PromConcurrencyRejected.Inc()
+	c.metrics.IncConcurrencyRejected()
 	sw.code = http.StatusServiceUnavailable
 	writeJSONError(sw, http.StatusServiceUnavailable, "overloaded", "server at capacity", 0)
 	return false
@@ -1068,7 +1068,7 @@ func (c *Chain) runAuth(sw *statusWriter, r *http.Request) bool {
 	ctx, authSpan := tracer.Start(r.Context(), "edgequota.auth")
 	authStart := time.Now()
 	allowed := c.checkAuth(sw, r.WithContext(ctx), ac)
-	c.metrics.PromAuthDuration.Observe(time.Since(authStart).Seconds())
+	c.metrics.ObserveAuthDuration(ctx, time.Since(authStart).Seconds())
 	authSpan.End()
 	return allowed
 }
@@ -1100,13 +1100,15 @@ func (c *Chain) handlePreflightBypass(sw *statusWriter, r *http.Request, origina
 		return false
 	}
 	c.metrics.IncAllowed()
-	c.metrics.PromPreflightBypassed.Inc()
+	c.metrics.IncPreflightBypassed()
 	backendStart := time.Now()
 	(*c.next.Load()).ServeHTTP(sw, r)
-	c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+	c.metrics.ObserveBackendDuration(r.Context(), time.Since(backendStart).Seconds())
 	elapsed := time.Since(start)
-	c.metrics.PromRequestsTotal.WithLabelValues(r.Method, observability.StatusFamily(sw.code)).Inc()
-	c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
+	// Request latency is emitted by otelhttp as http.server.request.duration.
+	// (Preflight is filtered out of otelhttp spans/metrics by design, so its
+	// latency intentionally drops from the histogram — it stays counted here.)
+	c.metrics.RecordRequest(r.Context(), r.Method, sw.code, r.Proto)
 	c.emitAccessLog(r, sw, originalHost, reqID, "", "", elapsed)
 	sw.ResponseWriter = nil
 	statusWriterPool.Put(sw)
@@ -1129,15 +1131,15 @@ func (c *Chain) prepareRequest(w http.ResponseWriter, r *http.Request) (sw *stat
 	sw.Header().Set(requestIDHeader, reqID)
 
 	mtls.InjectHeaders(r)
-	c.metrics.PromRequestsByTransport.WithLabelValues(r.Proto, tlsMode(r)).Inc()
+	c.metrics.IncConnection(r.Proto, tlsMode(r))
 
 	originalHost = r.Host
 	return sw, reqID, originalHost
 }
 
 func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	c.metrics.PromRequestsInFlight.Inc()
-	defer c.metrics.PromRequestsInFlight.Dec()
+	c.metrics.IncRequestsInFlight()
+	defer c.metrics.DecRequestsInFlight()
 
 	start := time.Now()
 	sw, reqID, originalHost := c.prepareRequest(w, r)
@@ -1156,8 +1158,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proto := streamingProtocol(r)
 	streaming := proto != ""
 	if streaming {
-		c.metrics.PromStreamingTotal.WithLabelValues(proto).Inc()
-		c.metrics.PromStreamingInFlight.WithLabelValues(proto).Inc()
+		c.metrics.IncStreamingConn(proto)
 	}
 
 	defer func() {
@@ -1165,12 +1166,13 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.concurrencySem.Release(1)
 		}
 		elapsed := time.Since(start)
-		c.metrics.PromRequestsTotal.WithLabelValues(r.Method, observability.StatusFamily(sw.code)).Inc()
+		// Traffic source of truth (spans streaming + non-streaming). Non-streaming
+		// latency is emitted by otelhttp as http.server.request.duration; streaming
+		// connections get their own duration histogram below.
+		c.metrics.RecordRequest(r.Context(), r.Method, sw.code, r.Proto)
 		if streaming {
-			c.metrics.PromStreamingInFlight.WithLabelValues(proto).Dec()
-			c.metrics.PromStreamingDuration.WithLabelValues(proto).Observe(elapsed.Seconds())
-		} else {
-			c.metrics.PromRequestDuration.Observe(elapsed.Seconds())
+			c.metrics.DecStreamingActive(proto)
+			c.metrics.ObserveStreamingDuration(r.Context(), proto, elapsed.Seconds())
 		}
 		c.emitAccessLog(r, sw, originalHost, reqID, logRLKey, logTenantID, elapsed)
 		sw.ResponseWriter = nil
@@ -1186,7 +1188,7 @@ func (c *Chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		backendStart := time.Now()
 		(*c.next.Load()).ServeHTTP(sw, r)
 		if !streaming {
-			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+			c.metrics.ObserveBackendDuration(r.Context(), time.Since(backendStart).Seconds())
 		}
 		return
 	}
@@ -1700,7 +1702,7 @@ func (c *Chain) handleLimiterError(limErr error) {
 		}
 
 		if shouldLog {
-			c.metrics.PromRedisHealthy.WithLabelValues("ratelimit").Set(0)
+			c.metrics.SetRedisHealthy("ratelimit", false)
 			c.logger.Warn("redis became unhealthy, switching to fallback",
 				"error", limErr, "policy", c.staticRL.Load().failurePolicy)
 		}
@@ -1725,17 +1727,11 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 
 	if !result.Allowed {
 		c.metrics.IncLimited()
-		if isTenantKey {
-			c.metrics.IncTenantLimited(tenantID)
-		}
 		c.emitUsageEvent(r, resolvedKey, tenantID, result, http.StatusTooManyRequests)
 		c.serveRateLimited(w, result)
 		return
 	}
 	c.metrics.IncAllowed()
-	if isTenantKey {
-		c.metrics.IncTenantAllowed(tenantID)
-	}
 	c.emitUsageEvent(r, resolvedKey, tenantID, result, http.StatusOK)
 	ctx, proxySpan := tracer.Start(r.Context(), "edgequota.proxy")
 	proxySpan.SetAttributes(
@@ -1746,7 +1742,7 @@ func (c *Chain) serveResult(w http.ResponseWriter, r *http.Request, resolvedKey 
 	backendStart := time.Now()
 	(*c.next.Load()).ServeHTTP(w, r.WithContext(ctx))
 	if !isStreamingRequest(r) {
-		c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+		c.metrics.ObserveBackendDuration(ctx, time.Since(backendStart).Seconds())
 	}
 	proxySpan.End()
 }
@@ -1843,7 +1839,7 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 		backendStart := time.Now()
 		(*c.next.Load()).ServeHTTP(w, r)
 		if !isStreamingRequest(r) {
-			c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+			c.metrics.ObserveBackendDuration(r.Context(), time.Since(backendStart).Seconds())
 		}
 
 	case policyFailClosed:
@@ -1859,7 +1855,7 @@ func (c *Chain) handleRedisFailurePolicy(w http.ResponseWriter, r *http.Request,
 			backendStart := time.Now()
 			(*c.next.Load()).ServeHTTP(w, r)
 			if !isStreamingRequest(r) {
-				c.metrics.PromBackendDuration.Observe(time.Since(backendStart).Seconds())
+				c.metrics.ObserveBackendDuration(r.Context(), time.Since(backendStart).Seconds())
 			}
 		} else {
 			c.metrics.IncLimited()
@@ -2045,7 +2041,7 @@ func (c *Chain) recoveryInstall(client redis.Client) {
 		}
 	}
 
-	c.metrics.PromRedisHealthy.WithLabelValues("ratelimit").Set(1)
+	c.metrics.SetRedisHealthy("ratelimit", true)
 	c.logger.Info("redis connection recovered")
 }
 
@@ -2254,13 +2250,13 @@ func (c *Chain) reloadExternalRL(newCfg *config.Config) {
 		return
 	}
 	newExt.SetMetricHooks(
-		c.metrics.PromExtRLSemaphoreRejected.Inc,
-		c.metrics.PromExtRLSingleflightShared.Inc,
+		c.metrics.IncExtRLSemaphoreRejected,
+		c.metrics.IncExtRLSingleflightShared,
 	)
 	newExt.SetCacheMetricHooks(
-		c.metrics.PromExtRLCacheHit.Inc,
-		c.metrics.PromExtRLCacheMiss.Inc,
-		c.metrics.PromExtRLCacheStaleHit.Inc,
+		c.metrics.IncExtRLCacheHit,
+		c.metrics.IncExtRLCacheMiss,
+		c.metrics.IncExtRLCacheStaleHit,
 	)
 	oldExt := c.externalRL.Swap(newExt)
 	if oldExt != nil {

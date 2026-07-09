@@ -251,7 +251,7 @@ func (e *Emitter) sendHTTP(batch []UsageEvent) {
 
 	e.logger.Error("events batch send failed after all retries",
 		"attempts", e.maxRetries, "count", len(batch))
-	e.metrics.PromEventsSendFailures.Inc()
+	e.metrics.IncEventsSendFailures()
 }
 
 func (e *Emitter) trySendHTTP(body []byte, count int) bool {

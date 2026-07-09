@@ -1,6 +1,8 @@
 // Package server orchestrates EdgeQuota's main proxy server and admin server.
 // The main server handles incoming traffic (HTTP, gRPC, SSE, WebSocket) while
-// the admin server exposes health checks, readiness probes, and Prometheus metrics.
+// the admin server exposes health checks, readiness probes, the /v1/stats
+// counter snapshot, and pprof. First-party metrics are pushed to the OTLP
+// collector (there is no Prometheus /metrics scrape endpoint).
 package server
 
 import (
@@ -24,9 +26,6 @@ import (
 	"github.com/edgequota/edgequota/internal/observability"
 	"github.com/edgequota/edgequota/internal/proxy"
 	iredis "github.com/edgequota/edgequota/internal/redis"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -47,18 +46,14 @@ type Server struct {
 	health          *observability.HealthChecker
 	metrics         *observability.Metrics
 	tracingShutdown func(context.Context) error
+	metricsShutdown func(context.Context) error
 	certs           *certHolder     // non-nil when TLS is enabled; supports hot-reload.
 	mtlsCAs         *clientCAHolder // non-nil when mTLS is enabled; supports hot-reload.
 }
 
 // New creates a new EdgeQuota server instance.
 func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, error) {
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	reg.MustRegister(collectors.NewGoCollector())
-
-	observability.RegisterBuildInfo(reg, version)
-	metrics := observability.NewMetrics(reg, int64(cfg.RateLimit.MaxTenantLabels))
+	metrics := observability.NewMetrics(logger)
 	health := observability.NewHealthChecker()
 
 	// Warn about insecure configurations at startup.
@@ -83,7 +78,7 @@ func New(cfg *config.Config, logger *slog.Logger, version string) (*Server, erro
 	}
 
 	mainServer, h3srv := buildMainServer(cfg, chain, logger)
-	adminServer, adminRL := buildAdminServer(cfg, health, reg, metrics, logger, chain.ResponseCache, chain)
+	adminServer, adminRL := buildAdminServer(cfg, health, metrics, logger, chain.ResponseCache, chain)
 
 	var mtlsSrv *http.Server
 	if cfg.Server.TLS.MTLS.Enabled {
@@ -401,7 +396,7 @@ func (rl *adminRateLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rl.handler.ServeHTTP(w, r)
 }
 
-func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, reg *prometheus.Registry, metrics *observability.Metrics, logger *slog.Logger, cacheStore func() *cache.Store, chain AuthCachePurger) (*http.Server, *adminRateLimiter) {
+func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, metrics *observability.Metrics, logger *slog.Logger, cacheStore func() *cache.Store, chain AuthCachePurger) (*http.Server, *adminRateLimiter) {
 	adminReadTimeout, _ := config.ParseDuration(cfg.Admin.ReadTimeout, 5*time.Second)
 	adminWriteTimeout, _ := config.ParseDuration(cfg.Admin.WriteTimeout, 10*time.Second)
 	adminIdleTimeout, _ := config.ParseDuration(cfg.Admin.IdleTimeout, 30*time.Second)
@@ -410,9 +405,6 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, r
 	adminMux.Handle("/startz", health.StartzHandler())
 	adminMux.Handle("/healthz", health.HealthzHandler())
 	adminMux.Handle("/readyz", health.ReadyzHandler())
-	adminMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
-		EnableOpenMetrics: true,
-	}))
 	configHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -543,15 +535,35 @@ func tlsMinVersion(cfg *config.Config) uint16 {
 	return tls.VersionTLS12
 }
 
-// Run starts both the main and admin servers and blocks until the context is
-// canceled, then performs a graceful shutdown.
-func (s *Server) Run(ctx context.Context) error {
+// initTelemetry installs the OpenTelemetry tracer and meter providers, storing
+// their shutdown functions on the server. Tracing and metrics are enabled
+// independently but share the OTLP transport (endpoint/protocol/insecure) from
+// the tracing config. Installing the MeterProvider here — after New built the
+// instruments from the global meter — late-binds every instrument, plus
+// otelhttp's http.server.request.duration, onto the real provider.
+func (s *Server) initTelemetry(ctx context.Context) {
 	tracingShutdown, err := observability.InitTracing(ctx, s.cfg.Tracing, s.version)
 	if err != nil {
 		s.logger.Warn("failed to initialize tracing", "error", err)
 		tracingShutdown = func(_ context.Context) error { return nil }
 	}
 	s.tracingShutdown = tracingShutdown
+
+	metricsShutdown, err := observability.InitMetrics(ctx, s.cfg.Tracing, s.cfg.Metrics.Enabled, s.version)
+	if err != nil {
+		s.logger.Warn("failed to initialize metrics", "error", err)
+		metricsShutdown = func(_ context.Context) error { return nil }
+	}
+	s.metricsShutdown = metricsShutdown
+	if !s.cfg.Metrics.Enabled {
+		s.logger.Info("metrics disabled (metrics.enabled=false); MeterProvider left no-op")
+	}
+}
+
+// Run starts both the main and admin servers and blocks until the context is
+// canceled, then performs a graceful shutdown.
+func (s *Server) Run(ctx context.Context) error {
+	s.initTelemetry(ctx)
 
 	// Initialize TLS up-front so that both the main TCP server and the
 	// HTTP/3 (QUIC) server share the same TLSConfig from the start. This
@@ -848,6 +860,12 @@ func (s *Server) shutdown() error {
 	if s.tracingShutdown != nil {
 		if err := s.tracingShutdown(shutdownCtx); err != nil {
 			s.logger.Error("tracing shutdown error", "error", err)
+		}
+	}
+
+	if s.metricsShutdown != nil {
+		if err := s.metricsShutdown(shutdownCtx); err != nil {
+			s.logger.Error("metrics shutdown error", "error", err)
 		}
 	}
 
