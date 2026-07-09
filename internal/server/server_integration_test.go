@@ -117,13 +117,14 @@ func TestServerHealthEndpoints(t *testing.T) {
 		defer resp2.Body.Close()
 		assert.Equal(t, http.StatusOK, resp2.StatusCode)
 
-		// Test metrics endpoint.
-		resp3, err := client.Get("http://" + adminAddr + "/metrics")
+		// Test stats endpoint. The Prometheus /metrics surface was removed in
+		// favor of OTLP push; /v1/stats exposes the mirror atomic counters.
+		resp3, err := client.Get("http://" + adminAddr + "/v1/stats")
 		require.NoError(t, err)
 		defer resp3.Body.Close()
 		assert.Equal(t, http.StatusOK, resp3.StatusCode)
-		metricsBody, _ := io.ReadAll(resp3.Body)
-		assert.Contains(t, string(metricsBody), "edgequota_requests_allowed_total")
+		statsBody, _ := io.ReadAll(resp3.Body)
+		assert.Contains(t, string(statsBody), "allowed")
 
 		cancel()
 		<-done

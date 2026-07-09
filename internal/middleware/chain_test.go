@@ -14,7 +14,6 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +23,7 @@ func testLogger() *slog.Logger {
 }
 
 func testMetrics() *observability.Metrics {
-	return observability.NewMetrics(prometheus.NewRegistry(), 0)
+	return observability.NewMetrics(testLogger())
 }
 
 // findAccessLog scans newline-delimited JSON log output and returns the first

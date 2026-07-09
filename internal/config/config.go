@@ -182,6 +182,7 @@ type Config struct {
 	Events             EventsConfig    `yaml:"events"              envPrefix:"EVENTS_"`
 	Logging            LoggingConfig   `yaml:"logging"             envPrefix:"LOGGING_"`
 	Tracing            TracingConfig   `yaml:"tracing"             envPrefix:"TRACING_"`
+	Metrics            MetricsConfig   `yaml:"metrics"             envPrefix:"METRICS_"`
 }
 
 // CacheConfig controls the CDN-style response cache. When enabled,
@@ -786,11 +787,6 @@ type RateLimitConfig struct {
 	// knob to reduce EXPIRE churn for high-cardinality keys at high rates.
 	MinTTL string `yaml:"min_ttl" env:"MIN_TTL"`
 
-	// MaxTenantLabels caps the number of distinct tenant label values in
-	// per-tenant Prometheus metrics to prevent cardinality explosions.
-	// 0 uses the default of 1000.
-	MaxTenantLabels int `yaml:"max_tenant_labels" env:"MAX_TENANT_LABELS"`
-
 	// Deprecated: MaxRecoveryAttempts is deprecated and will be removed in
 	// a future release. Redis recovery now retries indefinitely with capped
 	// exponential backoff (1 minute cap). Setting a non-zero value logs a
@@ -1027,6 +1023,14 @@ func (c TracingConfig) ResolvedLevel() TracingLevel {
 	default:
 		return TracingLevelExternal
 	}
+}
+
+// MetricsConfig holds first-party OpenTelemetry metrics settings. Metrics are
+// pushed over OTLP to the same collector as traces (the transport — endpoint,
+// protocol, insecure — is borrowed from TracingConfig), but enablement is
+// independent: metrics can run with tracing off and vice-versa.
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled" env:"ENABLED"`
 }
 
 // Defaults returns a Config populated with sensible default values.
@@ -1530,6 +1534,7 @@ type SanitizedConfig struct {
 	RateLimit SanitizedRL      `json:"rate_limit"`
 	Logging   LoggingConfig    `json:"logging"`
 	Tracing   TracingConfig    `json:"tracing"`
+	Metrics   MetricsConfig    `json:"metrics"`
 }
 
 // SanitizedBackend exposes backend transport tuning. The backend URL is
@@ -1588,6 +1593,7 @@ func (c *Config) Sanitized() SanitizedConfig {
 		},
 		Logging: c.Logging,
 		Tracing: c.Tracing,
+		Metrics: c.Metrics,
 	}
 }
 

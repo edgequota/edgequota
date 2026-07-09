@@ -1,0 +1,2355 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "edgequota"
+  },
+  "spec": {
+    "display": {
+      "name": "EdgeQuota \u2014 Edge Rate Limiter / Quota"
+    },
+    "duration": "1h",
+    "panels": {
+      "req_rate": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Request rate (req/s)"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.requests\"}[5m]))"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "err5xx": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "5xx error ratio"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "percent-decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "(sum(rate({otel_metric_name=\"edgequota.requests\", edgequota_status_class=\"5xx\"}[5m])) or vector(0)) / clamp_min(sum(rate({otel_metric_name=\"edgequota.requests\"}[5m])),1)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "p95": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "p95 latency"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "seconds"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"http.server.request.duration\", otel_metric_type=\"histogram\", service_name=\"edgequota\"}[5m])))"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "rl_pct": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Rate-limited %"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "percent-decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "(sum(rate({otel_metric_name=\"edgequota.ratelimit.decisions\", edgequota_ratelimit_decision=\"limited\"}[5m])) or vector(0)) / clamp_min(sum(rate({otel_metric_name=\"edgequota.ratelimit.decisions\", edgequota_ratelimit_decision=\"allowed\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.ratelimit.decisions\", edgequota_ratelimit_decision=\"limited\"}[5m])),1)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "redis": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Redis health (min pool)"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "min({otel_metric_name=\"edgequota.redis.healthy\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "cache": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Cache hit rate"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "percent-decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / clamp_min(sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])),1)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "by_code": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Request rate by status code"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_status_class)(rate({otel_metric_name=\"edgequota.requests\"}[5m]))",
+                    "seriesNameFormat": "{{status_code}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "code_2xx": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "2xx success (req/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.requests\", edgequota_status_class=\"2xx\"}[5m])) or vector(0)",
+                    "seriesNameFormat": "2xx"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "code_3xx": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "3xx redirect (req/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.requests\", edgequota_status_class=\"3xx\"}[5m])) or vector(0)",
+                    "seriesNameFormat": "3xx"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "code_4xx": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "4xx client error (req/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.requests\", edgequota_status_class=\"4xx\"}[5m])) or vector(0)",
+                    "seriesNameFormat": "4xx"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "code_5xx": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "5xx server error (req/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.requests\", edgequota_status_class=\"5xx\"}[5m])) or vector(0)",
+                    "seriesNameFormat": "5xx"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allow_limit": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Allowed / rate-limited / concurrency-rejected (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.ratelimit.decisions\", edgequota_ratelimit_decision=\"allowed\"}[5m]))",
+                    "seriesNameFormat": "allowed"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.ratelimit.decisions\", edgequota_ratelimit_decision=\"limited\"}[5m]))",
+                    "seriesNameFormat": "rate-limited"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.concurrency.rejected\"}[5m]))",
+                    "seriesNameFormat": "concurrency-rejected"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "by_method": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Request rate by method"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (http_request_method)(rate({otel_metric_name=\"edgequota.requests\"}[5m]))",
+                    "seriesNameFormat": "{{method}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "by_proto": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Request rate by HTTP protocol"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (network_protocol_version)(rate({otel_metric_name=\"edgequota.connections\"}[5m]))",
+                    "seriesNameFormat": "{{proto}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "by_tls": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Request rate by TLS mode"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_tls_mode)(rate({otel_metric_name=\"edgequota.connections\"}[5m]))",
+                    "seriesNameFormat": "{{tls}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "e2e": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "End-to-end latency"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le)(rate({otel_metric_name=\"http.server.request.duration\", otel_metric_type=\"histogram\", service_name=\"edgequota\"}[5m])))",
+                    "seriesNameFormat": "p50"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"http.server.request.duration\", otel_metric_type=\"histogram\", service_name=\"edgequota\"}[5m])))",
+                    "seriesNameFormat": "p95"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.99, sum by (le)(rate({otel_metric_name=\"http.server.request.duration\", otel_metric_type=\"histogram\", service_name=\"edgequota\"}[5m])))",
+                    "seriesNameFormat": "p99"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "breakdown": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Latency breakdown p95 (stage)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"edgequota.auth.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "auth"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"edgequota.external_ratelimit.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "external-rl"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"edgequota.backend.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "backend"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "backend": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Backend latency"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le)(rate({otel_metric_name=\"edgequota.backend.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p50"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"edgequota.backend.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p95"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.99, sum by (le)(rate({otel_metric_name=\"edgequota.backend.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p99"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "stream_active": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Active streaming connections"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_stream_protocol)({otel_metric_name=\"edgequota.streaming.active_connections\"})",
+                    "seriesNameFormat": "{{protocol}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "stream_new": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "New streaming connections (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_stream_protocol)(rate({otel_metric_name=\"edgequota.streaming.connections\"}[5m]))",
+                    "seriesNameFormat": "{{protocol}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "stream_dur": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Streaming duration p50/p95"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le, edgequota_stream_protocol)(rate({otel_metric_name=\"edgequota.streaming.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p50 {{protocol}}"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le, edgequota_stream_protocol)(rate({otel_metric_name=\"edgequota.streaming.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p95 {{protocol}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "key_errs": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Key / tenant errors (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.key_extract.errors\"}[5m]))",
+                    "seriesNameFormat": "key-extract"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.tenant_key.rejected\"}[5m]))",
+                    "seriesNameFormat": "tenant-key-rejected"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "rl_redis": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Rate-limit Redis"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "min({otel_metric_name=\"edgequota.redis.healthy\", edgequota_redis_pool=\"ratelimit\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "erl_redis": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "External-RL cache Redis"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "min({otel_metric_name=\"edgequota.redis.healthy\", edgequota_redis_pool=\"external_rl_cache\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "rc_redis": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Response-cache Redis"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "min({otel_metric_name=\"edgequota.redis.healthy\", edgequota_redis_pool=\"response_cache\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "redis_err": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Redis errors (/s) by pool"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_redis_pool)(rate({otel_metric_name=\"edgequota.redis.errors\"}[5m]))",
+                    "seriesNameFormat": "{{pool}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "fallback": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "In-memory fallback (/s) by pool"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (edgequota_redis_pool)(rate({otel_metric_name=\"edgequota.ratelimit.fallback_used\"}[5m]))",
+                    "seriesNameFormat": "{{pool}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "tokens": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Rate-limit remaining tokens p50/p95"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le)(rate({otel_metric_name=\"edgequota.ratelimit.remaining_tokens\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p50"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.95, sum by (le)(rate({otel_metric_name=\"edgequota.ratelimit.remaining_tokens\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p95"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "erl_cache": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "External-RL cache hit/miss/stale (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.external_ratelimit.cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))",
+                    "seriesNameFormat": "hit"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.external_ratelimit.cache.lookups\", edgequota_cache_result=\"miss\"}[5m]))",
+                    "seriesNameFormat": "miss"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.external_ratelimit.cache.lookups\", edgequota_cache_result=\"stale\"}[5m]))",
+                    "seriesNameFormat": "stale-hit"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "erl_conc": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "External-RL concurrency (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.external_ratelimit.semaphore_rejected\"}[5m]))",
+                    "seriesNameFormat": "semaphore-rejected"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.external_ratelimit.singleflight_shared\"}[5m]))",
+                    "seriesNameFormat": "singleflight-shared"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "rc_ops": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Response-cache ops (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))",
+                    "seriesNameFormat": "hits"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m]))",
+                    "seriesNameFormat": "misses"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"stale\"}[5m]))",
+                    "seriesNameFormat": "stale_hits"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.operations\", edgequota_cache_operation=\"store\"}[5m]))",
+                    "seriesNameFormat": "stores"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.operations\", edgequota_cache_operation=\"skip\"}[5m]))",
+                    "seriesNameFormat": "skips"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.operations\", edgequota_cache_operation=\"purge\"}[5m]))",
+                    "seriesNameFormat": "purges"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "rc_ratio": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Response-cache hit ratio"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "percent-decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / clamp_min(sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])),1)",
+                    "seriesNameFormat": "hit-ratio"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "auth_err": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Auth errors / denials / cancellations (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.auth.outcomes\", edgequota_auth_outcome=\"error\"}[5m]))",
+                    "seriesNameFormat": "errors"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.auth.outcomes\", edgequota_auth_outcome=\"denied\"}[5m]))",
+                    "seriesNameFormat": "denied"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.auth.outcomes\", edgequota_auth_outcome=\"canceled\"}[5m])) or vector(0)",
+                    "seriesNameFormat": "canceled (client disconnect)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "auth_lat": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Auth latency p50/p99"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le)(rate({otel_metric_name=\"edgequota.auth.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p50"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.99, sum by (le)(rate({otel_metric_name=\"edgequota.auth.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p99"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "erl_lat": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "External-RL latency p50/p99"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "seconds"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.5, sum by (le)(rate({otel_metric_name=\"edgequota.external_ratelimit.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p50"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "histogram_quantile(0.99, sum by (le)(rate({otel_metric_name=\"edgequota.external_ratelimit.duration\", otel_metric_type=\"histogram\"}[5m])))",
+                    "seriesNameFormat": "p99"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "events": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Event drops & send failures (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.events.dropped\"}[5m]))",
+                    "seriesNameFormat": "dropped"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.events.send_failures\"}[5m]))",
+                    "seriesNameFormat": "send-failures"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "inflight": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Requests in-flight"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum({otel_metric_name=\"http.server.active_requests\", service_name=\"edgequota\"})",
+                    "seriesNameFormat": "in-flight"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "cpu": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "CPU (cores)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (k8s_pod_name)(container_cpu_usage{k8s_container_name=\"edgequota\"})",
+                    "seriesNameFormat": "{{k8s_pod_name}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "mem": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Memory (usage)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "bytes"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (k8s_pod_name)(container_memory_usage_bytes{k8s_container_name=\"edgequota\"})",
+                    "seriesNameFormat": "{{k8s_pod_name}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "goroutines": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Goroutines"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (k8s_pod_name)({otel_metric_name=\"go.goroutine.count\", k8s_deployment_name=\"edgequota\"})",
+                    "seriesNameFormat": "{{k8s_pod_name}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "net": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Network I/O (/s)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "bytes"
+                }
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "sum by (direction)(rate(k8s_pod_network_io_bytes_total{k8s_deployment_name=\"edgequota\"}[5m]))",
+                    "seriesNameFormat": "{{direction}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "cfg_reload": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Since config reload"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "seconds"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "time() - max({otel_metric_name=\"edgequota.reload.last_success.timestamp\", edgequota_reload_target=\"config\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "tls_reload": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Since TLS cert reload"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "seconds"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "time() - max({otel_metric_name=\"edgequota.reload.last_success.timestamp\", edgequota_reload_target=\"tls\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "ca_reload": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Since mTLS CA reload"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "seconds"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "time() - max({otel_metric_name=\"edgequota.reload.last_success.timestamp\", edgequota_reload_target=\"mtls_ca\"})"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Overview",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/req_rate"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/err5xx"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/p95"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/rl_pct"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/redis"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/cache"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Traffic",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/by_code"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/allow_limit"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/by_method"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/by_proto"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/by_tls"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Response codes (by family)",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/code_2xx"
+              }
+            },
+            {
+              "x": 6,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/code_3xx"
+              }
+            },
+            {
+              "x": 12,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/code_4xx"
+              }
+            },
+            {
+              "x": 18,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/code_5xx"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Latency",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/e2e"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/breakdown"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/backend"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Streaming connections",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/stream_active"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/stream_new"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/stream_dur"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Rate limiting / keys",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/key_errs"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Redis pools",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/rl_redis"
+              }
+            },
+            {
+              "x": 6,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/erl_redis"
+              }
+            },
+            {
+              "x": 12,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/rc_redis"
+              }
+            },
+            {
+              "x": 18,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/redis_err"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/fallback"
+              }
+            },
+            {
+              "x": 6,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/tokens"
+              }
+            },
+            {
+              "x": 12,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/erl_cache"
+              }
+            },
+            {
+              "x": 18,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/erl_conc"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/rc_ops"
+              }
+            },
+            {
+              "x": 6,
+              "y": 0,
+              "width": 6,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/rc_ratio"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Auth & external rate limit",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/auth_err"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/auth_lat"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/erl_lat"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Events",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/events"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "System resources (OTel-native)",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/inflight"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/cpu"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/mem"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/goroutines"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/net"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": {
+            "title": "Config & TLS reloads",
+            "collapse": {
+              "open": true
+            }
+          },
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/cfg_reload"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/tls_reload"
+              }
+            },
+            {
+              "x": 16,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/ca_reload"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

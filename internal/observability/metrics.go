@@ -1,34 +1,174 @@
-// Package observability provides Prometheus metrics, health/readiness endpoints,
-// structured logging, and OpenTelemetry tracing for EdgeQuota.
+// Package observability provides OpenTelemetry metrics, health/readiness
+// endpoints, structured logging, and tracing for EdgeQuota.
 package observability
 
 import (
-	"runtime"
-	"sync"
+	"context"
+	"log/slog"
+	"strings"
 	"sync/atomic"
+	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// RegisterBuildInfo creates and sets the edgequota_build_info gauge. This is
-// a static metric (value always 1) whose labels expose the binary version and
-// Go runtime version, following the standard *_build_info convention.
-func RegisterBuildInfo(reg prometheus.Registerer, version string) {
-	if reg == nil {
-		reg = prometheus.DefaultRegisterer
+// meterName is the instrumentation scope for EdgeQuota's first-party metrics.
+// Service identity is carried by the service.name resource attribute (set in
+// InitMetrics), so metric names are domain-scoped ("edgequota.*"), not
+// service-prefixed.
+const meterName = "github.com/edgequota/edgequota/internal/observability"
+
+// Metric names (portable OTel semconv: dotted, lowercase, no unit suffix — the
+// unit is a separate instrument field). Kept as consts so emission sites and the
+// bucket Views can't drift on a typo.
+const (
+	metricRequests                = "edgequota.requests"
+	metricActiveRequests          = "http.server.active_requests"
+	metricRatelimitDecisions      = "edgequota.ratelimit.decisions"
+	metricRatelimitFallbackUsed   = "edgequota.ratelimit.fallback_used"
+	metricRatelimitRemaining      = "edgequota.ratelimit.remaining_tokens"
+	metricConcurrencyRejected     = "edgequota.concurrency.rejected"
+	metricKeyExtractErrors        = "edgequota.key_extract.errors"
+	metricTenantKeyRejected       = "edgequota.tenant_key.rejected"
+	metricAuthOutcomes            = "edgequota.auth.outcomes"
+	metricAuthDuration            = "edgequota.auth.duration"
+	metricExtRLDuration           = "edgequota.external_ratelimit.duration"
+	metricExtRLCacheLookups       = "edgequota.external_ratelimit.cache.lookups"
+	metricExtRLSemaphoreRejected  = "edgequota.external_ratelimit.semaphore_rejected"
+	metricExtRLSingleflightShared = "edgequota.external_ratelimit.singleflight_shared"
+	metricBackendDuration         = "edgequota.backend.duration"
+	metricRespCacheLookups        = "edgequota.response_cache.lookups"
+	metricRespCacheOperations     = "edgequota.response_cache.operations"
+	metricRespCacheBodySize       = "edgequota.response_cache.body.size"
+	metricRedisErrors             = "edgequota.redis.errors"
+	metricRedisHealthy            = "edgequota.redis.healthy"
+	metricRedisReadonlyRetries    = "edgequota.redis.readonly_retries"
+	metricConnections             = "edgequota.connections"
+	metricStreamingConnections    = "edgequota.streaming.connections"
+	metricStreamingActive         = "edgequota.streaming.active_connections"
+	metricStreamingDuration       = "edgequota.streaming.duration"
+	metricEventsDropped           = "edgequota.events.dropped"
+	metricEventsSendFailures      = "edgequota.events.send_failures"
+	metricReloadTimestamp         = "edgequota.reload.last_success.timestamp"
+	metricCORSPreflightBypassed   = "edgequota.cors.preflight_bypassed"
+)
+
+// Metric attribute keys (OTel dotted convention; Dash0 surfaces these with dots
+// replaced by underscores in PromQL). Constants so emission sites can't drift.
+const (
+	attrHTTPMethod         = "http.request.method"
+	attrStatusClass        = "edgequota.status_class"
+	attrNetProtocolName    = "network.protocol.name"
+	attrNetProtocolVersion = "network.protocol.version"
+	attrTLSMode            = "edgequota.tls.mode"
+	attrRatelimitDecision  = "edgequota.ratelimit.decision"
+	attrRedisPool          = "edgequota.redis.pool"
+	attrAuthOutcome        = "edgequota.auth.outcome"
+	attrCacheResult        = "edgequota.cache.result"
+	attrCacheOperation     = "edgequota.cache.operation"
+	attrStreamProtocol     = "edgequota.stream.protocol"
+	attrReloadTarget       = "edgequota.reload.target"
+)
+
+// Attribute values.
+const (
+	decisionAllowed = "allowed"
+	decisionLimited = "limited"
+
+	authOutcomeError    = "error"
+	authOutcomeDenied   = "denied"
+	authOutcomeCanceled = "canceled"
+
+	cacheResultHit   = "hit"
+	cacheResultMiss  = "miss"
+	cacheResultStale = "stale"
+
+	cacheOpStore = "store"
+	cacheOpSkip  = "skip"
+	cacheOpPurge = "purge"
+
+	reloadTargetConfig = "config"
+	reloadTargetTLS    = "tls"
+	reloadTargetMTLSCA = "mtls_ca"
+
+	netProtocolName = "http"
+)
+
+// Redis pool attribute values.
+const (
+	poolRateLimit       = "ratelimit"
+	poolExternalRLCache = "external_rl_cache"
+	poolResponseCache   = "response_cache"
+)
+
+// Precomputed measurement options for static single-attribute records on the hot
+// path — built once so per-request increments allocate no attribute slice.
+var (
+	optDecisionAllowed = metric.WithAttributes(attribute.String(attrRatelimitDecision, decisionAllowed))
+	optDecisionLimited = metric.WithAttributes(attribute.String(attrRatelimitDecision, decisionLimited))
+
+	optAuthError    = metric.WithAttributes(attribute.String(attrAuthOutcome, authOutcomeError))
+	optAuthDenied   = metric.WithAttributes(attribute.String(attrAuthOutcome, authOutcomeDenied))
+	optAuthCanceled = metric.WithAttributes(attribute.String(attrAuthOutcome, authOutcomeCanceled))
+
+	optCacheHit   = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultHit))
+	optCacheMiss  = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultMiss))
+	optCacheStale = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultStale))
+
+	optRespOpStore = metric.WithAttributes(attribute.String(attrCacheOperation, cacheOpStore))
+	optRespOpSkip  = metric.WithAttributes(attribute.String(attrCacheOperation, cacheOpSkip))
+	optRespOpPurge = metric.WithAttributes(attribute.String(attrCacheOperation, cacheOpPurge))
+)
+
+// Histogram bucket boundaries (seconds unless noted). Preserved from the prior
+// Prometheus histograms so quantiles stay accurate and dashboards' by(le)
+// queries keep working across the name/attribute migration.
+var (
+	latencyShortBuckets   = []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5}
+	backendBuckets        = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10, 30}
+	streamingBuckets      = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600}
+	remainingTokenBuckets = []float64{0, 1, 5, 10, 25, 50, 100, 250, 500, 1000}
+	bodySizeBuckets       = []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304}
+)
+
+// metricViews sets explicit-bucket boundaries for EdgeQuota's histogram
+// instruments (the default OTel boundaries are tuned for milliseconds and would
+// collapse these second-scale distributions). Applied to every MeterProvider via
+// meterProviderOptions (used by InitMetrics and the tests). otelhttp's
+// http.server.request.duration is intentionally not listed — it carries its own
+// seconds-appropriate defaults.
+func metricViews() []sdkmetric.View {
+	hist := func(name string, bounds []float64) sdkmetric.View {
+		return sdkmetric.NewView(
+			sdkmetric.Instrument{Name: name},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: bounds}},
+		)
 	}
-	promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "edgequota",
-		Name:      "build_info",
-		Help:      "Build information for EdgeQuota. Value is always 1.",
-	}, []string{"version", "goversion"}).WithLabelValues(version, runtime.Version()).Set(1)
+	return []sdkmetric.View{
+		hist(metricAuthDuration, latencyShortBuckets),
+		hist(metricExtRLDuration, latencyShortBuckets),
+		hist(metricBackendDuration, backendBuckets),
+		hist(metricStreamingDuration, streamingBuckets),
+		hist(metricRatelimitRemaining, remainingTokenBuckets),
+		hist(metricRespCacheBodySize, bodySizeBuckets),
+	}
 }
 
-// Metrics holds both Prometheus gauges/counters and atomic counters for
-// fast-path access in the middleware hot path.
+// Metrics holds EdgeQuota's OpenTelemetry instruments plus a small set of atomic
+// mirror counters read by the /v1/stats endpoint.
+//
+// Instruments are built from the global otel.Meter during construction (in
+// server.New, before InitMetrics installs the real MeterProvider). OpenTelemetry
+// late-binds these global-delegate instruments — including the observable-gauge
+// callbacks — onto the real provider when it is set, so they start recording
+// without re-registration. When metrics are disabled the global provider stays
+// no-op and every instrument is inert.
 type Metrics struct {
-	// Atomic counters for hot-path (no mutex, no allocation).
+	// Atomic mirror counters read by /v1/stats Snapshot(). Decoupled from the
+	// OTel pipeline so the stats endpoint works even when metrics export is off.
 	allowed          int64
 	limited          int64
 	redisErrors      int64
@@ -39,468 +179,471 @@ type Metrics struct {
 	authDenied       int64
 	authCanceled     int64
 
-	// Prometheus counters for scraping.
-	promAllowed      prometheus.Counter
-	promLimited      prometheus.Counter
-	promRedisErrors  *prometheus.CounterVec
-	promFallbackUsed *prometheus.CounterVec
-	promAuthErrors   prometheus.Counter
-	promAuthDenied   prometheus.Counter
-	promAuthCanceled prometheus.Counter
-	promKeyErrors    prometheus.Counter
+	// Counters.
+	requests                metric.Int64Counter
+	ratelimitDecisions      metric.Int64Counter
+	ratelimitFallbackUsed   metric.Int64Counter
+	concurrencyRejected     metric.Int64Counter
+	keyExtractErrorsCtr     metric.Int64Counter
+	tenantKeyRejected       metric.Int64Counter
+	authOutcomes            metric.Int64Counter
+	extRLCacheLookups       metric.Int64Counter
+	extRLSemaphoreRejected  metric.Int64Counter
+	extRLSingleflightShared metric.Int64Counter
+	respCacheLookups        metric.Int64Counter
+	respCacheOperations     metric.Int64Counter
+	redisErrorsCtr          metric.Int64Counter
+	redisReadonlyRetries    metric.Int64Counter
+	connections             metric.Int64Counter
+	streamingConnections    metric.Int64Counter
+	eventsDropped           metric.Int64Counter
+	eventsSendFailures      metric.Int64Counter
+	corsPreflightBypassed   metric.Int64Counter
 
-	// In-flight request tracking.
-	PromRequestsInFlight prometheus.Gauge
+	// Up/down counters.
+	activeRequests  metric.Int64UpDownCounter
+	streamingActive metric.Int64UpDownCounter
 
-	// Prometheus histograms.
-	PromRequestDuration prometheus.Histogram
+	// Histograms. The *.duration histograms carry exemplars linking a data point
+	// back to the recording trace (via the request context threaded into Record).
+	authDuration      metric.Float64Histogram
+	extRLDuration     metric.Float64Histogram
+	backendDuration   metric.Float64Histogram
+	streamingDuration metric.Float64Histogram
+	remainingTokens   metric.Int64Histogram
+	respCacheBodySize metric.Int64Histogram
 
-	// Request counter with method/status_code labels (split from histogram
-	// to avoid high cardinality on histogram buckets).
-	PromRequestsTotal *prometheus.CounterVec
-
-	// Per-stage latency histograms for identifying bottlenecks.
-	PromAuthDuration       prometheus.Histogram
-	PromExternalRLDuration prometheus.Histogram
-	PromBackendDuration    prometheus.Histogram
-
-	// Rate limit remaining tokens distribution (histogram, not per-key gauge
-	// — avoids unbounded cardinality from high-cardinality keys like IPs).
-	PromRLRemaining prometheus.Histogram
-
-	// Per-tenant counters. Tenants are bounded entities (unlike IPs), so
-	// using a label is safe from cardinality explosions.
-	promTenantAllowed *prometheus.CounterVec
-	promTenantLimited *prometheus.CounterVec
-
-	// Redis health gauge (0 = unhealthy, 1 = healthy), per pool.
-	PromRedisHealthy *prometheus.GaugeVec
-
-	// Tenant label cardinality tracking.
-	tenantLabels       sync.Map // map[string]struct{}
-	tenantLabelCount   atomic.Int64
-	maxTenantLabels    int64
-	promTenantOverflow prometheus.Counter
-	promEventsDropped  prometheus.Counter
-
-	// External service response validation.
-	tenantKeyRejected    int64
-	promTenantKeyRejects prometheus.Counter
-
-	// External RL concurrency metrics.
-	PromExtRLSemaphoreRejected  prometheus.Counter
-	PromExtRLSingleflightShared prometheus.Counter
-
-	// External RL cache metrics.
-	PromExtRLCacheHit      prometheus.Counter
-	PromExtRLCacheMiss     prometheus.Counter
-	PromExtRLCacheStaleHit prometheus.Counter
-
-	// Response cache metrics (CDN-style backend response caching).
-	PromRespCacheHit      prometheus.Counter
-	PromRespCacheMiss     prometheus.Counter
-	PromRespCacheStaleHit prometheus.Counter
-	PromRespCacheStore    prometheus.Counter
-	PromRespCacheSkip     prometheus.Counter
-	PromRespCachePurge    prometheus.Counter
-	PromRespCacheBodySize prometheus.Histogram
-
-	// Global concurrency limiter.
-	PromConcurrencyRejected prometheus.Counter
-
-	// Streaming connection metrics (SSE, WebSocket, gRPC).
-	PromStreamingInFlight *prometheus.GaugeVec
-	PromStreamingTotal    *prometheus.CounterVec
-	PromStreamingDuration *prometheus.HistogramVec
-
-	// Transport breakdown: HTTP protocol version × TLS mode.
-	// proto: "HTTP/1.1", "HTTP/2.0"; tls: "mtls", "tls", "plain".
-	PromRequestsByTransport *prometheus.CounterVec
-
-	// CORS preflight bypass.
-	PromPreflightBypassed prometheus.Counter
-
-	// Events emitter failures.
-	PromEventsSendFailures prometheus.Counter
-
-	// Reload timestamp gauges (Unix seconds of last successful reload).
-	PromConfigLastReload prometheus.Gauge
-	PromTLSLastReload    prometheus.Gauge
-	PromMTLSCALastReload prometheus.Gauge
+	// Observable-gauge backing state, sampled by the async callbacks.
+	redisHealthy   map[string]*atomic.Int64 // pool -> 0/1; map is created once, never mutated
+	configReloadTS atomic.Int64             // unix seconds; 0 = never reloaded
+	tlsReloadTS    atomic.Int64
+	mtlsCAReloadTS atomic.Int64
 }
 
-// NewMetrics creates and registers Prometheus metrics. maxTenantLabels caps
-// the number of distinct tenant label values in per-tenant counters to prevent
-// cardinality explosions. 0 uses the default of 1000.
-func NewMetrics(reg prometheus.Registerer, maxTenantLabels int64) *Metrics {
-	if reg == nil {
-		reg = prometheus.DefaultRegisterer
-	}
-	if maxTenantLabels <= 0 {
-		maxTenantLabels = 1000
-	}
+// NewMetrics builds the OpenTelemetry instruments from the global meter. Safe to
+// call before InitMetrics installs the real MeterProvider: instruments bind to a
+// no-op until then and late-bind afterwards. Instrument construction errors are
+// logged and tolerated (the OTel API returns a usable no-op instrument alongside
+// any error), so this never fails.
+func NewMetrics(logger *slog.Logger) *Metrics {
+	m := otel.Meter(meterName)
 
-	factory := promauto.With(reg)
+	mx := &Metrics{
+		redisHealthy: map[string]*atomic.Int64{
+			poolRateLimit:       new(atomic.Int64),
+			poolExternalRLCache: new(atomic.Int64),
+			poolResponseCache:   new(atomic.Int64),
+		},
 
-	m := &Metrics{
-		maxTenantLabels: maxTenantLabels,
-		promAllowed: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "requests_allowed_total",
-			Help:      "Total number of requests that passed rate limiting.",
-		}),
-		promLimited: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "requests_limited_total",
-			Help:      "Total number of requests rejected by rate limiting.",
-		}),
-		promRedisErrors: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "redis_errors_total",
-			Help:      "Total number of Redis errors encountered.",
-		}, []string{"pool"}),
-		promFallbackUsed: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "fallback_used_total",
-			Help:      "Total number of requests handled by in-memory fallback.",
-		}, []string{"pool"}),
-		promAuthErrors: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "auth_errors_total",
-			Help:      "Total number of auth service errors.",
-		}),
-		promAuthDenied: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "auth_denied_total",
-			Help:      "Total number of requests denied by auth service.",
-		}),
-		promAuthCanceled: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "auth_canceled_total",
-			Help:      "Total number of auth checks aborted because the client canceled the request (client disconnect / shutdown). Not an auth-service failure — tracked separately from auth_errors_total.",
-		}),
-		promKeyErrors: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "key_extract_errors_total",
-			Help:      "Total number of key extraction errors.",
-		}),
-		PromRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "requests_total",
-			Help:      "Total HTTP requests by method and status code family (1xx/2xx/3xx/4xx/5xx/unknown).",
-		}, []string{"method", "status_code"}),
-		PromRequestDuration: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "request_duration_seconds",
-			Help:      "Request duration in seconds.",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 5, 10},
-		}),
-		PromAuthDuration: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "auth_duration_seconds",
-			Help:      "Latency of external auth checks.",
-			Buckets:   []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5},
-		}),
-		PromExternalRLDuration: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_duration_seconds",
-			Help:      "Latency of external rate limit service calls.",
-			Buckets:   []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5},
-		}),
-		PromBackendDuration: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "backend_duration_seconds",
-			Help:      "Latency of backend proxy calls.",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10, 30},
-		}),
-		PromRLRemaining: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "ratelimit_remaining_tokens",
-			Help:      "Distribution of remaining tokens across rate-limit checks.",
-			Buckets:   []float64{0, 1, 5, 10, 25, 50, 100, 250, 500, 1000},
-		}),
-		promTenantAllowed: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "tenant_requests_allowed_total",
-			Help:      "Total requests allowed per tenant.",
-		}, []string{"tenant"}),
-		promTenantLimited: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "tenant_requests_limited_total",
-			Help:      "Total requests rate-limited per tenant.",
-		}, []string{"tenant"}),
-		PromRedisHealthy: factory.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "redis_healthy",
-			Help:      "Whether Redis is reachable (1 = healthy, 0 = unhealthy). Pool: ratelimit, external_rl_cache, response_cache.",
-		}, []string{"pool"}),
-		promTenantOverflow: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "tenant_label_overflow_total",
-			Help:      "Number of requests bucketed under __overflow__ due to tenant label cap.",
-		}),
-		promEventsDropped: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "events_dropped_total",
-			Help:      "Number of usage events dropped due to buffer overflow.",
-		}),
-		promTenantKeyRejects: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "tenant_key_rejected_total",
-			Help:      "Number of tenant keys rejected due to validation failure (length or charset).",
-		}),
-		PromExtRLSemaphoreRejected: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_semaphore_rejected_total",
-			Help:      "Number of external RL requests rejected due to concurrency semaphore.",
-		}),
-		PromExtRLSingleflightShared: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_singleflight_shared_total",
-			Help:      "Number of external RL requests that shared a singleflight result.",
-		}),
-		PromExtRLCacheHit: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_cache_hits_total",
-			Help:      "Number of external RL lookups served from fresh Redis cache.",
-		}),
-		PromExtRLCacheMiss: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_cache_misses_total",
-			Help:      "Number of external RL lookups that required a service call (cache miss).",
-		}),
-		PromExtRLCacheStaleHit: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "external_rl_cache_stale_hits_total",
-			Help:      "Number of external RL lookups served from stale cache (circuit open, semaphore full, or fetch error).",
-		}),
-		PromRespCacheHit: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_hits_total",
-			Help:      "Number of backend responses served from response cache.",
-		}),
-		PromRespCacheMiss: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_misses_total",
-			Help:      "Number of response cache misses that required proxying to backend.",
-		}),
-		PromRespCacheStaleHit: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_stale_hits_total",
-			Help:      "Number of stale cache entries revalidated via conditional request (304).",
-		}),
-		PromRespCacheStore: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_stores_total",
-			Help:      "Number of backend responses stored in the response cache.",
-		}),
-		PromRespCacheSkip: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_skips_total",
-			Help:      "Number of backend responses skipped for caching (no-store, too large, streaming).",
-		}),
-		PromRespCachePurge: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_purges_total",
-			Help:      "Number of response cache purge operations.",
-		}),
-		PromRespCacheBodySize: factory.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "response_cache_body_size_bytes",
-			Help:      "Distribution of cached response body sizes in bytes.",
-			Buckets:   []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304},
-		}),
-		PromRequestsByTransport: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "requests_by_transport_total",
-			Help:      "Total requests by HTTP protocol version and TLS mode.",
-		}, []string{"proto", "tls"}),
-		PromStreamingInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "streaming_connections_in_flight",
-			Help:      "Number of active streaming connections by protocol.",
-		}, []string{"protocol"}),
-		PromStreamingTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "streaming_connections_total",
-			Help:      "Total streaming connections by protocol.",
-		}, []string{"protocol"}),
-		PromStreamingDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: "edgequota",
-			Name:      "streaming_duration_seconds",
-			Help:      "Duration of streaming connections in seconds.",
-			Buckets:   []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
-		}, []string{"protocol"}),
-		PromPreflightBypassed: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "preflight_bypassed_total",
-			Help:      "Number of CORS preflight requests that bypassed auth and rate limiting.",
-		}),
-		PromConcurrencyRejected: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "concurrent_requests_rejected_total",
-			Help:      "Number of requests rejected because max_concurrent_requests was reached.",
-		}),
-		PromEventsSendFailures: factory.NewCounter(prometheus.CounterOpts{
-			Namespace: "edgequota",
-			Name:      "events_send_failures_total",
-			Help:      "Number of event batches that failed to send after all retries.",
-		}),
-		PromRequestsInFlight: factory.NewGauge(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "requests_in_flight",
-			Help:      "Number of HTTP requests currently being processed.",
-		}),
-		PromConfigLastReload: factory.NewGauge(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "config_last_reload_timestamp_seconds",
-			Help:      "Unix timestamp of the last successful config reload.",
-		}),
-		PromTLSLastReload: factory.NewGauge(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "tls_last_reload_timestamp_seconds",
-			Help:      "Unix timestamp of the last successful TLS certificate reload.",
-		}),
-		PromMTLSCALastReload: factory.NewGauge(prometheus.GaugeOpts{
-			Namespace: "edgequota",
-			Name:      "mtls_ca_last_reload_timestamp_seconds",
-			Help:      "Unix timestamp of the last successful mTLS CA certificate reload.",
-		}),
+		requests:                int64Counter(m, logger, metricRequests, "Total requests served, by method, status class, and protocol version. Counts every terminal path including streaming and preflight.", "{request}"),
+		ratelimitDecisions:      int64Counter(m, logger, metricRatelimitDecisions, "Rate-limit decisions by outcome (allowed/limited).", "{request}"),
+		ratelimitFallbackUsed:   int64Counter(m, logger, metricRatelimitFallbackUsed, "Requests handled by the in-memory fallback limiter, by pool.", "{request}"),
+		concurrencyRejected:     int64Counter(m, logger, metricConcurrencyRejected, "Requests rejected because max_concurrent_requests was reached.", "{request}"),
+		keyExtractErrorsCtr:     int64Counter(m, logger, metricKeyExtractErrors, "Rate-limit key extraction errors.", ""),
+		tenantKeyRejected:       int64Counter(m, logger, metricTenantKeyRejected, "Tenant keys rejected by validation (length or charset).", ""),
+		authOutcomes:            int64Counter(m, logger, metricAuthOutcomes, "External auth outcomes by type (error/denied/canceled). Cancellations are client disconnects, not auth-service failures.", "{request}"),
+		extRLCacheLookups:       int64Counter(m, logger, metricExtRLCacheLookups, "External rate-limit cache lookups by result (hit/miss/stale).", "{lookup}"),
+		extRLSemaphoreRejected:  int64Counter(m, logger, metricExtRLSemaphoreRejected, "External rate-limit requests rejected by the concurrency semaphore.", ""),
+		extRLSingleflightShared: int64Counter(m, logger, metricExtRLSingleflightShared, "External rate-limit requests that shared a singleflight result.", ""),
+		respCacheLookups:        int64Counter(m, logger, metricRespCacheLookups, "Response-cache lookups by result (hit/miss/stale).", "{lookup}"),
+		respCacheOperations:     int64Counter(m, logger, metricRespCacheOperations, "Response-cache operations by type (store/skip/purge).", "{operation}"),
+		redisErrorsCtr:          int64Counter(m, logger, metricRedisErrors, "Redis errors encountered, by pool.", ""),
+		redisReadonlyRetries:    int64Counter(m, logger, metricRedisReadonlyRetries, "Redis READONLY retries (replica failover).", ""),
+		connections:             int64Counter(m, logger, metricConnections, "Requests by network protocol and TLS mode.", "{connection}"),
+		streamingConnections:    int64Counter(m, logger, metricStreamingConnections, "Streaming connections opened, by protocol.", "{connection}"),
+		eventsDropped:           int64Counter(m, logger, metricEventsDropped, "Usage events dropped due to buffer overflow.", "{event}"),
+		eventsSendFailures:      int64Counter(m, logger, metricEventsSendFailures, "Event batches that failed to send after all retries.", ""),
+		corsPreflightBypassed:   int64Counter(m, logger, metricCORSPreflightBypassed, "CORS preflight requests that bypassed auth and rate limiting.", "{request}"),
+
+		activeRequests:  int64UpDownCounter(m, logger, metricActiveRequests, "In-flight HTTP requests.", "{request}"),
+		streamingActive: int64UpDownCounter(m, logger, metricStreamingActive, "Active streaming connections, by protocol.", "{connection}"),
+
+		authDuration:      float64Histogram(m, logger, metricAuthDuration, "External auth check latency."),
+		extRLDuration:     float64Histogram(m, logger, metricExtRLDuration, "External rate-limit service call latency."),
+		backendDuration:   float64Histogram(m, logger, metricBackendDuration, "Backend proxy call latency."),
+		streamingDuration: float64Histogram(m, logger, metricStreamingDuration, "Streaming connection duration, by protocol."),
+		remainingTokens:   int64Histogram(m, logger, metricRatelimitRemaining, "Distribution of remaining tokens across rate-limit checks.", "{token}"),
+		respCacheBodySize: int64Histogram(m, logger, metricRespCacheBodySize, "Distribution of cached response body sizes.", "By"),
 	}
 
-	// Start all pools as healthy (set to 1). The middleware chain will set
-	// to 0 on connectivity failure and back to 1 on recovery.
-	m.PromRedisHealthy.WithLabelValues("ratelimit").Set(1)
-	m.PromRedisHealthy.WithLabelValues("external_rl_cache").Set(1)
-	m.PromRedisHealthy.WithLabelValues("response_cache").Set(1)
+	// All pools start healthy; the middleware flips a pool to 0 on connectivity
+	// failure and back to 1 on recovery.
+	for _, v := range mx.redisHealthy {
+		v.Store(1)
+	}
 
-	return m
+	mx.registerRedisHealthyGauge(m, logger)
+	mx.registerReloadTimestampGauge(m, logger)
+
+	return mx
 }
+
+// registerRedisHealthyGauge wires the async gauge that reports each Redis pool's
+// reachability (1 = healthy, 0 = unhealthy) from the atomic state.
+func (m *Metrics) registerRedisHealthyGauge(meter metric.Meter, logger *slog.Logger) {
+	_, err := meter.Int64ObservableGauge(
+		metricRedisHealthy,
+		metric.WithDescription("Whether each Redis pool is reachable (1 = healthy, 0 = unhealthy)."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for pool, v := range m.redisHealthy {
+				o.Observe(v.Load(), metric.WithAttributes(attribute.String(attrRedisPool, pool)))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("create observable gauge failed", "metric", metricRedisHealthy, "error", err)
+	}
+}
+
+// registerReloadTimestampGauge wires the async gauge that reports the unix
+// timestamp of the last successful reload for each target (config/tls/mtls_ca).
+func (m *Metrics) registerReloadTimestampGauge(meter metric.Meter, logger *slog.Logger) {
+	_, err := meter.Float64ObservableGauge(
+		metricReloadTimestamp,
+		metric.WithDescription("Unix timestamp (seconds) of the last successful reload, by target. 0 until the first reload."),
+		metric.WithUnit("s"),
+		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
+			o.Observe(float64(m.configReloadTS.Load()), metric.WithAttributes(attribute.String(attrReloadTarget, reloadTargetConfig)))
+			o.Observe(float64(m.tlsReloadTS.Load()), metric.WithAttributes(attribute.String(attrReloadTarget, reloadTargetTLS)))
+			o.Observe(float64(m.mtlsCAReloadTS.Load()), metric.WithAttributes(attribute.String(attrReloadTarget, reloadTargetMTLSCA)))
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("create observable gauge failed", "metric", metricReloadTimestamp, "error", err)
+	}
+}
+
+// --- Tolerant instrument builders. The OTel API returns a usable (no-op)
+// instrument alongside any construction error, so callers can always record. ---
+
+func int64Counter(m metric.Meter, logger *slog.Logger, name, desc, unit string) metric.Int64Counter {
+	opts := []metric.Int64CounterOption{metric.WithDescription(desc)}
+	if unit != "" {
+		opts = append(opts, metric.WithUnit(unit))
+	}
+	c, err := m.Int64Counter(name, opts...)
+	if err != nil {
+		logger.Warn("create counter failed", "metric", name, "error", err)
+	}
+	return c
+}
+
+func int64UpDownCounter(m metric.Meter, logger *slog.Logger, name, desc, unit string) metric.Int64UpDownCounter {
+	opts := []metric.Int64UpDownCounterOption{metric.WithDescription(desc)}
+	if unit != "" {
+		opts = append(opts, metric.WithUnit(unit))
+	}
+	c, err := m.Int64UpDownCounter(name, opts...)
+	if err != nil {
+		logger.Warn("create updowncounter failed", "metric", name, "error", err)
+	}
+	return c
+}
+
+// float64Histogram builds a seconds-valued latency histogram. All of
+// EdgeQuota's Float64 histograms measure durations, so the unit is fixed at "s".
+func float64Histogram(m metric.Meter, logger *slog.Logger, name, desc string) metric.Float64Histogram {
+	h, err := m.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"))
+	if err != nil {
+		logger.Warn("create histogram failed", "metric", name, "error", err)
+	}
+	return h
+}
+
+func int64Histogram(m metric.Meter, logger *slog.Logger, name, desc, unit string) metric.Int64Histogram {
+	opts := []metric.Int64HistogramOption{metric.WithDescription(desc)}
+	if unit != "" {
+		opts = append(opts, metric.WithUnit(unit))
+	}
+	h, err := m.Int64Histogram(name, opts...)
+	if err != nil {
+		logger.Warn("create histogram failed", "metric", name, "error", err)
+	}
+	return h
+}
+
+// protocolVersion strips the "HTTP/" prefix from a request's Proto ("HTTP/1.1"
+// -> "1.1") for the network.protocol.version attribute.
+func protocolVersion(proto string) string {
+	return strings.TrimPrefix(proto, "HTTP/")
+}
+
+// --- Rate-limit decisions (mirror atomics + OTel). ---
 
 // IncAllowed increments the allowed requests counter.
 func (m *Metrics) IncAllowed() {
 	atomic.AddInt64(&m.allowed, 1)
-	m.promAllowed.Inc()
+	m.ratelimitDecisions.Add(context.Background(), 1, optDecisionAllowed)
 }
 
 // IncLimited increments the rate-limited requests counter.
 func (m *Metrics) IncLimited() {
 	atomic.AddInt64(&m.limited, 1)
-	m.promLimited.Inc()
+	m.ratelimitDecisions.Add(context.Background(), 1, optDecisionLimited)
 }
 
 // IncRedisErrors increments the Redis error counter for the given pool.
 func (m *Metrics) IncRedisErrors(pool string) {
 	atomic.AddInt64(&m.redisErrors, 1)
-	m.promRedisErrors.WithLabelValues(pool).Inc()
+	m.redisErrorsCtr.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrRedisPool, pool)))
 }
 
 // IncFallbackUsed increments the fallback usage counter for the given pool.
 func (m *Metrics) IncFallbackUsed(pool string) {
 	atomic.AddInt64(&m.fallbackUsed, 1)
-	m.promFallbackUsed.WithLabelValues(pool).Inc()
+	m.ratelimitFallbackUsed.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrRedisPool, pool)))
 }
 
 // IncReadOnlyRetries increments the READONLY retry counter.
 func (m *Metrics) IncReadOnlyRetries() {
 	atomic.AddInt64(&m.readOnlyRetries, 1)
+	m.redisReadonlyRetries.Add(context.Background(), 1)
 }
 
 // IncKeyExtractErrors increments the key extraction error counter.
 func (m *Metrics) IncKeyExtractErrors() {
 	atomic.AddInt64(&m.keyExtractErrors, 1)
-	m.promKeyErrors.Inc()
+	m.keyExtractErrorsCtr.Add(context.Background(), 1)
 }
+
+// --- Auth outcomes (mirror atomics + OTel, folded onto one counter). ---
 
 // IncAuthErrors increments the auth service error counter.
 func (m *Metrics) IncAuthErrors() {
 	atomic.AddInt64(&m.authErrors, 1)
-	m.promAuthErrors.Inc()
+	m.authOutcomes.Add(context.Background(), 1, optAuthError)
 }
 
 // IncAuthDenied increments the auth denied counter.
 func (m *Metrics) IncAuthDenied() {
 	atomic.AddInt64(&m.authDenied, 1)
-	m.promAuthDenied.Inc()
+	m.authOutcomes.Add(context.Background(), 1, optAuthDenied)
 }
 
 // IncAuthCanceled increments the counter of auth checks aborted by client
 // cancellation (client disconnect / shutdown). These are not auth-service
-// failures, so they are counted here instead of auth_errors_total.
+// failures, so they are tracked under outcome=canceled, not error.
 func (m *Metrics) IncAuthCanceled() {
 	atomic.AddInt64(&m.authCanceled, 1)
-	m.promAuthCanceled.Inc()
+	m.authOutcomes.Add(context.Background(), 1, optAuthCanceled)
 }
+
+// --- Other counters (OTel only). ---
 
 // IncTenantKeyRejected increments the counter for tenant keys rejected by
-// validation. This fires when the external rate-limit service returns a
-// tenant_key that violates length or charset constraints.
+// validation.
 func (m *Metrics) IncTenantKeyRejected() {
-	atomic.AddInt64(&m.tenantKeyRejected, 1)
-	m.promTenantKeyRejects.Inc()
+	m.tenantKeyRejected.Add(context.Background(), 1)
 }
 
-// tenantOverflowLabel is the sentinel label used when the tenant cardinality
-// cap is reached. All excess tenants are aggregated under this label.
-const tenantOverflowLabel = "__overflow__"
-
-// resolveTenantLabel returns the tenant label to use for metrics, applying the
-// cardinality cap. Known tenants pass through; new tenants beyond the cap are
-// bucketed under __overflow__.
-func (m *Metrics) resolveTenantLabel(tenant string) string {
-	// Fast path: already known tenant.
-	if _, ok := m.tenantLabels.Load(tenant); ok {
-		return tenant
-	}
-
-	// Check if we have room for a new tenant.
-	if m.tenantLabelCount.Load() >= m.maxTenantLabels {
-		m.promTenantOverflow.Inc()
-		return tenantOverflowLabel
-	}
-
-	// Try to register the tenant. A benign race may cause the count to
-	// slightly exceed maxTenantLabels, but it is bounded and transient.
-	if _, loaded := m.tenantLabels.LoadOrStore(tenant, struct{}{}); !loaded {
-		m.tenantLabelCount.Add(1)
-	}
-	return tenant
-}
-
-// IncTenantAllowed increments the per-tenant allowed counter, respecting
-// the tenant label cardinality cap.
-func (m *Metrics) IncTenantAllowed(tenant string) {
-	m.promTenantAllowed.WithLabelValues(m.resolveTenantLabel(tenant)).Inc()
-}
-
-// IncTenantLimited increments the per-tenant rate-limited counter, respecting
-// the tenant label cardinality cap.
-func (m *Metrics) IncTenantLimited(tenant string) {
-	m.promTenantLimited.WithLabelValues(m.resolveTenantLabel(tenant)).Inc()
-}
-
-// IncEventsDropped increments the events dropped counter.
+// IncEventsDropped increments the dropped-events counter.
 func (m *Metrics) IncEventsDropped() {
-	m.promEventsDropped.Inc()
+	m.eventsDropped.Add(context.Background(), 1)
 }
 
-// ObserveRemaining records the remaining tokens as a histogram observation.
-// This provides distribution visibility without per-key cardinality.
+// IncEventsSendFailures increments the event-send-failure counter.
+func (m *Metrics) IncEventsSendFailures() {
+	m.eventsSendFailures.Add(context.Background(), 1)
+}
+
+// IncPreflightBypassed increments the CORS-preflight-bypass counter.
+func (m *Metrics) IncPreflightBypassed() {
+	m.corsPreflightBypassed.Add(context.Background(), 1)
+}
+
+// IncConcurrencyRejected increments the concurrency-rejection counter. These
+// 503s return before the terminal defer, so this counter is their only home.
+func (m *Metrics) IncConcurrencyRejected() {
+	m.concurrencyRejected.Add(context.Background(), 1)
+}
+
+// IncConnection records a request by network protocol version and TLS mode.
+func (m *Metrics) IncConnection(proto, tlsMode string) {
+	m.connections.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String(attrNetProtocolName, netProtocolName),
+		attribute.String(attrNetProtocolVersion, protocolVersion(proto)),
+		attribute.String(attrTLSMode, tlsMode),
+	))
+}
+
+// --- Active-request gauge (up/down). ---
+
+// IncRequestsInFlight increments the in-flight request gauge.
+func (m *Metrics) IncRequestsInFlight() {
+	m.activeRequests.Add(context.Background(), 1)
+}
+
+// DecRequestsInFlight decrements the in-flight request gauge.
+func (m *Metrics) DecRequestsInFlight() {
+	m.activeRequests.Add(context.Background(), -1)
+}
+
+// --- Streaming connections. ---
+
+// IncStreamingConn records a newly opened streaming connection for the protocol
+// (bumps both the total counter and the active gauge).
+func (m *Metrics) IncStreamingConn(proto string) {
+	opt := metric.WithAttributes(attribute.String(attrStreamProtocol, proto))
+	m.streamingConnections.Add(context.Background(), 1, opt)
+	m.streamingActive.Add(context.Background(), 1, opt)
+}
+
+// DecStreamingActive decrements the active streaming-connection gauge for the
+// protocol.
+func (m *Metrics) DecStreamingActive(proto string) {
+	m.streamingActive.Add(context.Background(), -1, metric.WithAttributes(attribute.String(attrStreamProtocol, proto)))
+}
+
+// ObserveStreamingDuration records a streaming connection's lifetime. The
+// context carries the request span so the observation gets an exemplar.
+func (m *Metrics) ObserveStreamingDuration(ctx context.Context, proto string, seconds float64) {
+	m.streamingDuration.Record(ctx, seconds, metric.WithAttributes(attribute.String(attrStreamProtocol, proto)))
+}
+
+// --- Latency histograms (exemplar-bearing; ctx carries the request span). ---
+
+// RecordRequest records a terminal request in the traffic counter with its
+// method, status class, and protocol version.
+func (m *Metrics) RecordRequest(ctx context.Context, method string, code int, proto string) {
+	m.requests.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(attrHTTPMethod, method),
+		attribute.String(attrStatusClass, StatusFamily(code)),
+		attribute.String(attrNetProtocolVersion, protocolVersion(proto)),
+	))
+}
+
+// ObserveAuthDuration records external auth check latency.
+func (m *Metrics) ObserveAuthDuration(ctx context.Context, seconds float64) {
+	m.authDuration.Record(ctx, seconds)
+}
+
+// ObserveExternalRLDuration records external rate-limit call latency.
+func (m *Metrics) ObserveExternalRLDuration(ctx context.Context, seconds float64) {
+	m.extRLDuration.Record(ctx, seconds)
+}
+
+// ObserveBackendDuration records backend proxy latency.
+func (m *Metrics) ObserveBackendDuration(ctx context.Context, seconds float64) {
+	m.backendDuration.Record(ctx, seconds)
+}
+
+// ObserveRemaining records the remaining tokens distribution.
 func (m *Metrics) ObserveRemaining(remaining int64) {
-	m.PromRLRemaining.Observe(float64(remaining))
+	m.remainingTokens.Record(context.Background(), remaining)
 }
 
-// MetricsSnapshot holds a point-in-time copy of all atomic counters.
+// --- Response-cache hooks (func()-shaped so they bind directly to cache.Store
+// callbacks). ---
+
+// IncRespCacheHit records a fresh response-cache hit.
+func (m *Metrics) IncRespCacheHit() {
+	m.respCacheLookups.Add(context.Background(), 1, optCacheHit)
+}
+
+// IncRespCacheMiss records a response-cache miss.
+func (m *Metrics) IncRespCacheMiss() {
+	m.respCacheLookups.Add(context.Background(), 1, optCacheMiss)
+}
+
+// IncRespCacheStaleHit records a stale response-cache hit (revalidated via 304).
+func (m *Metrics) IncRespCacheStaleHit() {
+	m.respCacheLookups.Add(context.Background(), 1, optCacheStale)
+}
+
+// IncRespCacheStore records a response stored in the cache.
+func (m *Metrics) IncRespCacheStore() {
+	m.respCacheOperations.Add(context.Background(), 1, optRespOpStore)
+}
+
+// IncRespCacheSkip records a response skipped for caching.
+func (m *Metrics) IncRespCacheSkip() {
+	m.respCacheOperations.Add(context.Background(), 1, optRespOpSkip)
+}
+
+// IncRespCachePurge records a response-cache purge operation.
+func (m *Metrics) IncRespCachePurge() {
+	m.respCacheOperations.Add(context.Background(), 1, optRespOpPurge)
+}
+
+// ObserveRespCacheBodySize records a cached body size in bytes.
+func (m *Metrics) ObserveRespCacheBodySize(size float64) {
+	m.respCacheBodySize.Record(context.Background(), int64(size))
+}
+
+// --- External rate-limit hooks (func()-shaped for ExternalClient callbacks). ---
+
+// IncExtRLSemaphoreRejected records an external RL request rejected by the
+// concurrency semaphore.
+func (m *Metrics) IncExtRLSemaphoreRejected() {
+	m.extRLSemaphoreRejected.Add(context.Background(), 1)
+}
+
+// IncExtRLSingleflightShared records an external RL request that shared a
+// singleflight result.
+func (m *Metrics) IncExtRLSingleflightShared() {
+	m.extRLSingleflightShared.Add(context.Background(), 1)
+}
+
+// IncExtRLCacheHit records a fresh external RL cache hit.
+func (m *Metrics) IncExtRLCacheHit() {
+	m.extRLCacheLookups.Add(context.Background(), 1, optCacheHit)
+}
+
+// IncExtRLCacheMiss records an external RL cache miss.
+func (m *Metrics) IncExtRLCacheMiss() {
+	m.extRLCacheLookups.Add(context.Background(), 1, optCacheMiss)
+}
+
+// IncExtRLCacheStaleHit records a stale external RL cache hit.
+func (m *Metrics) IncExtRLCacheStaleHit() {
+	m.extRLCacheLookups.Add(context.Background(), 1, optCacheStale)
+}
+
+// --- Observable-gauge state setters. ---
+
+// SetRedisHealthy sets the reachability state (reported by the async gauge) for
+// a pool. Unknown pools are ignored.
+func (m *Metrics) SetRedisHealthy(pool string, healthy bool) {
+	v, ok := m.redisHealthy[pool]
+	if !ok {
+		return
+	}
+	if healthy {
+		v.Store(1)
+	} else {
+		v.Store(0)
+	}
+}
+
+// SetConfigReloadTimestamp records now as the last successful config reload.
+func (m *Metrics) SetConfigReloadTimestamp() {
+	m.configReloadTS.Store(time.Now().Unix())
+}
+
+// SetTLSReloadTimestamp records now as the last successful TLS certificate reload.
+func (m *Metrics) SetTLSReloadTimestamp() {
+	m.tlsReloadTS.Store(time.Now().Unix())
+}
+
+// SetMTLSCAReloadTimestamp records now as the last successful mTLS CA reload.
+func (m *Metrics) SetMTLSCAReloadTimestamp() {
+	m.mtlsCAReloadTS.Store(time.Now().Unix())
+}
+
+// MetricsSnapshot holds a point-in-time copy of all atomic counters. Served as
+// JSON by the /v1/stats admin endpoint.
 type MetricsSnapshot struct {
-	Allowed          int64
-	Limited          int64
-	RedisErrors      int64
-	FallbackUsed     int64
-	ReadOnlyRetries  int64
-	KeyExtractErrors int64
-	AuthErrors       int64
-	AuthDenied       int64
-	AuthCanceled     int64
+	Allowed          int64 `json:"allowed"`
+	Limited          int64 `json:"limited"`
+	RedisErrors      int64 `json:"redis_errors"`
+	FallbackUsed     int64 `json:"fallback_used"`
+	ReadOnlyRetries  int64 `json:"readonly_retries"`
+	KeyExtractErrors int64 `json:"key_extract_errors"`
+	AuthErrors       int64 `json:"auth_errors"`
+	AuthDenied       int64 `json:"auth_denied"`
+	AuthCanceled     int64 `json:"auth_canceled"`
 }
 
 // Snapshot returns the current counter values.
@@ -518,33 +661,10 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	}
 }
 
-// SetConfigReloadTimestamp records the current time as the last successful
-// config reload.
-func (m *Metrics) SetConfigReloadTimestamp() {
-	m.PromConfigLastReload.SetToCurrentTime()
-}
-
-// SetTLSReloadTimestamp records the current time as the last successful
-// TLS certificate reload.
-func (m *Metrics) SetTLSReloadTimestamp() {
-	m.PromTLSLastReload.SetToCurrentTime()
-}
-
-// SetMTLSCAReloadTimestamp records the current time as the last successful
-// mTLS CA certificate reload.
-func (m *Metrics) SetMTLSCAReloadTimestamp() {
-	m.PromMTLSCALastReload.SetToCurrentTime()
-}
-
 // StatusFamily collapses an HTTP status code to its family label
 // ("1xx".."5xx"). Codes outside the standard 100-599 range are bucketed as
-// "unknown" so the label vector stays bounded even when an upstream returns
-// a garbage code.
-//
-// Bucketing here keeps the requests_total label cardinality at a small
-// constant: previously every raw status code seen since pod start was
-// retained in the *CounterVec, which grew without bound and contributed to
-// the inter-pod memory spread observed on long-running pods.
+// "unknown" so the attribute stays bounded even when an upstream returns a
+// garbage code.
 func StatusFamily(code int) string {
 	switch {
 	case code >= 100 && code < 200:

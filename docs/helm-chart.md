@@ -40,7 +40,6 @@ helm install edgequota edgequota/edgequota \
 | VPA | Vertical Pod Autoscaler (when `vpa.enabled`) |
 | PDB | PodDisruptionBudget (when `pdb.enabled`) |
 | NetworkPolicy | Network restrictions (when `networkPolicy.enabled`) |
-| ServiceMonitor | Prometheus Operator scraping (when `serviceMonitor.enabled`) |
 | Ingress | Ingress resource (when `ingress.enabled`) |
 | Certificate | cert-manager Certificate (when `certificate.enabled`) |
 | Role/RoleBinding | RBAC for the service account |
@@ -218,6 +217,18 @@ edgequota:
 
 W3C `traceparent`/`tracestate` propagation is always active even when `enabled: false`. See [Observability — OpenTelemetry Tracing](observability.md#opentelemetry-tracing) for the full span inventory.
 
+### Metrics
+
+EdgeQuota pushes portable OpenTelemetry metrics over OTLP to the collector, sharing the `tracing` endpoint/protocol/insecure transport — there is **no** `/metrics` scrape endpoint. Metric emission is toggled independently of tracing:
+
+```yaml
+edgequota:
+  metrics:
+    enabled: true    # env METRICS_ENABLED — default true in dev/stage
+```
+
+When `metrics.enabled` is `false` the MeterProvider is left no-op (no exporter, no push). Metrics can run with tracing off and vice-versa. See [Observability — Metrics](observability.md#metrics) for the full metric inventory.
+
 ---
 
 ## Infrastructure Settings
@@ -288,15 +299,9 @@ networkPolicy:
 
 When enabled, restricts ingress to proxy and admin ports, and egress to Redis, backend, and DNS.
 
-### ServiceMonitor
+### Metrics Scraping
 
-```yaml
-serviceMonitor:
-  enabled: true
-  interval: 15s
-  labels:
-    release: prometheus
-```
+The chart deploys **no** `ServiceMonitor` and adds **no** `prometheus.io/scrape` annotations: EdgeQuota pushes OpenTelemetry metrics over OTLP to the collector rather than exposing a `/metrics` endpoint. Toggle emission with `edgequota.metrics.enabled` (see [Metrics](#metrics) above).
 
 ### Ingress
 
@@ -393,4 +398,4 @@ helm upgrade edgequota edgequota/edgequota -f my-values.yaml
 - [Deployment](deployment.md) -- General Kubernetes deployment guidance, HA, and sizing.
 - [Configuration Reference](configuration.md) -- Full EdgeQuota config reference.
 - [Security](security.md) -- Container hardening and network policies.
-- [Observability](observability.md) -- ServiceMonitor setup and Grafana dashboards.
+- [Observability](observability.md) -- OpenTelemetry metrics, probes, and dashboards.

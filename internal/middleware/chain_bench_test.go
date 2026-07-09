@@ -11,7 +11,6 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func benchLogger() *slog.Logger {
@@ -19,7 +18,7 @@ func benchLogger() *slog.Logger {
 }
 
 func benchMetrics() *observability.Metrics {
-	return observability.NewMetrics(prometheus.NewRegistry(), 0)
+	return observability.NewMetrics(benchLogger())
 }
 
 func benchConfig(redisAddr string) *config.Config {

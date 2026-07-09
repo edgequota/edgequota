@@ -101,7 +101,7 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 
 ### Observability
 
-- Prometheus metrics on a dedicated admin port.
+- Portable OpenTelemetry metrics pushed over OTLP (no scrape endpoint).
 - Structured JSON logging via `log/slog`.
 - OpenTelemetry tracing with OTLP export.
 - Kubernetes probe endpoints: `/startz`, `/healthz`, `/readyz`.
@@ -146,7 +146,11 @@ A separate listener, isolated from proxy traffic, exposes operational endpoints:
 - `GET /startz` -- Startup probe. Returns 200 once initialization completes, 503 before.
 - `GET /healthz` -- Liveness probe. Always returns 200 while the process is running.
 - `GET /readyz` -- Readiness probe. Returns 503 during startup and graceful drain. Pass `?deep=true` to actively ping Redis.
-- `GET /metrics` -- Prometheus metrics endpoint.
+- `GET /v1/config` -- Current sanitized configuration (secrets masked).
+- `GET /v1/stats` -- JSON snapshot of the runtime atomic counters.
+- `/debug/pprof` -- Go runtime profiling endpoints.
+
+Metrics are not scraped here — they are pushed to the OpenTelemetry collector over OTLP.
 
 See [docs/architecture.md](docs/architecture.md) for the full design, failure modes, and scaling model.
 
@@ -227,10 +231,6 @@ spec:
     metadata:
       labels:
         app: edgequota
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: edgequota
@@ -489,19 +489,21 @@ All protocols are served on a single port (`:8080` by default).
 
 ## Observability
 
-### Prometheus Metrics (`:9090/metrics`)
+### OpenTelemetry Metrics
+
+EdgeQuota emits portable OpenTelemetry metrics and **pushes them over OTLP** to the configured collector — the same endpoint as tracing. There is **no Prometheus `/metrics` scrape endpoint**: names are dotted OTel semconv identifiers (no `_total`/`_seconds` suffixes; the unit is a separate field), Prometheus labels became OTel attributes, and the `*.duration` histograms carry exemplars linking each data point to its trace.
 
 | Metric | Type | Description |
 |---|---|---|
-| `edgequota_requests_allowed_total` | Counter | Requests that passed rate limiting |
-| `edgequota_requests_limited_total` | Counter | Requests rejected by rate limiting (429) |
-| `edgequota_redis_errors_total` | Counter | Redis operation errors |
-| `edgequota_fallback_used_total` | Counter | In-memory fallback activations |
-| `edgequota_auth_errors_total` | Counter | Auth service call errors |
-| `edgequota_auth_denied_total` | Counter | Requests denied by auth service |
-| `edgequota_key_extract_errors_total` | Counter | Key extraction failures |
-| `edgequota_requests_total` | Counter | Total HTTP requests by method and status code family (`1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`unknown`) |
-| `edgequota_request_duration_seconds` | Histogram | End-to-end request latency |
+| `edgequota.requests` | Counter | Total HTTP requests, attributed by `http.request.method`, `edgequota.status_class` (`2xx`..`5xx`/`unknown`), and `network.protocol.version` |
+| `edgequota.ratelimit.decisions` | Counter | Rate-limit decisions, attributed by `edgequota.ratelimit.decision` (`allowed`\|`limited`) |
+| `edgequota.ratelimit.fallback_used` | Counter | In-memory fallback activations |
+| `edgequota.auth.outcomes` | Counter | Auth outcomes, attributed by `edgequota.auth.outcome` (`error`\|`denied`\|`canceled`) |
+| `edgequota.redis.errors` | Counter | Redis operation errors |
+| `edgequota.key_extract.errors` | Counter | Key extraction failures |
+| `http.server.request.duration` | Histogram | End-to-end request latency (seconds; emitted by otelhttp) |
+
+Metrics are enabled via `metrics.enabled` (env `METRICS_ENABLED`, default `true` in dev/stage), independently of tracing but sharing the tracing OTLP transport. On a Prometheus-compatible backend (e.g. Dash0) the name is surfaced dotted verbatim as `otel_metric_name="edgequota.requests"` and attribute keys are underscored (`edgequota_status_class="2xx"`); scope queries by `service_name="edgequota"`. Go runtime and GC metrics come from OTel runtime instrumentation (`go.goroutine.count`, `go.memory.*`, `go.gc.*`). A JSON snapshot of the runtime atomic counters is also available at `GET /v1/stats` on the admin port.
 
 ### Health Probes (`:9090`)
 
@@ -511,7 +513,7 @@ All protocols are served on a single port (`:8080` by default).
 | `GET /healthz` | Liveness | Always returns 200 while process is alive |
 | `GET /readyz` | Readiness | 200 when ready; 503 during graceful drain |
 
-See [docs/observability.md](docs/observability.md) for metric definitions and suggested Grafana dashboards.
+See [docs/observability.md](docs/observability.md) for the full metric inventory, access logs, health probes, tracing, and dashboards.
 
 ---
 
@@ -544,7 +546,7 @@ Browse the full documentation at [docs/index.md](docs/index.md) or use the table
 | [docs/proxy.md](docs/proxy.md) | Multi-protocol proxy: HTTP/1.1, HTTP/2, HTTP/3, gRPC, SSE, WebSocket |
 | [docs/events.md](docs/events.md) | Async usage event emission via HTTP/gRPC webhooks |
 | [docs/deployment.md](docs/deployment.md) | Kubernetes deployment, HA, sizing, autoscaling |
-| [docs/observability.md](docs/observability.md) | Metrics, access logs, health probes, tracing, Grafana dashboards |
+| [docs/observability.md](docs/observability.md) | OpenTelemetry metrics, access logs, health probes, tracing, dashboards |
 | [docs/security.md](docs/security.md) | Threat model, SSRF protection, header trust, Redis security, mTLS |
 | [docs/go-sdk.md](docs/go-sdk.md) | Go SDK for building external rate limit, auth, and events services |
 | [docs/helm-chart.md](docs/helm-chart.md) | Helm chart deployment guide |

@@ -69,7 +69,7 @@ backend.transport.dial_timeout → EDGEQUOTA_BACKEND_TRANSPORT_DIAL_TIMEOUT
 
 | Field | Type | Default | Env Var | Description |
 |-------|------|---------|---------|-------------|
-| `address` | string | `":9090"` | `EDGEQUOTA_ADMIN_ADDRESS` | Listen address for health probes and Prometheus metrics |
+| `address` | string | `":9090"` | `EDGEQUOTA_ADMIN_ADDRESS` | Listen address for health probes and admin endpoints (`/v1/config`, `/v1/stats`, pprof) |
 | `read_timeout` | duration | `"5s"` | `EDGEQUOTA_ADMIN_READ_TIMEOUT` | Read timeout for admin connections |
 | `write_timeout` | duration | `"10s"` | `EDGEQUOTA_ADMIN_WRITE_TIMEOUT` | Write timeout for admin connections |
 | `idle_timeout` | duration | `"30s"` | `EDGEQUOTA_ADMIN_IDLE_TIMEOUT` | Idle timeout for admin connections |
@@ -180,7 +180,6 @@ These fields apply regardless of whether static or external rate limiting is use
 | `failure_code` | int | `429` | `EDGEQUOTA_RATE_LIMIT_FAILURE_CODE` | HTTP status code for `failClosed` rejections. Must be 4xx or 5xx. |
 | `min_ttl` | duration | `""` (auto) | `EDGEQUOTA_RATE_LIMIT_MIN_TTL` | Floor for Redis key TTL. Reduces EXPIRE churn for high-cardinality keys. |
 | `key_prefix` | string | `""` | `EDGEQUOTA_RATE_LIMIT_KEY_PREFIX` | Optional prefix prepended to all rate-limit keys. |
-| `max_tenant_labels` | int | `1000` | `EDGEQUOTA_RATE_LIMIT_MAX_TENANT_LABELS` | Max distinct tenant labels in per-tenant Prometheus metrics. Prevents cardinality explosion. |
 | `global_passthrough_rps` | float64 | `0` | `EDGEQUOTA_RATE_LIMIT_GLOBAL_PASSTHROUGH_RPS` | Safety valve: max global RPS when in passthrough mode (Redis down). 0 = unlimited. |
 
 ### `rate_limit.static` — Static Rate-Limit Bucket
@@ -494,6 +493,14 @@ If both `auth_token` and an explicit `headers` entry for the same header name ex
 | `level` | string | `"external"` | `EDGEQUOTA_TRACING_LEVEL` | Instrumentation depth: `basic`, `external` (default), or `full`. See [Observability — Instrumentation Levels](observability.md#instrumentation-levels) |
 
 > **Note:** W3C `traceparent`/`tracestate` propagation is always active. Even with `enabled: false`, incoming trace headers are forwarded to backends and outgoing calls carry the correct context.
+
+### `metrics` — OpenTelemetry Metrics
+
+EdgeQuota emits portable OpenTelemetry metrics and pushes them over OTLP to the collector. There is no Prometheus `/metrics` scrape endpoint. Metrics are enabled independently of tracing but reuse the [`tracing`](#tracing--opentelemetry-tracing) OTLP transport (endpoint/protocol/insecure), so a collector endpoint must be configured there. See [Observability](observability.md) for the metric catalog.
+
+| Field | Type | Default | Env Var | Description |
+|-------|------|---------|---------|-------------|
+| `enabled` | bool | `true` | `EDGEQUOTA_METRICS_ENABLED` | Emit OpenTelemetry metrics and push them over OTLP. Default `true` in dev/stage. When `false`, the MeterProvider is left no-op (no exporter, no push). Runs independently of `tracing.enabled` but shares the `tracing` OTLP transport. |
 
 ---
 

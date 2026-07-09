@@ -9,7 +9,6 @@ import (
 
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,8 +17,7 @@ import (
 func newTestChain(t *testing.T, cfg *config.Config) *Chain {
 	t.Helper()
 
-	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg, 0)
+	metrics := observability.NewMetrics(testLogger())
 	logger := slog.Default()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

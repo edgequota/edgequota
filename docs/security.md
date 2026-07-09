@@ -148,7 +148,7 @@ When the external rate-limit service returns dynamic values (tenant keys, backen
 
 ### TenantKey Validation
 
-The `tenant_key` field in `GetLimitsResponse` is used as a Redis key component and Prometheus metric label. To prevent Redis memory abuse, log pollution, and metric cardinality explosions, EdgeQuota enforces the following constraints:
+The `tenant_key` field in `GetLimitsResponse` is used as a Redis key component. To prevent Redis memory abuse and log pollution, EdgeQuota enforces the following constraints:
 
 | Constraint | Value |
 |-----------|-------|
@@ -159,7 +159,7 @@ The `tenant_key` field in `GetLimitsResponse` is used as a Redis key component a
 Invalid tenant keys are **never silently accepted**. The request is still processed (not rejected), but the operator is alerted through three channels:
 
 1. **Structured log** at WARN level with the key length and max allowed.
-2. **Prometheus metric** `edgequota_tenant_key_rejected_total` — fire alerts when non-zero.
+2. **Metric** `edgequota.tenant_key.rejected` — fire alerts when non-zero.
 3. **Usage event** with `reason: "tenant_key_rejected"` — available in downstream analytics/billing systems.
 
 ### Backend URL Validation

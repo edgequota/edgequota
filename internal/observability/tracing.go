@@ -10,9 +10,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -47,15 +45,9 @@ func InitTracing(ctx context.Context, cfg config.TracingConfig, version string) 
 		serviceName = "edgequota"
 	}
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewSchemaless(
-			semconv.ServiceName(serviceName),
-			semconv.ServiceVersion(version),
-		),
-	)
+	res, err := newResource(serviceName, version)
 	if err != nil {
-		return nil, fmt.Errorf("create resource: %w", err)
+		return nil, err
 	}
 
 	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRate))

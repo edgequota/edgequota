@@ -7,17 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/observability"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func testMetrics() *observability.Metrics {
-	return observability.NewMetrics(prometheus.NewRegistry(), 0)
+	return observability.NewMetrics(testLogger())
 }
 
 func testLogger() *slog.Logger {
@@ -302,13 +301,19 @@ func TestEmitter_RetriesOnServerError(t *testing.T) {
 	}
 }
 
-func TestEmitter_FailureMetricAfterExhaustedRetries(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestEmitter_FailureAfterExhaustedRetries(t *testing.T) {
+	// The send-failure counter (edgequota.events.send_failures) is an OTel
+	// instrument that is a no-op without an installed MeterProvider, so we assert
+	// the observable behavior instead: the send loop retries up to MaxRetries
+	// total attempts (for attempt := 1; attempt <= MaxRetries) before the failure
+	// path (which bumps the counter) fires. MaxRetries=2 => exactly 2 attempts.
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
-	m := testMetrics()
 	e := NewEmitter(config.EventsConfig{
 		Enabled:       true,
 		HTTP:          config.EventsHTTPConfig{URL: srv.URL},
@@ -317,14 +322,14 @@ func TestEmitter_FailureMetricAfterExhaustedRetries(t *testing.T) {
 		BufferSize:    10,
 		MaxRetries:    2,
 		RetryBackoff:  "1ms",
-	}, testLogger(), m)
+	}, testLogger(), testMetrics())
 
 	e.Emit(UsageEvent{Key: "failure-metric-test"})
 	time.Sleep(500 * time.Millisecond)
 	e.Close()
 
-	if got := testutil.ToFloat64(m.PromEventsSendFailures); got < 1 {
-		t.Errorf("expected PromEventsSendFailures >= 1, got %v", got)
+	if got := attempts.Load(); got < 2 {
+		t.Errorf("expected the batch to be retried to exhaustion (>= 2 attempts), got %d", got)
 	}
 }
 

@@ -264,26 +264,20 @@ No `Cache-Control` header means no caching. EdgeQuota passes through every reque
 
 ## Metrics Reference
 
-All response cache metrics are exposed on the admin server at `GET :9090/metrics`.
+Response-cache metrics are emitted as **portable OpenTelemetry metrics** and **pushed over OTLP** to the configured collector (the same transport as tracing). There is **no Prometheus `/metrics` scrape endpoint** on the admin server; names are dotted OTel identifiers (no `_total`/`_bytes` suffix — the unit is a separate field) and the former Prometheus labels are now attributes. The individual hit/miss/stale and store/skip/purge counters are folded into two attributed counters. See [Observability](observability.md) for the full metric model and PromQL-surface notes.
 
 ### Counters
 
-| Metric | Description |
-|--------|-------------|
-| `edgequota_response_cache_hits_total` | Requests served from cache |
-| `edgequota_response_cache_misses_total` | Requests that missed the cache and were proxied to the backend |
-| `edgequota_response_cache_stores_total` | Responses stored in cache |
-| `edgequota_response_cache_store_errors_total` | Errors storing responses in cache (Redis write failures) |
-| `edgequota_response_cache_evictions_total` | Cache entries evicted (TTL expiry or explicit purge) |
-| `edgequota_response_cache_purge_total` | Purge operations executed (by key or by tag) |
-| `edgequota_response_cache_revalidations_total` | Conditional requests that received 304 Not Modified |
-| `edgequota_response_cache_skip_total` | Responses skipped from caching (no-store, too large, non-cacheable status) |
+| Metric | Attributes | Description |
+|--------|-----------|-------------|
+| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | Response-cache lookups — a `hit` is served from cache, a `miss` is proxied to the backend, a `stale` serves a stale entry |
+| `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations — `store` caches a response, `skip` declines to cache (no-store, too large, non-cacheable status), `purge` invalidates entries |
 
 ### Histograms
 
-| Metric | Description |
-|--------|-------------|
-| `edgequota_response_cache_body_size_bytes` | Distribution of cached response body sizes |
+| Metric | Unit | Description |
+|--------|------|-------------|
+| `edgequota.response_cache.body.size` | `By` | Distribution of cached response body sizes |
 
 ---
 
@@ -336,7 +330,7 @@ response_cache_redis:
 
 - [Configuration Reference](configuration.md) — Full `cache` and `response_cache_redis` config sections.
 - [Rate Limiting](rate-limiting.md) — Rate-limit algorithm and external service caching.
-- [Observability](observability.md) — All metrics including response cache counters.
+- [Observability](observability.md) — All metrics including response-cache metrics.
 - [Troubleshooting](troubleshooting.md) — Cache debugging and common issues.
 - [Architecture](architecture.md) — System design and data flow.
 - [Deployment Scenarios](deployment-scenarios.md) — Static asset caching scenario.
