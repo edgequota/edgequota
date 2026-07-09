@@ -1,12 +1,23 @@
-# EdgeQuota Prometheus Alerting Rules
+# EdgeQuota alerting rules — CANONICAL source of truth.
 #
-# Usage:
-#   - For Prometheus: add to rule_files in prometheus.yml
-#   - For Prometheus Operator: wrap in a PrometheusRule CR
+# EdgeQuota emits portable, vendor-neutral OpenTelemetry metrics (dotted names,
+# semconv attributes, OTLP push). These rules are written against how an OTLP
+# backend surfaces those metrics in PromQL:
+#   - the metric NAME is matched via the `otel_metric_name` label, dotted and
+#     verbatim (no `_total` / `_bucket` suffixes) — e.g. {otel_metric_name="edgequota.requests"};
+#   - attribute KEYS are surfaced with dots replaced by underscores
+#     (edgequota.status_class -> edgequota_status_class);
+#   - histogram selectors carry otel_metric_type="histogram".
+# The metric emission itself is backend-agnostic; only this query dialect targets
+# the current consumer (Dash0). The infra mirror
+# (shoro/infrastructure .../08_dash0/main.tf) adapts each rule to Dash0's
+# $__threshold model — it MUST track this file, never lead it.
 #
-# All alerts use the "edgequota" group name and follow the severity convention:
-#   critical = pages on-call / requires immediate action
-#   warning  = investigate within hours / non-urgent
+# Traffic/error/no-traffic rules key off edgequota.requests, the unconditional
+# terminal counter that spans streaming (SSE/WS/gRPC) — unlike
+# http.server.request.duration._count, which structurally excludes streaming.
+#
+# severity: critical = pages on-call; warning = investigate within hours.
 
 groups:
   - name: edgequota
@@ -17,12 +28,14 @@ groups:
       - alert: EdgeQuotaHighErrorRate
         expr: |
           (
-            sum(rate(edgequota_requests_total{status_code="5xx"}[5m]))
-            / sum(rate(edgequota_requests_total[5m]))
+            sum(rate({otel_metric_name="edgequota.requests", edgequota_status_class="5xx"}[5m]))
+            / clamp_min(sum(rate({otel_metric_name="edgequota.requests"}[5m])), 1)
           ) > 0.05
         for: 5m
         labels:
           severity: critical
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota 5xx error rate above 5%"
           description: >-
@@ -31,11 +44,13 @@ groups:
 
       - alert: EdgeQuotaTrafficSpike
         expr: |
-          sum(rate(edgequota_requests_total[5m]))
-          > 2 * sum(rate(edgequota_requests_total[1h] offset 1h))
+          sum(rate({otel_metric_name="edgequota.requests"}[5m]))
+          / clamp_min(sum(rate({otel_metric_name="edgequota.requests"}[1h] offset 1h)), 0.01) > 2
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota traffic spike detected"
           description: >-
@@ -43,12 +58,16 @@ groups:
             Verify whether this is expected (marketing campaign, deploy) or anomalous.
 
       - alert: EdgeQuotaNoTraffic
+        # build_info was dropped in the OTel migration; liveness is now proven by the
+        # presence of go.goroutine.count (emitted continuously by every live pod).
         expr: |
-          sum(rate(edgequota_requests_total[5m])) == 0
-          and on() sum(edgequota_build_info) > 0
+          sum(rate({otel_metric_name="edgequota.requests"}[5m])) < 0.01
+          and on() sum({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}) > 0
         for: 10m
         labels:
           severity: critical
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota receiving no traffic"
           description: >-
@@ -60,11 +79,13 @@ groups:
       - alert: EdgeQuotaHighP99Latency
         expr: |
           histogram_quantile(0.99,
-            sum by (le) (rate(edgequota_request_duration_seconds_bucket[5m]))
+            sum by (le) (rate({otel_metric_name="http.server.request.duration", otel_metric_type="histogram", service_name="edgequota"}[5m]))
           ) > 2
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota P99 latency above 2 seconds"
           description: >-
@@ -74,11 +95,13 @@ groups:
       - alert: EdgeQuotaP99LatencyCritical
         expr: |
           histogram_quantile(0.99,
-            sum by (le) (rate(edgequota_request_duration_seconds_bucket[5m]))
+            sum by (le) (rate({otel_metric_name="http.server.request.duration", otel_metric_type="histogram", service_name="edgequota"}[5m]))
           ) > 5
         for: 5m
         labels:
           severity: critical
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota P99 latency above 5 seconds"
           description: >-
@@ -88,11 +111,13 @@ groups:
       - alert: EdgeQuotaBackendLatencyHigh
         expr: |
           histogram_quantile(0.95,
-            sum by (le) (rate(edgequota_backend_duration_seconds_bucket[5m]))
+            sum by (le) (rate({otel_metric_name="edgequota.backend.duration", otel_metric_type="histogram"}[5m]))
           ) > 5
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "Backend P95 latency above 5 seconds"
           description: >-
@@ -104,13 +129,16 @@ groups:
       - alert: EdgeQuotaHighRateLimitRatio
         expr: |
           (
-            sum(rate(edgequota_requests_limited_total[5m]))
-            / (sum(rate(edgequota_requests_allowed_total[5m]))
-               + sum(rate(edgequota_requests_limited_total[5m])))
+            sum(rate({otel_metric_name="edgequota.ratelimit.decisions", edgequota_ratelimit_decision="limited"}[5m]))
+            / clamp_min(
+                sum(rate({otel_metric_name="edgequota.ratelimit.decisions", edgequota_ratelimit_decision="allowed"}[5m]))
+                + sum(rate({otel_metric_name="edgequota.ratelimit.decisions", edgequota_ratelimit_decision="limited"}[5m])), 1)
           ) > 0.5
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "More than 50% of requests are rate-limited"
           description: >-
@@ -118,10 +146,12 @@ groups:
             with 429. Review rate limit configuration or investigate a traffic surge.
 
       - alert: EdgeQuotaConcurrencyRejections
-        expr: rate(edgequota_concurrent_requests_rejected_total[5m]) > 0
+        expr: sum(rate({otel_metric_name="edgequota.concurrency.rejected"}[5m])) > 0
         for: 2m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota rejecting requests due to concurrency limit"
           description: >-
@@ -131,59 +161,70 @@ groups:
       # --- Redis ---
 
       - alert: EdgeQuotaRedisUnhealthy
-        expr: edgequota_redis_healthy == 0
+        expr: min by (edgequota_redis_pool, k8s_pod_name)({otel_metric_name="edgequota.redis.healthy"}) < 1
         for: 1m
         labels:
           severity: critical
+          team: platform
+          surface: edgequota
         annotations:
-          summary: "EdgeQuota Redis pool {{ $labels.pool }} is unhealthy"
+          summary: "EdgeQuota Redis pool {{ $labels.edgequota_redis_pool }} is unhealthy"
           description: >-
-            Redis connectivity is down for pool {{ $labels.pool }} on {{ $labels.pod }}.
+            Redis connectivity is down for pool {{ $labels.edgequota_redis_pool }} on {{ $labels.k8s_pod_name }}.
             Rate limiting may be degraded (in-memory fallback or fail-closed).
 
       - alert: EdgeQuotaRedisErrors
-        expr: sum by (pool, pod, namespace, job) (rate(edgequota_redis_errors_total[5m])) > 1
+        expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.redis.errors"}[5m])) > 1
         for: 2m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
-          summary: "EdgeQuota Redis errors on pool {{ $labels.pool }}"
+          summary: "EdgeQuota Redis errors on pool {{ $labels.edgequota_redis_pool }}"
           description: >-
-            Redis errors are occurring at {{ $value | humanize }}/s on pool {{ $labels.pool }}.
+            Redis errors are occurring at {{ $value | humanize }}/s on pool {{ $labels.edgequota_redis_pool }}.
             Check Redis cluster health and network connectivity.
 
       - alert: EdgeQuotaFallbackActive
-        expr: sum by (pool, pod, namespace, job) (rate(edgequota_fallback_used_total[5m])) > 0
+        expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.ratelimit.fallback_used"}[5m])) > 0
         for: 2m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
-          summary: "EdgeQuota in-memory fallback active for pool {{ $labels.pool }}"
+          summary: "EdgeQuota in-memory fallback active for pool {{ $labels.edgequota_redis_pool }}"
           description: >-
-            Redis pool {{ $labels.pool }} is unreachable and EdgeQuota has switched to
+            Redis pool {{ $labels.edgequota_redis_pool }} is unreachable and EdgeQuota has switched to
             in-memory rate limiting. Distributed rate limits are not enforced.
 
       # --- Auth Service ---
 
       - alert: EdgeQuotaAuthErrors
-        expr: rate(edgequota_auth_errors_total[5m]) > 0
+        expr: sum(rate({otel_metric_name="edgequota.auth.outcomes", edgequota_auth_outcome="error"}[5m])) > 0
         for: 2m
         labels:
           severity: critical
+          team: platform
+          surface: edgequota
         annotations:
           summary: "Auth service returning errors"
           description: >-
             EdgeQuota auth service calls are failing at {{ $value | humanize }}/s.
             Depending on failure_policy, requests may be passing through unauthenticated.
+            (outcome=error only — client-cancel disconnects are tracked separately.)
 
       - alert: EdgeQuotaAuthLatencyHigh
         expr: |
           histogram_quantile(0.95,
-            sum by (le) (rate(edgequota_auth_duration_seconds_bucket[5m]))
+            sum by (le) (rate({otel_metric_name="edgequota.auth.duration", otel_metric_type="histogram"}[5m]))
           ) > 1
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "Auth service P95 latency above 1 second"
           description: >-
@@ -193,10 +234,12 @@ groups:
       # --- Events ---
 
       - alert: EdgeQuotaEventsDropped
-        expr: rate(edgequota_events_dropped_total[5m]) > 0
+        expr: sum(rate({otel_metric_name="edgequota.events.dropped"}[5m])) > 0
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota dropping usage events"
           description: >-
@@ -204,10 +247,12 @@ groups:
             Consider increasing buffer size or reducing event volume.
 
       - alert: EdgeQuotaEventSendFailures
-        expr: rate(edgequota_events_send_failures_total[5m]) > 0
+        expr: sum(rate({otel_metric_name="edgequota.events.send_failures"}[5m])) > 0
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota event batches failing to send"
           description: >-
@@ -219,13 +264,20 @@ groups:
       - alert: EdgeQuotaLowCacheHitRate
         expr: |
           (
-            sum(rate(edgequota_response_cache_hits_total[15m]))
-            / (sum(rate(edgequota_response_cache_hits_total[15m]))
-               + sum(rate(edgequota_response_cache_misses_total[15m])))
+            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
+            / clamp_min(
+                sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
+                + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m])), 1)
           ) < 0.3
+          and on() (
+            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
+            + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m]))
+          ) > 0.1
         for: 15m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "Response cache hit rate below 30%"
           description: >-
@@ -234,57 +286,46 @@ groups:
             Check if cache TTLs are too short or if traffic patterns changed.
 
       # --- System Resources ---
+      # container/k8s/go.* metrics are portable and shared across services, so each
+      # is scoped by k8s_deployment_name="edgequota".
 
       - alert: EdgeQuotaHighMemory
-        expr: |
-          sum by (pod, namespace) (container_memory_working_set_bytes{container="edgequota"})
-          / on(pod, namespace) kube_pod_container_resource_limits{resource="memory", container="edgequota"}
-          > 0.85
+        expr: max(k8s_pod_memory_limit_utilization_ratio{k8s_deployment_name="edgequota"}) > 0.85
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota memory usage above 85% of limit"
           description: >-
-            Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of
+            Pod {{ $labels.k8s_pod_name }} is using {{ $value | humanizePercentage }} of
             its memory limit. Risk of OOM kill.
 
       - alert: EdgeQuotaHighGoroutines
-        expr: go_goroutines > 10000
+        # go.goroutine.count comes from the OTel runtime instrumentation
+        # (runtime.Start), restored when the Prometheus Go collector was removed.
+        expr: max({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}) > 10000
         for: 5m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
           summary: "EdgeQuota goroutine count unusually high"
           description: >-
-            {{ $labels.pod }} has {{ $value }} goroutines. This may indicate
+            {{ $labels.k8s_pod_name }} has {{ $value }} goroutines. This may indicate
             a goroutine leak or extremely high concurrency.
 
-      # --- Config & TLS ---
-
-      - alert: EdgeQuotaConfigReloadStale
-        expr: |
-          (time() - edgequota_config_last_reload_timestamp_seconds > 0)
-          and (time() - edgequota_config_last_reload_timestamp_seconds) > 86400
-        for: 0m
-        labels:
-          severity: info
-        annotations:
-          summary: "EdgeQuota config not reloaded in 24 hours"
-          description: >-
-            Last config reload was {{ $value | humanizeDuration }} ago
-            for {{ $labels.pod }}. This is informational — may be expected
-            if config rarely changes.
-
-      # --- Goroutine / heap leaks ---
-
       - alert: EdgeQuotaGoroutineGrowth
-        expr: deriv(go_goroutines[15m]) > 1
+        expr: max(deriv({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}[15m])) > 1
         for: 30m
         labels:
           severity: warning
+          team: platform
+          surface: edgequota
         annotations:
-          summary: "EdgeQuota goroutines growing on {{ $labels.pod }}"
+          summary: "EdgeQuota goroutines growing on {{ $labels.k8s_pod_name }}"
           description: >-
             Goroutine count is growing at more than 1/sec, sustained over
             30 minutes. Classic signature of a goroutine leak — e.g.

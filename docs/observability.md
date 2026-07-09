@@ -302,26 +302,25 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 
 ## Dashboard
 
-The canonical dashboard definition lives in the repo under `deploy/observability/` (vendor-neutral; the infra observability stack mirrors it — the repo is the source of truth, infra never ahead). It is being converted to the new dotted OTel metric names as part of the observability rollout, validated against the names actually surfaced by the backend once the metrics land on dev.
+The canonical dashboard definition lives in the repo at [`deploy/observability/dashboard.yaml`](../deploy/observability/dashboard.yaml) (vendor-neutral; the infra observability stack mirrors it byte-for-byte — the repo is the source of truth, infra never ahead). Its queries use the dotted OTel metric names via the backend's `otel_metric_name` surface (see [`deploy/observability/README.md`](../deploy/observability/README.md) for the surfaced-name convention).
 
 **Sections:**
 
 | Row                  | Panels                                                                                   |
 | -------------------- | ---------------------------------------------------------------------------------------- |
-| Overview | Request rate, 5xx error rate, P95 latency, rate-limited %, Redis health, cache hit rate |
-| Traffic | Request rate by status code, allowed vs rate-limited, by method, by pod |
-| Latency | E2E P50/P95/P99, breakdown (auth/ext-RL/backend), backend P50/P95/P99, heatmap |
-| Rate Limiting | Remaining tokens distribution, top tenants, top rate-limited tenants, key errors |
-| Redis & Fallback | Redis errors/sec, fallback/sec, health by pod |
-| Auth & External RL | Auth errors/denials, auth latency, ext-RL cache performance, ext-RL concurrency, ext-RL latency |
-| Response Cache | Cache operations/sec, hit ratio, body size, purges |
+| Overview | Request rate, 5xx error ratio, P95 latency, rate-limited %, Redis health, cache hit rate |
+| Traffic | Rate by status class, allowed vs rate-limited, by method, by protocol, by TLS mode |
+| Response codes (by family) | 2xx / 3xx / 4xx / 5xx rate |
+| Latency | E2E P50/P95/P99, breakdown (auth/ext-RL/backend P95), backend P50/P95/P99 |
+| Streaming connections | Active by protocol, new/sec by protocol, duration P50/P95 |
+| Rate limiting / keys | Key-extract & tenant-key-rejected errors |
+| Redis pools | Health per pool, errors/sec, fallback/sec, remaining tokens, ext-RL cache, response-cache ops & ratio |
+| Auth & external rate limit | Auth outcomes (error/denied/canceled), auth latency, ext-RL latency |
 | Events | Events dropped/sec, send failures/sec |
-| System Resources | CPU, memory (RSS + heap), goroutines, GC, file descriptors, network I/O |
-| Config & TLS Reloads | Time since last config/TLS/mTLS-CA reload, build info table |
+| System resources (OTel-native) | In-flight requests, CPU, memory, goroutines (`go.goroutine.count`), network I/O |
+| Config & TLS reloads | Time since last config / TLS / mTLS-CA reload |
 
-**Template variables:** `$datasource`, `$namespace`, `$pod`, `$rate_interval`
-
-**Annotations:** Config reloads and version rollouts are automatically annotated on all panels.
+Per-tenant panels were removed in the OTel migration (per-tenant cardinality belongs in traces/ClickHouse, not metrics), as was the `build_info` panel.
 
 > **Traffic by path:** Per-path metrics are intentionally omitted to avoid unbounded label cardinality. Use access logs (structured JSON with `path` field) with a log aggregation system (Loki, Elasticsearch) for per-path traffic analysis.
 >
@@ -331,7 +330,7 @@ The canonical dashboard definition lives in the repo under `deploy/observability
 
 ## Alerting Rules
 
-The canonical alerting rules live in the repo under `deploy/observability/` (mirrored by the infra observability stack). They query the dotted OTel metric names (via the backend's `otel_metric_name` surface) and are finalized during the observability rollout.
+The canonical alerting rules live in the repo at [`deploy/observability/alerts.yaml`](../deploy/observability/alerts.yaml) (Prometheus rule format; mirrored into the infra observability stack, adapted to the backend's threshold model). They query the dotted OTel metric names via the backend's `otel_metric_name` surface. Traffic/error/no-traffic rules key off `edgequota.requests` (spans streaming); the goroutine alerts and the `EdgeQuotaNoTraffic` liveness guard use `go.goroutine.count` (OTel runtime metrics).
 
 | Alert | Severity | Condition |
 |-------|----------|-----------|
@@ -351,14 +350,14 @@ The canonical alerting rules live in the repo under `deploy/observability/` (mir
 | EdgeQuotaEventSendFailures | warning | Event batches failing to send |
 | EdgeQuotaLowCacheHitRate | warning | Cache hit rate < 30% |
 | EdgeQuotaHighMemory | warning | RSS > 85% of memory limit |
-| EdgeQuotaHighGoroutines | warning | Goroutine count > 10,000 |
-| EdgeQuotaConfigReloadStale | info | No config reload in 24 hours |
+| EdgeQuotaHighGoroutines | warning | `go.goroutine.count` > 10,000 |
+| EdgeQuotaGoroutineGrowth | warning | Goroutines growing > 1/s, sustained 30m |
 
 ---
 
 ## Admin API
 
-The admin server exposes operational endpoints alongside health probes and metrics:
+The admin server exposes operational endpoints alongside health probes (metrics are pushed via OTLP, not scraped — there is no `/metrics` endpoint):
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
