@@ -1674,7 +1674,7 @@
                 "plugin": {
                   "kind": "PrometheusTimeSeriesQuery",
                   "spec": {
-                    "query": "sum by (k8s_pod_name)({otel_metric_name=\"go.goroutine.count\", k8s_deployment_name=\"edgequota\"})",
+                    "query": "sum({otel_metric_name=\"go.goroutine.count\", service_name=\"edgequota\"})",
                     "seriesNameFormat": "{{k8s_pod_name}}"
                   }
                 }
