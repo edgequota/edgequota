@@ -62,7 +62,7 @@ groups:
         # presence of go.goroutine.count (emitted continuously by every live pod).
         expr: |
           sum(rate({otel_metric_name="edgequota.requests"}[5m])) < 0.01
-          and on() sum({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}) > 0
+          and on() sum({otel_metric_name="go.goroutine.count", service_name="edgequota"}) > 0
         for: 10m
         labels:
           severity: critical
@@ -305,7 +305,7 @@ groups:
       - alert: EdgeQuotaHighGoroutines
         # go.goroutine.count comes from the OTel runtime instrumentation
         # (runtime.Start), restored when the Prometheus Go collector was removed.
-        expr: max({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}) > 10000
+        expr: max({otel_metric_name="go.goroutine.count", service_name="edgequota"}) > 10000
         for: 5m
         labels:
           severity: warning
@@ -318,7 +318,7 @@ groups:
             a goroutine leak or extremely high concurrency.
 
       - alert: EdgeQuotaGoroutineGrowth
-        expr: max(deriv({otel_metric_name="go.goroutine.count", k8s_deployment_name="edgequota"}[15m])) > 1
+        expr: max(deriv({otel_metric_name="go.goroutine.count", service_name="edgequota"}[15m])) > 1
         for: 30m
         labels:
           severity: warning
