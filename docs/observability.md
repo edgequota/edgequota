@@ -279,6 +279,7 @@ The default (`external`) is a good balance between visibility and overhead. Use 
 |-----------|-------|
 | `service.name` | Configured `service_name` |
 | `service.version` | Binary version (set via `-ldflags`) |
+| `service.instance.id` | Per-pod identity (`POD_NAME` env, else hostname) — keeps each replica's metric streams distinct |
 | `tenant_key` | Tenant identifier (on `edgequota.proxy` span) |
 | `rate_limit.allowed` | Whether the request was allowed (on `edgequota.proxy` span) |
 | `rate_limit.remaining` | Remaining tokens in bucket (on `edgequota.proxy` span) |

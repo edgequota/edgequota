@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/edgequota/edgequota/internal/config"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -145,17 +146,38 @@ func cumulativeTemporality(sdkmetric.InstrumentKind) metricdata.Temporality {
 
 // newResource builds the OpenTelemetry resource carrying service identity. It is
 // shared by the tracer and meter providers so traces and metrics report the same
-// service.name / service.version.
+// service.name / service.version / service.instance.id.
+//
+// service.instance.id distinguishes replicas: without it, every pod reports an
+// identical resource, so an OTLP backend collapses their metric streams into one
+// series (a merged cumulative counter mis-computes rates). The instance id is the
+// pod name (POD_NAME downward-API env if set, else the hostname, which equals the
+// pod name in Kubernetes).
 func newResource(serviceName, version string) (*resource.Resource, error) {
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewSchemaless(
 			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion(version),
+			semconv.ServiceInstanceID(instanceID()),
 		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
 	return res, nil
+}
+
+// instanceID returns a per-replica identifier for service.instance.id: the
+// POD_NAME env (Kubernetes downward API) when set, otherwise the hostname (which
+// is the pod name in Kubernetes). Falls back to "unknown" only if both are
+// unavailable, which does not happen in a running container.
+func instanceID() string {
+	if v := os.Getenv("POD_NAME"); v != "" {
+		return v
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "unknown"
 }
