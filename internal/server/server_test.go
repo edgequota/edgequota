@@ -34,6 +34,36 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// TestSkipStreaming verifies the otelhttp filter records normal requests but
+// excludes long-lived streaming (SSE/WebSocket/gRPC) — whose connection-lifetime
+// durations would pollute http.server.request.duration and false-fire p99 alerts.
+func TestSkipStreaming(t *testing.T) {
+	newReq := func(method string, headers map[string]string) *http.Request {
+		r := httptest.NewRequest(method, "/", nil)
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+	tests := []struct {
+		name   string
+		req    *http.Request
+		record bool // true = otelhttp should record (non-streaming)
+	}{
+		{"plain GET is recorded", newReq(http.MethodGet, nil), true},
+		{"JSON POST is recorded", newReq(http.MethodPost, map[string]string{"Content-Type": "application/json"}), true},
+		{"SSE is skipped", newReq(http.MethodGet, map[string]string{"Accept": "text/event-stream"}), false},
+		{"WebSocket upgrade is skipped", newReq(http.MethodGet, map[string]string{"Upgrade": "websocket", "Connection": "Upgrade"}), false},
+		{"gRPC is skipped", newReq(http.MethodPost, map[string]string{"Content-Type": "application/grpc"}), false},
+		{"gRPC+proto is skipped", newReq(http.MethodPost, map[string]string{"Content-Type": "application/grpc+proto"}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.record, skipStreaming(tt.req))
+		})
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Run("creates server with valid config", func(t *testing.T) {
 		mr := miniredis.RunT(t)

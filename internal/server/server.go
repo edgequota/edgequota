@@ -169,6 +169,24 @@ func skipCORSPreflight(r *http.Request) bool {
 		r.Header.Get("Access-Control-Request-Method") == ""
 }
 
+// skipStreaming is an otelhttp.WithFilter that prevents span creation AND
+// http.server.request.duration recording for long-lived streaming connections
+// (SSE, WebSocket, gRPC). Their duration is the connection lifetime, not a
+// request latency, so folding them into the request-duration histogram records
+// multi-minute-to-hour values that overflow the top bucket (le=10s), peg p99,
+// and false-fire the latency alerts. Streaming has its own duration metric
+// (edgequota.streaming.duration); this keeps http.server.request.duration an
+// honest measure of non-streaming request latency — the invariant the traffic
+// counters already assume. otelhttp filters are AND-combined, so this runs
+// alongside skipCORSPreflight.
+//
+// Note: proxy.IsGRPC matches unary as well as streaming gRPC, so unary gRPC
+// latency is also excluded here — consistent with treating this histogram as
+// non-streaming-only (there is no gRPC traffic today regardless).
+func skipStreaming(r *http.Request) bool {
+	return !proxy.IsSSE(r) && !proxy.IsWebSocketUpgrade(r) && !proxy.IsGRPC(r)
+}
+
 func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.Logger) (*http.Server, *http3.Server) {
 	readTimeout, _ := config.ParseDuration(cfg.Server.ReadTimeout, 30*time.Second)
 	writeTimeout, _ := config.ParseDuration(cfg.Server.WriteTimeout, 30*time.Second)
@@ -196,6 +214,7 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		}),
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 		otelhttp.WithFilter(skipCORSPreflight),
+		otelhttp.WithFilter(skipStreaming),
 	)
 
 	// When TLS is enabled, HTTP/2 is negotiated via ALPN (http2.ConfigureServer
@@ -279,6 +298,7 @@ func buildMTLSServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 		}),
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 		otelhttp.WithFilter(skipCORSPreflight),
+		otelhttp.WithFilter(skipStreaming),
 	)
 
 	return &http.Server{
