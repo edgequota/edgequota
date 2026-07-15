@@ -163,7 +163,8 @@
         "kind": "Panel",
         "spec": {
           "display": {
-            "name": "Cache hit rate"
+            "name": "Cache hit rate (cacheable responses)",
+            "description": "Of the responses the cache was eligible to serve, the share served from cache. Responses that are not cacheable at all are excluded — including them would make this track the caller's traffic mix rather than cache health. Empty when there is no cacheable traffic."
           },
           "plugin": {
             "kind": "StatChart",
@@ -181,7 +182,38 @@
                 "plugin": {
                   "kind": "PrometheusTimeSeriesQuery",
                   "spec": {
-                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / clamp_min(sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])),1)"
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / (sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])))"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "cache_eligibility": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Cacheable responses",
+            "description": "Share of cache-path lookups whose response the cache was eligible to store (2xx/301 with a positive max-age). This is a property of what the upstream returns, not of the cache: a low value means the cache is rarely offered anything to cache."
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "percent-decimal"
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "(sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m]))) / sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\"}[5m]))"
                   }
                 }
               }
@@ -1266,6 +1298,18 @@
                 "plugin": {
                   "kind": "PrometheusTimeSeriesQuery",
                   "spec": {
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"uncacheable\"}[5m]))",
+                    "seriesNameFormat": "uncacheable"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
                     "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.operations\", edgequota_cache_operation=\"store\"}[5m]))",
                     "seriesNameFormat": "stores"
                   }
@@ -1326,7 +1370,7 @@
                 "plugin": {
                   "kind": "PrometheusTimeSeriesQuery",
                   "spec": {
-                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / clamp_min(sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])),1)",
+                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m])) / (sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"hit\"}[5m]))+sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"miss\"}[5m])))",
                     "seriesNameFormat": "hit-ratio"
                   }
                 }
@@ -1873,6 +1917,15 @@
               "height": 4,
               "content": {
                 "$ref": "#/spec/panels/cache"
+              }
+            },
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/cache_eligibility"
               }
             }
           ]

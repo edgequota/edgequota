@@ -41,13 +41,18 @@ type Store struct {
 	maxBodySize int64
 	logger      *slog.Logger
 
-	OnHit      func()
-	OnMiss     func()
-	OnStaleHit func()
-	OnStore    func()
-	OnSkip     func()
-	OnPurge    func()
-	OnBodySize func(float64)
+	// OnHit fires when a request is served from cache. OnMiss and
+	// OnUncacheable are decided only once the upstream response is known
+	// (see CachingResponseWriter.Finish), because cache eligibility is a
+	// property of the response, not of the request.
+	OnHit         func()
+	OnMiss        func()
+	OnUncacheable func()
+	OnStaleHit    func()
+	OnStore       func()
+	OnSkip        func()
+	OnPurge       func()
+	OnBodySize    func(float64)
 }
 
 // Option configures a Store.

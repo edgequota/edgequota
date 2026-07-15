@@ -113,6 +113,132 @@ func TestCachingResponseWriterBodyOverflow(t *testing.T) {
 	assert.True(t, skipped, "OnSkip should be called for oversized body")
 }
 
+// Finish must classify the lookup from the RESPONSE, not the request. A
+// response the cache was never eligible to serve is not a miss: counting it as
+// one makes the hit rate track traffic composition instead of cache health.
+func TestFinishClassifiesLookupOutcome(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          int
+		header          map[string]string
+		body            string
+		maxBodySize     int64
+		noUpstreamReply bool
+		wantMiss        bool
+		wantUncacheable bool
+		wantSkip        bool
+	}{
+		{
+			name:     "cacheable response is an eligible miss",
+			status:   http.StatusOK,
+			header:   map[string]string{"Cache-Control": "max-age=120"},
+			body:     "ok",
+			wantMiss: true,
+		},
+		{
+			name:     "301 with max-age is an eligible miss",
+			status:   http.StatusMovedPermanently,
+			header:   map[string]string{"Cache-Control": "max-age=60"},
+			wantMiss: true,
+		},
+		{
+			name:            "absent cache-control is uncacheable",
+			status:          http.StatusOK,
+			body:            "ok",
+			wantUncacheable: true,
+		},
+		{
+			name:            "no-store is uncacheable",
+			status:          http.StatusOK,
+			header:          map[string]string{"Cache-Control": "no-store"},
+			wantUncacheable: true,
+		},
+		{
+			name:            "private is uncacheable",
+			status:          http.StatusOK,
+			header:          map[string]string{"Cache-Control": "private, max-age=60"},
+			wantUncacheable: true,
+		},
+		{
+			name:            "zero max-age is uncacheable",
+			status:          http.StatusOK,
+			header:          map[string]string{"Cache-Control": "max-age=0"},
+			wantUncacheable: true,
+		},
+		{
+			name:            "error status is uncacheable",
+			status:          http.StatusInternalServerError,
+			header:          map[string]string{"Cache-Control": "max-age=120"},
+			wantUncacheable: true,
+		},
+		{
+			name:            "vary star is uncacheable",
+			status:          http.StatusOK,
+			header:          map[string]string{"Cache-Control": "max-age=60", "Vary": "*"},
+			wantUncacheable: true,
+		},
+		{
+			name:        "oversized cacheable body is a miss that skips the store",
+			status:      http.StatusOK,
+			header:      map[string]string{"Cache-Control": "max-age=300"},
+			body:        "this body is much too large",
+			maxBodySize: 5,
+			wantMiss:    true,
+			wantSkip:    true,
+		},
+		{
+			name:            "no upstream response records no outcome",
+			noUpstreamReply: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newTestRedis(t)
+			opts := []Option{}
+			if tt.maxBodySize > 0 {
+				opts = append(opts, WithMaxBodySize(tt.maxBodySize))
+			}
+			store := NewStore(client, opts...)
+
+			var misses, uncacheables, skips int
+			store.OnMiss = func() { misses++ }
+			store.OnUncacheable = func() { uncacheables++ }
+			store.OnSkip = func() { skips++ }
+
+			req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+			cw := NewCachingResponseWriter(httptest.NewRecorder(), store, req)
+
+			if !tt.noUpstreamReply {
+				for k, v := range tt.header {
+					cw.Header().Set(k, v)
+				}
+				cw.WriteHeader(tt.status)
+				if tt.body != "" {
+					_, _ = cw.Write([]byte(tt.body))
+				}
+			}
+
+			cw.Finish(context.Background(), store.KeyFromRequest(req, nil))
+
+			assert.Equal(t, boolToInt(tt.wantMiss), misses, "miss count")
+			assert.Equal(t, boolToInt(tt.wantUncacheable), uncacheables, "uncacheable count")
+			assert.Equal(t, boolToInt(tt.wantSkip), skips, "skip count")
+
+			// Every lookup is classified exactly once, so the three outcomes
+			// never double-count a single request.
+			assert.LessOrEqual(t, misses+uncacheables, 1, "outcome recorded more than once")
+		})
+	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func TestCachingResponseWriterPassthrough(t *testing.T) {
 	client, _ := newTestRedis(t)
 	store := NewStore(client)

@@ -822,11 +822,11 @@ func (p *Proxy) Close(ctx context.Context) error {
 // cacheable backend responses are stored. It also handles conditional requests:
 // if the client didn't send If-None-Match/If-Modified-Since but we have a
 // stale cache entry, we inject those headers so the backend can return 304.
+// The lookup outcome is recorded by Finish rather than here: whether the cache
+// could ever have served this request depends on the upstream response's status
+// and Cache-Control, which are unknown until the response comes back.
 func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
 	cacheKey := p.cache.KeyFromRequest(r, nil)
-	if p.cache.OnMiss != nil {
-		p.cache.OnMiss()
-	}
 	p.logger.Debug("response cache miss", "key", cacheKey)
 
 	cw := cache.NewCachingResponseWriter(w, p.cache, r)

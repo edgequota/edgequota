@@ -261,13 +261,23 @@ groups:
 
       # --- Response Cache ---
 
+      # Measured over cache-ELIGIBLE traffic only: "hit" and "miss" both imply a
+      # response the cache could serve, while responses that are not cacheable
+      # at all are recorded as result="uncacheable" and excluded here. Including
+      # them would make this ratio track the caller's traffic mix rather than
+      # cache health, since a deployment serving mostly uncacheable responses
+      # would sit permanently near zero however well the cache performs.
+      #
+      # No clamp_min on the denominator: the traffic guard below already keeps
+      # it non-zero, and clamping floors a sub-1/s denominator to 1, which turns
+      # the ratio into an absolute rate and fires on a healthy cache.
       - alert: EdgeQuotaLowCacheHitRate
         expr: |
           (
             sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-            / clamp_min(
+            / (
                 sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-                + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m])), 1)
+                + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m])))
           ) < 0.3
           and on() (
             sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
@@ -279,11 +289,14 @@ groups:
           team: platform
           surface: edgequota
         annotations:
-          summary: "Response cache hit rate below 30%"
+          summary: "Response cache hit rate below 30% on cacheable responses"
           description: >-
-            The CDN-style response cache is only serving
-            {{ $value | humanizePercentage }} of requests from cache.
-            Check if cache TTLs are too short or if traffic patterns changed.
+            Of the responses the cache was eligible to serve, only
+            {{ $value | humanizePercentage }} were served from cache.
+            Check Redis health and whether cache TTLs are short relative to how
+            often the same resources are requested. Responses that are not
+            cacheable at all are excluded from this ratio — see
+            edgequota_cache_result="uncacheable" for that share.
 
       # --- System Resources ---
       # container/k8s/go.* metrics are portable and shared across services, so each

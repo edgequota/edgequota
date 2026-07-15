@@ -85,6 +85,11 @@ const (
 	cacheResultHit   = "hit"
 	cacheResultMiss  = "miss"
 	cacheResultStale = "stale"
+	// A response the cache was never eligible to serve (not 200/301, or no
+	// positive max-age). Kept distinct from "miss" so hit rate can be measured
+	// over cache-eligible traffic only — mixing the two makes the ratio track
+	// traffic composition rather than cache health.
+	cacheResultUncacheable = "uncacheable"
 
 	cacheOpStore = "store"
 	cacheOpSkip  = "skip"
@@ -114,9 +119,10 @@ var (
 	optAuthDenied   = metric.WithAttributes(attribute.String(attrAuthOutcome, authOutcomeDenied))
 	optAuthCanceled = metric.WithAttributes(attribute.String(attrAuthOutcome, authOutcomeCanceled))
 
-	optCacheHit   = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultHit))
-	optCacheMiss  = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultMiss))
-	optCacheStale = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultStale))
+	optCacheHit         = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultHit))
+	optCacheMiss        = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultMiss))
+	optCacheStale       = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultStale))
+	optCacheUncacheable = metric.WithAttributes(attribute.String(attrCacheResult, cacheResultUncacheable))
 
 	optRespOpStore = metric.WithAttributes(attribute.String(attrCacheOperation, cacheOpStore))
 	optRespOpSkip  = metric.WithAttributes(attribute.String(attrCacheOperation, cacheOpSkip))
@@ -542,9 +548,17 @@ func (m *Metrics) IncRespCacheHit() {
 	m.respCacheLookups.Add(context.Background(), 1, optCacheHit)
 }
 
-// IncRespCacheMiss records a response-cache miss.
+// IncRespCacheMiss records a response-cache miss: the response was cache
+// eligible but was not already cached.
 func (m *Metrics) IncRespCacheMiss() {
 	m.respCacheLookups.Add(context.Background(), 1, optCacheMiss)
+}
+
+// IncRespCacheUncacheable records a lookup whose response the cache was never
+// eligible to serve. These can never become hits, so they are excluded from
+// hit rate and reported separately.
+func (m *Metrics) IncRespCacheUncacheable() {
+	m.respCacheLookups.Add(context.Background(), 1, optCacheUncacheable)
 }
 
 // IncRespCacheStaleHit records a stale response-cache hit (revalidated via 304).
