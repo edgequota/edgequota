@@ -268,9 +268,18 @@ groups:
       # cache health, since a deployment serving mostly uncacheable responses
       # would sit permanently near zero however well the cache performs.
       #
-      # No clamp_min on the denominator: the traffic guard below already keeps
-      # it non-zero, and clamping floors a sub-1/s denominator to 1, which turns
-      # the ratio into an absolute rate and fires on a healthy cache.
+      # The trailing guard is a presence check (> 0), not a traffic threshold:
+      # it exists solely to suppress the 0/0 when nothing cacheable was served,
+      # which is exactly when the ratio is undefined. Any positive rate here
+      # would instead encode one deployment's traffic volume — eligible traffic
+      # is a property of what the backends serve, so a rate that means "quiet"
+      # for one deployment means "busy" for another, and the alert would go
+      # deaf or noisy purely on deployment size. Ratios self-normalize; guard
+      # on definedness only.
+      #
+      # For the same reason there is no clamp_min on the denominator: clamping
+      # floors a sub-1/s denominator to 1, turning the ratio into an absolute
+      # rate that fires on a healthy cache at low volume.
       - alert: EdgeQuotaLowCacheHitRate
         expr: |
           (
@@ -282,7 +291,7 @@ groups:
           and on() (
             sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
             + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m]))
-          ) > 0.1
+          ) > 0
         for: 15m
         labels:
           severity: warning

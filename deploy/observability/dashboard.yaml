@@ -195,7 +195,7 @@
         "spec": {
           "display": {
             "name": "Cacheable responses",
-            "description": "Share of cache-path lookups whose response the cache was eligible to store (2xx/301 with a positive max-age). This is a property of what the upstream returns, not of the cache: a low value means the cache is rarely offered anything to cache."
+            "description": "Share of cache-path lookups whose response the cache was eligible to store (200 or 301 with a positive max-age, not no-store/no-cache/private). This is a property of what the upstream returns, not of the cache: a low value means the cache is rarely offered anything to cache."
           },
           "plugin": {
             "kind": "StatChart",

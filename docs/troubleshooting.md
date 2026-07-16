@@ -172,13 +172,27 @@ Certain headers cannot be set as custom event headers because they would break H
 
 ### Low cache hit rate
 
-When `edgequota.response_cache.lookups` with `edgequota.cache.result=hit` is low relative to `edgequota.cache.result=miss`:
+Start by deciding which of two different problems you have. `edgequota.response_cache.lookups` splits by `edgequota.cache.result`:
 
-1. **Backend not returning `Cache-Control`**: EdgeQuota only caches responses with explicit `Cache-Control: max-age=N` or `Cache-Control: public, max-age=N`. Responses without cache directives are never cached.
-2. **Backend returning `no-store` or `private`**: These directives prevent caching. Check the backend's response headers with `curl -I`.
+- `hit` — served from cache.
+- `miss` — the response was cache-eligible but had not been stored yet.
+- `uncacheable` — the cache was never eligible to serve it; it can never become a hit.
+
+Hit rate is `hit / (hit + miss)` — over eligible responses only. Measure it that way: including `uncacheable` would tell you what mix of traffic the backends serve, not how the cache is doing, and it drops as uncacheable traffic grows however well the cache performs.
+
+**If `uncacheable` dominates**, the cache is not underperforming — it is rarely being offered anything to cache. That is a property of what the backends return:
+
+1. **Backend not returning `Cache-Control`**: EdgeQuota only caches responses with an explicit positive `max-age` (`Cache-Control: max-age=N` or `public, max-age=N`). Responses without cache directives are never cached — this is by far the most common cause.
+2. **Backend returning `no-store`, `no-cache`, or `private`**: These directives prevent caching. Check the backend's response headers with `curl -I`.
 3. **Non-cacheable status codes**: Only `200 OK` and `301 Moved Permanently` are cached.
-4. **Response too large**: Responses exceeding `cache.max_body_size` (default: 1 MB) pass through uncached. Increase the limit if needed.
-5. **High cardinality `Vary` header**: A `Vary` header with many possible values (e.g., `Vary: *`) produces unique cache entries per request variation.
+4. **`Vary: *`**: Marks the response uncacheable outright.
+
+**If hit rate is low while `miss` is healthy**, eligible responses are not being reused. Look at:
+
+1. **TTLs short relative to request spacing**: If the same resource is requested less often than its `max-age`, entries expire before reuse and every request is a miss. Low-traffic periods do this naturally.
+2. **Redis unavailable**: Lookups cannot find entries. Check `edgequota.redis.healthy` / `edgequota.redis.errors` (`edgequota.redis.pool=response_cache`) — `EdgeQuotaRedisUnhealthy` covers a real cache outage independently of traffic.
+3. **Response too large**: Responses exceeding `cache.max_body_size` (default: 1 MB) are eligible but never stored, so they stay misses forever. They also increment `edgequota.response_cache.operations` with `edgequota.cache.operation=skip`. Increase the limit if needed.
+4. **High cardinality `Vary` header**: A `Vary` over a header with many values produces a separate entry per variation, so entries are rarely reused.
 
 ### Cache purge not working
 

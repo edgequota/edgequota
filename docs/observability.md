@@ -24,7 +24,7 @@ EdgeQuota emits **portable OpenTelemetry metrics** and **pushes them over OTLP**
 | `edgequota.external_ratelimit.cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | External RL cache lookups |
 | `edgequota.external_ratelimit.semaphore_rejected` | — | External RL requests rejected by the concurrency semaphore |
 | `edgequota.external_ratelimit.singleflight_shared` | — | External RL requests that shared a singleflight result |
-| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | Response-cache lookups |
+| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`\|`uncacheable`) | Response-cache lookups, classified from the upstream response. Hit rate is `hit / (hit + miss)` — `uncacheable` responses were never eligible and can never become hits |
 | `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations |
 | `edgequota.redis.errors` | `edgequota.redis.pool` | Redis operation errors |
 | `edgequota.redis.readonly_retries` | — | Redis `READONLY` retries (replica failover) |
@@ -309,7 +309,7 @@ The canonical dashboard definition lives in the repo at [`deploy/observability/d
 
 | Row                  | Panels                                                                                   |
 | -------------------- | ---------------------------------------------------------------------------------------- |
-| Overview | Request rate, 5xx error ratio, P95 latency, rate-limited %, Redis health, cache hit rate |
+| Overview | Request rate, 5xx error ratio, P95 latency, rate-limited %, Redis health, cache hit rate (cacheable responses), cacheable responses % |
 | Traffic | Rate by status class, allowed vs rate-limited, by method, by protocol, by TLS mode |
 | Response codes (by family) | 2xx / 3xx / 4xx / 5xx rate |
 | Latency | E2E P50/P95/P99, breakdown (auth/ext-RL/backend P95), backend P50/P95/P99 |
@@ -349,7 +349,7 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 | EdgeQuotaAuthLatencyHigh | warning | Auth P95 > 1s |
 | EdgeQuotaEventsDropped | warning | Events dropped from ring buffer |
 | EdgeQuotaEventSendFailures | warning | Event batches failing to send |
-| EdgeQuotaLowCacheHitRate | warning | Cache hit rate < 30% |
+| EdgeQuotaLowCacheHitRate | warning | Cache hit rate < 30% on cacheable responses |
 | EdgeQuotaHighMemory | warning | RSS > 85% of memory limit |
 | EdgeQuotaHighGoroutines | warning | `go.goroutine.count` > 10,000 |
 | EdgeQuotaGoroutineGrowth | warning | Goroutines growing > 1/s, sustained 30m |
