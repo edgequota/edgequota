@@ -260,52 +260,29 @@ groups:
             endpoint connectivity.
 
       # --- Response Cache ---
-
-      # Measured over cache-ELIGIBLE traffic only: "hit" and "miss" both imply a
-      # response the cache could serve, while responses that are not cacheable
-      # at all are recorded as result="uncacheable" and excluded here. Including
-      # them would make this ratio track the caller's traffic mix rather than
-      # cache health, since a deployment serving mostly uncacheable responses
-      # would sit permanently near zero however well the cache performs.
       #
-      # The trailing guard is a presence check (> 0), not a traffic threshold:
-      # it exists solely to suppress the 0/0 when nothing cacheable was served,
-      # which is exactly when the ratio is undefined. Any positive rate here
-      # would instead encode one deployment's traffic volume — eligible traffic
-      # is a property of what the backends serve, so a rate that means "quiet"
-      # for one deployment means "busy" for another, and the alert would go
-      # deaf or noisy purely on deployment size. Ratios self-normalize; guard
-      # on definedness only.
+      # There is deliberately NO hit-rate alert. Cache hit rate belongs on the
+      # dashboard, not on a pager, for two reasons — please read before adding
+      # one back:
       #
-      # For the same reason there is no clamp_min on the denominator: clamping
-      # floors a sub-1/s denominator to 1, turning the ratio into an absolute
-      # rate that fires on a healthy cache at low volume.
-      - alert: EdgeQuotaLowCacheHitRate
-        expr: |
-          (
-            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-            / (
-                sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-                + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m])))
-          ) < 0.3
-          and on() (
-            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-            + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m]))
-          ) > 0
-        for: 15m
-        labels:
-          severity: warning
-          team: platform
-          surface: edgequota
-        annotations:
-          summary: "Response cache hit rate below 30% on cacheable responses"
-          description: >-
-            Of the responses the cache was eligible to serve, only
-            {{ $value | humanizePercentage }} were served from cache.
-            Check Redis health and whether cache TTLs are short relative to how
-            often the same resources are requested. Responses that are not
-            cacheable at all are excluded from this ratio — see
-            edgequota_cache_result="uncacheable" for that share.
+      # 1. A cache outage already pages, load-independently and around the
+      #    clock, via EdgeQuotaRedisUnhealthy / EdgeQuotaRedisErrors on
+      #    edgequota_redis_pool="response_cache". A hit-rate rule adds no
+      #    coverage for the failure it appears to watch.
+      # 2. Hit rate is not decidable from a small sample. It is a ratio over
+      #    cache-ELIGIBLE responses only, and a deployment's eligible volume is
+      #    whatever its backends happen to mark cacheable. In a quiet window
+      #    that can be a handful of lookups, where the ratio is quantized (one
+      #    hit in four reads as 0.25) and its confidence interval spans tens of
+      #    points — so any fixed threshold sits inside the noise and pages on
+      #    healthy caches. Widening the window or adding a rate guard does not
+      #    fix this; it just encodes one deployment's traffic volume into a
+      #    generic product (see docs/observability.md).
+      #
+      # A low hit rate is also usually not a cache fault at all: if backends
+      # rarely return a positive max-age, most responses are result="uncacheable"
+      # and can never become hits. That is a backend question, and the board
+      # shows it directly. See docs/troubleshooting.md ("Low cache hit rate").
 
       # --- System Resources ---
       # container/k8s/go.* metrics are portable and shared across services, so each

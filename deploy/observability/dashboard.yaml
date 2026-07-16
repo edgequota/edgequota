@@ -1286,18 +1286,6 @@
                 "plugin": {
                   "kind": "PrometheusTimeSeriesQuery",
                   "spec": {
-                    "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"stale\"}[5m]))",
-                    "seriesNameFormat": "stale_hits"
-                  }
-                }
-              }
-            },
-            {
-              "kind": "TimeSeriesQuery",
-              "spec": {
-                "plugin": {
-                  "kind": "PrometheusTimeSeriesQuery",
-                  "spec": {
                     "query": "sum(rate({otel_metric_name=\"edgequota.response_cache.lookups\", edgequota_cache_result=\"uncacheable\"}[5m]))",
                     "seriesNameFormat": "uncacheable"
                   }

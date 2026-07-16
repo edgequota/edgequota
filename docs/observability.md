@@ -24,7 +24,7 @@ EdgeQuota emits **portable OpenTelemetry metrics** and **pushes them over OTLP**
 | `edgequota.external_ratelimit.cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | External RL cache lookups |
 | `edgequota.external_ratelimit.semaphore_rejected` | — | External RL requests rejected by the concurrency semaphore |
 | `edgequota.external_ratelimit.singleflight_shared` | — | External RL requests that shared a singleflight result |
-| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`\|`uncacheable`) | Response-cache lookups, classified from the upstream response. Hit rate is `hit / (hit + miss)` — `uncacheable` responses were never eligible and can never become hits |
+| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`uncacheable`) | Response-cache lookups, classified from the upstream response. Hit rate is `hit / (hit + miss)` — `uncacheable` responses were never eligible and can never become hits |
 | `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations |
 | `edgequota.redis.errors` | `edgequota.redis.pool` | Redis operation errors |
 | `edgequota.redis.readonly_retries` | — | Redis `READONLY` retries (replica failover) |
@@ -349,10 +349,19 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 | EdgeQuotaAuthLatencyHigh | warning | Auth P95 > 1s |
 | EdgeQuotaEventsDropped | warning | Events dropped from ring buffer |
 | EdgeQuotaEventSendFailures | warning | Event batches failing to send |
-| EdgeQuotaLowCacheHitRate | warning | Cache hit rate < 30% on cacheable responses |
 | EdgeQuotaHighMemory | warning | RSS > 85% of memory limit |
 | EdgeQuotaHighGoroutines | warning | `go.goroutine.count` > 10,000 |
 | EdgeQuotaGoroutineGrowth | warning | Goroutines growing > 1/s, sustained 30m |
+
+### Why there is no cache hit-rate alert
+
+Cache hit rate is a dashboard signal, not a paging condition.
+
+A cache outage already pages via `EdgeQuotaRedisUnhealthy` / `EdgeQuotaRedisErrors` on `edgequota_redis_pool="response_cache"`, at critical severity within a minute and independently of traffic. A hit-rate rule adds no coverage for that.
+
+What it would add is false pages. Hit rate is a ratio over cache-**eligible** responses, and how much eligible traffic a deployment sees is a property of what its backends mark cacheable — not something the proxy controls. In a quiet window that can be a handful of lookups, where the ratio is quantized (one hit in four reads as 0.25) and its confidence interval spans tens of percentage points. Any fixed threshold then sits inside the noise and fires on a perfectly healthy cache. Neither a wider window nor a minimum-traffic guard fixes that: a guard expressed as a request rate encodes one deployment's volume, so a value that means "too quiet to judge" for one deployment silences the alert entirely for a smaller one.
+
+A low hit rate is also frequently not a cache fault. If backends rarely return a positive `max-age`, most responses are `result="uncacheable"` and can never become hits — a backend question, not a proxy one, and the board shows it directly. See [Troubleshooting](troubleshooting.md) for how to read the two cases apart.
 
 ---
 

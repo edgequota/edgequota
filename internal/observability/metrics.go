@@ -251,7 +251,7 @@ func NewMetrics(logger *slog.Logger) *Metrics {
 		extRLCacheLookups:       int64Counter(m, logger, metricExtRLCacheLookups, "External rate-limit cache lookups by result (hit/miss/stale).", "{lookup}"),
 		extRLSemaphoreRejected:  int64Counter(m, logger, metricExtRLSemaphoreRejected, "External rate-limit requests rejected by the concurrency semaphore.", ""),
 		extRLSingleflightShared: int64Counter(m, logger, metricExtRLSingleflightShared, "External rate-limit requests that shared a singleflight result.", ""),
-		respCacheLookups:        int64Counter(m, logger, metricRespCacheLookups, "Response-cache lookups by result (hit/miss/stale/uncacheable). A miss is a response the cache could have served but had not stored; uncacheable responses were never eligible, so hit rate is hit/(hit+miss).", "{lookup}"),
+		respCacheLookups:        int64Counter(m, logger, metricRespCacheLookups, "Response-cache lookups by result (hit/miss/uncacheable). A miss is a response the cache could have served but had not stored; uncacheable responses were never eligible, so hit rate is hit/(hit+miss).", "{lookup}"),
 		respCacheOperations:     int64Counter(m, logger, metricRespCacheOperations, "Response-cache operations by type (store/skip/purge).", "{operation}"),
 		redisErrorsCtr:          int64Counter(m, logger, metricRedisErrors, "Redis errors encountered, by pool.", ""),
 		redisReadonlyRetries:    int64Counter(m, logger, metricRedisReadonlyRetries, "Redis READONLY retries (replica failover).", ""),
