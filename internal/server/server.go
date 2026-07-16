@@ -187,6 +187,34 @@ func skipStreaming(r *http.Request) bool {
 	return !proxy.IsSSE(r) && !proxy.IsWebSocketUpgrade(r) && !proxy.IsGRPC(r)
 }
 
+// h3ContextServer marks HTTP/3 requests as server-handled. Only its presence is
+// read, but it is a real *http.Server so a type assertion on the context value
+// still holds.
+var h3ContextServer = &http.Server{}
+
+// underHTTPServerContext puts http.ServerContextKey on the request context.
+//
+// quic-go sets its own http3.ServerContextKey and never net/http's, and
+// httputil.ReverseProxy treats that key's absence as "not running under a
+// server": on a mid-body copy failure it then logs and returns normally instead
+// of panicking with http.ErrAbortHandler. Handlers that detect a truncated
+// upstream response by that panic would silently not fire over HTTP/3 — the
+// response cache would store the fragment it had buffered and serve it to every
+// later client for the full TTL.
+//
+// Setting the key makes HTTP/3 abort exactly like HTTP/1.1 and HTTP/2, so the
+// handler chain has one behaviour rather than one per protocol. quic-go recovers
+// handler panics and special-cases http.ErrAbortHandler the same way net/http
+// does, so aborting is handled the same on this path too.
+func underHTTPServerContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(http.ServerContextKey) == nil {
+			r = r.WithContext(context.WithValue(r.Context(), http.ServerContextKey, h3ContextServer))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.Logger) (*http.Server, *http3.Server) {
 	readTimeout, _ := config.ParseDuration(cfg.Server.ReadTimeout, 30*time.Second)
 	writeTimeout, _ := config.ParseDuration(cfg.Server.WriteTimeout, 30*time.Second)
@@ -228,7 +256,7 @@ func buildMainServer(cfg *config.Config, chain *middleware.Chain, logger *slog.L
 	if cfg.Server.TLS.HTTP3Enabled {
 		h3srv = &http3.Server{
 			Addr:           cfg.Server.Address,
-			Handler:        tracedChain,
+			Handler:        underHTTPServerContext(tracedChain),
 			MaxHeaderBytes: 1 << 20, // 1 MiB — same as the TCP server.
 			IdleTimeout:    idleTimeout,
 			QUICConfig: &quic.Config{

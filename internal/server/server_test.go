@@ -37,6 +37,35 @@ func testLogger() *slog.Logger {
 // TestSkipStreaming verifies the otelhttp filter records normal requests but
 // excludes long-lived streaming (SSE/WebSocket/gRPC) — whose connection-lifetime
 // durations would pollute http.server.request.duration and false-fire p99 alerts.
+func TestUnderHTTPServerContext(t *testing.T) {
+	t.Run("sets the key when quic-go left it absent", func(t *testing.T) {
+		var got any
+		h := underHTTPServerContext(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			got = r.Context().Value(http.ServerContextKey)
+		}))
+
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+		require.NotNil(t, got, "ReverseProxy reads this key to decide whether a mid-body copy failure aborts the request; without it HTTP/3 would cache a truncated response")
+		_, ok := got.(*http.Server)
+		assert.True(t, ok, "the value must stay a *http.Server so a type assertion on it holds")
+	})
+
+	t.Run("keeps a server that already set the key", func(t *testing.T) {
+		existing := &http.Server{}
+		var got any
+		h := underHTTPServerContext(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			got = r.Context().Value(http.ServerContextKey)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, existing))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+
+		assert.Same(t, existing, got, "the real server's value must not be replaced")
+	})
+}
+
 func TestSkipStreaming(t *testing.T) {
 	newReq := func(method string, headers map[string]string) *http.Request {
 		r := httptest.NewRequest(method, "/", nil)
