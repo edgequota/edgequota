@@ -93,6 +93,12 @@ func (cw *CachingResponseWriter) Write(b []byte) (int, error) {
 // must call it only after the upstream handler returns normally: if the copy
 // fails part-way, httputil.ReverseProxy panics with http.ErrAbortHandler, so
 // this is skipped and Finish knows the buffered body is a fragment.
+//
+// That panic is conditional — ReverseProxy raises it only when the request
+// context carries http.ServerContextKey — so a server that does not set the key
+// returns normally on a copy failure and a caller would wrongly mark a fragment
+// complete. quic-go is such a server; see underHTTPServerContext in
+// internal/server.
 func (cw *CachingResponseWriter) MarkComplete() {
 	cw.complete = true
 }
