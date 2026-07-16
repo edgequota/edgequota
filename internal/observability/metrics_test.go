@@ -287,7 +287,7 @@ func TestRecordAllInstruments(t *testing.T) {
 	m.ObserveRemaining(5)
 	m.IncRespCacheHit()
 	m.IncRespCacheMiss()
-	m.IncRespCacheStaleHit()
+	m.IncRespCacheUncacheable()
 	m.IncRespCacheStore()
 	m.IncRespCacheSkip()
 	m.IncRespCachePurge()

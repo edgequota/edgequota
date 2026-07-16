@@ -25,7 +25,7 @@ type PurgeURLRequest struct {
 	// Method HTTP method of the cached response to purge.
 	Method *string `json:"method,omitempty"`
 
-	// Url URL path to purge (e.g. "/v1/menus/menu-demo/published").
+	// Url URL path to purge (e.g. "/v1/products/42/published").
 	Url string `json:"url"`
 }
 

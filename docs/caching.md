@@ -121,16 +121,9 @@ When a tag-based purge is issued, EdgeQuota invalidates every cached response th
 
 ## Conditional Requests
 
-EdgeQuota supports conditional request validation using `ETag` and `Last-Modified` headers.
+**Not supported.** EdgeQuota does not revalidate cached entries: it never sends `If-None-Match` / `If-Modified-Since` to the backend, and does not act on a `304 Not Modified`. An entry lives until its `max-age` expires or it is purged, and the next request after that is a full miss proxied to the backend.
 
-When a cached entry exists and the backend originally returned `ETag` or `Last-Modified`, EdgeQuota sends conditional headers to the backend on revalidation:
-
-| Cached Header | Conditional Request Header |
-|---------------|---------------------------|
-| `ETag` | `If-None-Match` |
-| `Last-Modified` | `If-Modified-Since` |
-
-If the backend responds with **304 Not Modified**, EdgeQuota refreshes the cache entry's TTL and serves the existing cached response. This saves bandwidth and backend processing for resources that haven't changed.
+A cached entry does retain the backend's `ETag` and `Last-Modified` headers, and they are replayed to clients on a hit — but they are stored, not used.
 
 ---
 
@@ -264,7 +257,7 @@ No `Cache-Control` header means no caching. EdgeQuota passes through every reque
 
 ## Metrics Reference
 
-Response-cache metrics are emitted as **portable OpenTelemetry metrics** and **pushed over OTLP** to the configured collector (the same transport as tracing). There is **no Prometheus `/metrics` scrape endpoint** on the admin server; names are dotted OTel identifiers (no `_total`/`_bytes` suffix — the unit is a separate field) and the former Prometheus labels are now attributes. The individual hit/miss/stale and store/skip/purge counters are folded into two attributed counters. See [Observability](observability.md) for the full metric model and PromQL-surface notes.
+Response-cache metrics are emitted as **portable OpenTelemetry metrics** and **pushed over OTLP** to the configured collector (the same transport as tracing). There is **no Prometheus `/metrics` scrape endpoint** on the admin server; names are dotted OTel identifiers (no `_total`/`_bytes` suffix — the unit is a separate field) and the former Prometheus labels are now attributes. The individual hit/miss and store/skip/purge counters are folded into two attributed counters. See [Observability](observability.md) for the full metric model and PromQL-surface notes.
 
 ### Counters
 

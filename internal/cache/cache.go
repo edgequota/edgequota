@@ -48,7 +48,6 @@ type Store struct {
 	OnHit         func()
 	OnMiss        func()
 	OnUncacheable func()
-	OnStaleHit    func()
 	OnStore       func()
 	OnSkip        func()
 	OnPurge       func()

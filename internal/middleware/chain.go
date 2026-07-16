@@ -608,7 +608,6 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 	store.OnHit = c.metrics.IncRespCacheHit
 	store.OnMiss = c.metrics.IncRespCacheMiss
 	store.OnUncacheable = c.metrics.IncRespCacheUncacheable
-	store.OnStaleHit = c.metrics.IncRespCacheStaleHit
 	store.OnStore = c.metrics.IncRespCacheStore
 	store.OnSkip = c.metrics.IncRespCacheSkip
 	store.OnPurge = c.metrics.IncRespCachePurge

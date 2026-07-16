@@ -23,6 +23,7 @@ type CachingResponseWriter struct {
 	tags       []string
 	overflow   bool
 	headerSent bool
+	complete   bool
 }
 
 // NewCachingResponseWriter creates a writer that inspects upstream responses
@@ -88,6 +89,14 @@ func (cw *CachingResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// MarkComplete records that the upstream response was relayed in full. Callers
+// must call it only after the upstream handler returns normally: if the copy
+// fails part-way, httputil.ReverseProxy panics with http.ErrAbortHandler, so
+// this is skipped and Finish knows the buffered body is a fragment.
+func (cw *CachingResponseWriter) MarkComplete() {
+	cw.complete = true
+}
+
 // Unwrap returns the underlying ResponseWriter for interface assertions
 // (http.Hijacker, http.Flusher, etc.).
 func (cw *CachingResponseWriter) Unwrap() http.ResponseWriter {
@@ -101,10 +110,13 @@ func (cw *CachingResponseWriter) Flush() {
 	}
 }
 
-// Finish must be called after the response is fully written. It records the
-// lookup outcome and stores the response in the cache if it was deemed
-// cacheable. When the response has a Vary header, the cache key is recomputed
-// to include the Vary'd request header values.
+// Finish records the lookup outcome and stores the response in the cache if it
+// was deemed cacheable and arrived in full. When the response has a Vary header,
+// the cache key is recomputed to include the Vary'd request header values.
+//
+// Call it deferred: a copy failure part-way through the upstream response makes
+// httputil.ReverseProxy panic with http.ErrAbortHandler, and the lookup still
+// happened, so it must still be counted.
 //
 // The outcome is classified here rather than at lookup time because cache
 // eligibility is a property of the response: a request whose response carries
@@ -128,6 +140,13 @@ func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
 	// Cache-eligible but not already cached: a genuine miss.
 	if cw.store.OnMiss != nil {
 		cw.store.OnMiss()
+	}
+
+	// An aborted response leaves a fragment in the buffer that would be served
+	// to every later hit as if it were the whole body, so count the lookup but
+	// never store it.
+	if !cw.complete {
+		return
 	}
 
 	if cw.overflow || cw.buf == nil {

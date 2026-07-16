@@ -674,6 +674,53 @@ func newTestCacheStore(t *testing.T) *cache.Store {
 	return cache.NewStore(client)
 }
 
+// An upstream that dies part-way through a cacheable body must still be counted
+// as a lookup, and its fragment must never reach the cache. The proxy runs
+// behind a real server here on purpose: ReverseProxy only panics with
+// ErrAbortHandler when http.ServerContextKey is set, so calling ServeHTTP
+// directly would exercise a path that cannot happen in production.
+func TestProxyCacheAbortedBodyCountsButIsNotStored(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Length", "1000") // promises far more than it sends
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok)
+		conn, _, err := hj.Hijack()
+		require.NoError(t, err)
+		conn.Close()
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	var misses, uncacheables, stores atomic.Int64
+	store.OnMiss = func() { misses.Add(1) }
+	store.OnUncacheable = func() { uncacheables.Add(1) }
+	store.OnStore = func() { stores.Add(1) }
+
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	resp, err := http.Get(front.URL + "/aborted")
+	if err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	require.Eventually(t, func() bool { return misses.Load() == 1 }, 2*time.Second, 20*time.Millisecond,
+		"an aborted cacheable response is still a lookup and must be counted as a miss")
+	assert.Zero(t, uncacheables.Load(), "the response was cache-eligible, so it is a miss and not uncacheable")
+	assert.Zero(t, stores.Load(), "a truncated body must never be stored")
+
+	entry, ok := store.Get(context.Background(), store.KeyFromRequest(httptest.NewRequest(http.MethodGet, "/aborted", nil), nil))
+	assert.False(t, ok, "nothing may be cached for an aborted response, got %v", entry)
+}
+
 func TestProxyCacheHitMiss(t *testing.T) {
 	var backendHits atomic.Int64
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
