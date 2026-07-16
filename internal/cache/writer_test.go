@@ -25,6 +25,7 @@ func TestCachingResponseWriterCacheable(t *testing.T) {
 	_, _ = cw.Write([]byte("var x = 1;"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
@@ -47,6 +48,7 @@ func TestCachingResponseWriterNoStore(t *testing.T) {
 	_, _ = cw.Write([]byte("sensitive"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -65,6 +67,7 @@ func TestCachingResponseWriterNoCacheControl(t *testing.T) {
 	_, _ = cw.Write([]byte("dynamic"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -84,6 +87,7 @@ func TestCachingResponseWriterPrivate(t *testing.T) {
 	_, _ = cw.Write([]byte("user data"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -106,6 +110,7 @@ func TestCachingResponseWriterBodyOverflow(t *testing.T) {
 	_, _ = cw.Write([]byte("this body is much too large"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -124,22 +129,41 @@ func TestFinishClassifiesLookupOutcome(t *testing.T) {
 		body            string
 		maxBodySize     int64
 		noUpstreamReply bool
+		aborted         bool // upstream died part-way: MarkComplete never runs
 		wantMiss        bool
 		wantUncacheable bool
 		wantSkip        bool
+		wantStored      bool
 	}{
 		{
-			name:     "cacheable response is an eligible miss",
+			name:       "cacheable response is an eligible miss",
+			status:     http.StatusOK,
+			header:     map[string]string{"Cache-Control": "max-age=120"},
+			body:       "ok",
+			wantMiss:   true,
+			wantStored: true,
+		},
+		{
+			name:     "aborted cacheable response is counted but not stored",
 			status:   http.StatusOK,
-			header:   map[string]string{"Cache-Control": "max-age=120"},
-			body:     "ok",
+			header:   map[string]string{"Cache-Control": "max-age=120", "Content-Length": "1000"},
+			body:     "partial",
+			aborted:  true,
 			wantMiss: true,
 		},
 		{
-			name:     "301 with max-age is an eligible miss",
-			status:   http.StatusMovedPermanently,
-			header:   map[string]string{"Cache-Control": "max-age=60"},
-			wantMiss: true,
+			name:            "aborted uncacheable response is still counted",
+			status:          http.StatusOK,
+			body:            "partial",
+			aborted:         true,
+			wantUncacheable: true,
+		},
+		{
+			name:       "301 with max-age is an eligible miss",
+			status:     http.StatusMovedPermanently,
+			header:     map[string]string{"Cache-Control": "max-age=60"},
+			wantMiss:   true,
+			wantStored: true,
 		},
 		{
 			name:            "absent cache-control is uncacheable",
@@ -217,13 +241,22 @@ func TestFinishClassifiesLookupOutcome(t *testing.T) {
 				if tt.body != "" {
 					_, _ = cw.Write([]byte(tt.body))
 				}
+				// An abort skips MarkComplete, exactly as the panicking
+				// ReverseProxy path does.
+				if !tt.aborted {
+					cw.MarkComplete()
+				}
 			}
 
-			cw.Finish(context.Background(), store.KeyFromRequest(req, nil))
+			key := store.KeyFromRequest(req, nil)
+			cw.Finish(context.Background(), key)
 
 			assert.Equal(t, boolToInt(tt.wantMiss), misses, "miss count")
 			assert.Equal(t, boolToInt(tt.wantUncacheable), uncacheables, "uncacheable count")
 			assert.Equal(t, boolToInt(tt.wantSkip), skips, "skip count")
+
+			_, stored := store.Get(context.Background(), key)
+			assert.Equal(t, tt.wantStored, stored, "stored in cache")
 
 			// Every lookup is classified exactly once, so the three outcomes
 			// never double-count a single request.
@@ -270,6 +303,7 @@ func TestCachingResponseWriterWithVary(t *testing.T) {
 
 	// Pass the base key (as production does in proxyWithCache).
 	baseKey := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), baseKey)
 
 	// Full entry stored under the vary-expanded key.
@@ -299,6 +333,7 @@ func TestCachingResponseWriterWithSurrogateKey(t *testing.T) {
 	_, _ = cw.Write([]byte(`{"id":123}`))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -325,6 +360,7 @@ func TestCachingResponseWriterVaryStar(t *testing.T) {
 	_, _ = cw.Write([]byte("data"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -344,6 +380,7 @@ func TestCachingResponseWriter500NotCached(t *testing.T) {
 	_, _ = cw.Write([]byte("error"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)
@@ -365,6 +402,7 @@ func TestCachingResponseWriterMultipleWrites(t *testing.T) {
 	_, _ = cw.Write([]byte("chunk3"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
@@ -387,12 +425,15 @@ func TestCachingResponseWriterETagAndLastModified(t *testing.T) {
 	_, _ = cw.Write([]byte("data"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
 	require.True(t, ok)
-	assert.Equal(t, `"v1"`, got.ETag)
-	assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", got.LastModified)
+	// The validators survive in the stored headers, so a hit replays them to
+	// the client even though nothing revalidates against them.
+	assert.Equal(t, `"v1"`, got.Headers.Get("ETag"))
+	assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", got.Headers.Get("Last-Modified"))
 }
 
 func TestCachingResponseWriterSurrogateKeyStripped(t *testing.T) {
@@ -409,6 +450,7 @@ func TestCachingResponseWriterSurrogateKeyStripped(t *testing.T) {
 	_, _ = cw.Write([]byte("x"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
@@ -450,6 +492,7 @@ func TestCachingResponseWriterImplicitWriteHeader(t *testing.T) {
 	_, _ = cw.Write([]byte("implicit header"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
@@ -472,6 +515,7 @@ func TestCachingResponseWriterDoubleWriteHeader(t *testing.T) {
 	_, _ = cw.Write([]byte("ok"))
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	got, ok := store.Get(context.Background(), key)
@@ -493,6 +537,7 @@ func TestCachingResponseWriterLargeBodyOverflowMidStream(t *testing.T) {
 	_, _ = cw.Write([]byte("67890AB")) // total 12, over limit
 
 	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
 	cw.Finish(context.Background(), key)
 
 	_, ok := store.Get(context.Background(), key)

@@ -21,7 +21,7 @@ paths:
       description: |
         Invalidates all cached HTTP responses tagged with any of the given
         surrogate-key tags. Tags correspond to Surrogate-Key header values
-        that backends emit (e.g. "menu-demo", "tenant-shoro").
+        that backends emit (e.g. "product-42", "tenant-acme").
       requestBody:
         required: true
         content:
@@ -94,7 +94,7 @@ components:
       properties:
         url:
           type: string
-          description: URL path to purge (e.g. "/v1/menus/menu-demo/published").
+          description: URL path to purge (e.g. "/v1/products/42/published").
         method:
           type: string
           default: GET

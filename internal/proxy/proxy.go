@@ -819,19 +819,24 @@ func (p *Proxy) Close(ctx context.Context) error {
 }
 
 // proxyWithCache wraps the upstream call with a CachingResponseWriter so that
-// cacheable backend responses are stored. It also handles conditional requests:
-// if the client didn't send If-None-Match/If-Modified-Since but we have a
-// stale cache entry, we inject those headers so the backend can return 304.
+// cacheable backend responses are stored.
+//
 // The lookup outcome is recorded by Finish rather than here: whether the cache
 // could ever have served this request depends on the upstream response's status
-// and Cache-Control, which are unknown until the response comes back.
+// and Cache-Control, which are unknown until the response comes back. Finish is
+// deferred because a copy failure part-way through the response makes
+// ReverseProxy panic with http.ErrAbortHandler, and the lookup still has to be
+// counted; MarkComplete runs only on a normal return, so Finish can tell a whole
+// response from a fragment and decline to cache the latter.
 func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
 	cacheKey := p.cache.KeyFromRequest(r, nil)
-	p.logger.Debug("response cache miss", "key", cacheKey)
+	p.logger.Debug("response cache lookup not served from cache", "key", cacheKey)
 
 	cw := cache.NewCachingResponseWriter(w, p.cache, r)
+	defer cw.Finish(r.Context(), cacheKey)
+
 	p.httpProxy.ServeHTTP(cw, r)
-	cw.Finish(r.Context(), cacheKey)
+	cw.MarkComplete()
 }
 
 // serveCached checks the response cache and serves a cached entry if available.

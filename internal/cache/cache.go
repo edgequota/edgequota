@@ -23,16 +23,16 @@ const (
 	tagPrefix = "eq:tags:"
 )
 
-// Entry is a cached HTTP response.
+// Entry is a cached HTTP response. The backend's validators (ETag,
+// Last-Modified) need no dedicated fields: they travel in Headers and are
+// replayed to the client on a hit, and nothing revalidates against them.
 type Entry struct {
-	StatusCode   int         `json:"status_code"`
-	Headers      http.Header `json:"headers"`
-	Body         []byte      `json:"body"`
-	ETag         string      `json:"etag,omitempty"`
-	LastModified string      `json:"last_modified,omitempty"`
-	Vary         []string    `json:"vary,omitempty"`
-	Tags         []string    `json:"tags,omitempty"`
-	CreatedAt    time.Time   `json:"created_at"`
+	StatusCode int         `json:"status_code"`
+	Headers    http.Header `json:"headers"`
+	Body       []byte      `json:"body"`
+	Vary       []string    `json:"vary,omitempty"`
+	Tags       []string    `json:"tags,omitempty"`
+	CreatedAt  time.Time   `json:"created_at"`
 }
 
 // Store is a response cache backed by Redis.
@@ -48,7 +48,6 @@ type Store struct {
 	OnHit         func()
 	OnMiss        func()
 	OnUncacheable func()
-	OnStaleHit    func()
 	OnStore       func()
 	OnSkip        func()
 	OnPurge       func()

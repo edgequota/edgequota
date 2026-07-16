@@ -561,11 +561,6 @@ func (m *Metrics) IncRespCacheUncacheable() {
 	m.respCacheLookups.Add(context.Background(), 1, optCacheUncacheable)
 }
 
-// IncRespCacheStaleHit records a stale response-cache hit (revalidated via 304).
-func (m *Metrics) IncRespCacheStaleHit() {
-	m.respCacheLookups.Add(context.Background(), 1, optCacheStale)
-}
-
 // IncRespCacheStore records a response stored in the cache.
 func (m *Metrics) IncRespCacheStore() {
 	m.respCacheOperations.Add(context.Background(), 1, optRespOpStore)

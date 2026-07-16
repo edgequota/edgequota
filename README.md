@@ -89,7 +89,6 @@ EdgeQuota solves these problems as a dedicated, distributed policy enforcement l
 - Cache backend responses in Redis, honoring standard `Cache-Control` semantics (`max-age`, `no-store`, `no-cache`, `private`, `public`).
 - Purely response-driven — backends opt in via `Cache-Control` headers. No implicit caching.
 - Tag-based invalidation via `Surrogate-Key` / `Cache-Tag` headers and `POST /v1/cache/purge/tags`.
-- Conditional request support with `ETag` / `Last-Modified` (304 revalidation).
 - Configurable body size limits (`max_body_size`, default 1 MB).
 - Optional dedicated `response_cache_redis` for separating cache workloads from rate-limit counters.
 

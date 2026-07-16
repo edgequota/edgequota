@@ -202,8 +202,8 @@ Hit rate is `hit / (hit + miss)` — over eligible responses only. Measure it th
 
 ### Stale content being served
 
-1. **TTL not expired**: The cached response is still within its `max-age` window. Wait for expiry or issue a purge.
-2. **Conditional revalidation succeeding**: If the backend returns `304 Not Modified`, the cached entry's TTL is refreshed. Ensure the backend returns updated `ETag` or `Last-Modified` when content changes.
+1. **TTL not expired**: The cached response is still within its `max-age` window. EdgeQuota does not revalidate entries (see [Caching](caching.md#conditional-requests)), so a change at the backend is not picked up until the entry expires — wait for expiry, issue a purge, or shorten the backend's `max-age`.
+2. **Purge did not match**: A tag purge only invalidates entries whose `Surrogate-Key`/`Cache-Tag` carried that tag, and a URL purge needs the exact key. See "Cache purge not working" above.
 
 ### Cache store errors
 
