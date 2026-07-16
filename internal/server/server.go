@@ -189,8 +189,9 @@ func skipStreaming(r *http.Request) bool {
 
 // h3ContextServer marks HTTP/3 requests as server-handled. Only its presence is
 // read, but it is a real *http.Server so a type assertion on the context value
-// still holds.
-var h3ContextServer = &http.Server{}
+// still holds. It never listens, so its timeouts are irrelevant — quic-go serves
+// these requests.
+var h3ContextServer = &http.Server{} //nolint:gosec // G112: a context marker, never serves a connection.
 
 // underHTTPServerContext puts http.ServerContextKey on the request context.
 //
@@ -203,7 +204,7 @@ var h3ContextServer = &http.Server{}
 // later client for the full TTL.
 //
 // Setting the key makes HTTP/3 abort exactly like HTTP/1.1 and HTTP/2, so the
-// handler chain has one behaviour rather than one per protocol. quic-go recovers
+// handler chain has one behavior rather than one per protocol. quic-go recovers
 // handler panics and special-cases http.ErrAbortHandler the same way net/http
 // does, so aborting is handled the same on this path too.
 func underHTTPServerContext(next http.Handler) http.Handler {
