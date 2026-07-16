@@ -270,8 +270,8 @@ Response-cache metrics are emitted as **portable OpenTelemetry metrics** and **p
 
 | Metric | Attributes | Description |
 |--------|-----------|-------------|
-| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`stale`) | Response-cache lookups — a `hit` is served from cache, a `miss` is proxied to the backend, a `stale` serves a stale entry |
-| `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations — `store` caches a response, `skip` declines to cache (no-store, too large, non-cacheable status), `purge` invalidates entries |
+| `edgequota.response_cache.lookups` | `edgequota.cache.result` (`hit`\|`miss`\|`uncacheable`) | Response-cache lookups, classified from the upstream response — a `hit` is served from cache, a `miss` was cache-eligible but not stored yet, an `uncacheable` response was never eligible to be served from cache. Hit rate is `hit / (hit + miss)`: `uncacheable` can never become a hit, so including it would measure traffic mix rather than cache health |
+| `edgequota.response_cache.operations` | `edgequota.cache.operation` (`store`\|`skip`\|`purge`) | Response-cache operations — `store` caches a response, `skip` is a cacheable response whose body exceeded `cache.max_body_size` (responses that were never cacheable are `lookups` with `result=uncacheable`, not skips), `purge` invalidates entries |
 
 ### Histograms
 

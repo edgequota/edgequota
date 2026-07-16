@@ -260,30 +260,29 @@ groups:
             endpoint connectivity.
 
       # --- Response Cache ---
-
-      - alert: EdgeQuotaLowCacheHitRate
-        expr: |
-          (
-            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-            / clamp_min(
-                sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-                + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m])), 1)
-          ) < 0.3
-          and on() (
-            sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="hit"}[15m]))
-            + sum(rate({otel_metric_name="edgequota.response_cache.lookups", edgequota_cache_result="miss"}[15m]))
-          ) > 0.1
-        for: 15m
-        labels:
-          severity: warning
-          team: platform
-          surface: edgequota
-        annotations:
-          summary: "Response cache hit rate below 30%"
-          description: >-
-            The CDN-style response cache is only serving
-            {{ $value | humanizePercentage }} of requests from cache.
-            Check if cache TTLs are too short or if traffic patterns changed.
+      #
+      # There is deliberately NO hit-rate alert. Cache hit rate belongs on the
+      # dashboard, not on a pager, for two reasons — please read before adding
+      # one back:
+      #
+      # 1. A cache outage already pages, load-independently and around the
+      #    clock, via EdgeQuotaRedisUnhealthy / EdgeQuotaRedisErrors on
+      #    edgequota_redis_pool="response_cache". A hit-rate rule adds no
+      #    coverage for the failure it appears to watch.
+      # 2. Hit rate is not decidable from a small sample. It is a ratio over
+      #    cache-ELIGIBLE responses only, and a deployment's eligible volume is
+      #    whatever its backends happen to mark cacheable. In a quiet window
+      #    that can be a handful of lookups, where the ratio is quantized (one
+      #    hit in four reads as 0.25) and its confidence interval spans tens of
+      #    points — so any fixed threshold sits inside the noise and pages on
+      #    healthy caches. Widening the window or adding a rate guard does not
+      #    fix this; it just encodes one deployment's traffic volume into a
+      #    generic product (see docs/observability.md).
+      #
+      # A low hit rate is also usually not a cache fault at all: if backends
+      # rarely return a positive max-age, most responses are result="uncacheable"
+      # and can never become hits. That is a backend question, and the board
+      # shows it directly. See docs/troubleshooting.md ("Low cache hit rate").
 
       # --- System Resources ---
       # container/k8s/go.* metrics are portable and shared across services, so each

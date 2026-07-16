@@ -101,12 +101,36 @@ func (cw *CachingResponseWriter) Flush() {
 	}
 }
 
-// Finish must be called after the response is fully written. It stores
-// the response in the cache if it was deemed cacheable. When the response
-// has a Vary header, the cache key is recomputed to include the Vary'd
-// request header values.
+// Finish must be called after the response is fully written. It records the
+// lookup outcome and stores the response in the cache if it was deemed
+// cacheable. When the response has a Vary header, the cache key is recomputed
+// to include the Vary'd request header values.
+//
+// The outcome is classified here rather than at lookup time because cache
+// eligibility is a property of the response: a request whose response carries
+// no positive max-age could never have been served from cache, so counting it
+// as a miss would make the hit rate track traffic composition instead of cache
+// health.
 func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
-	if !cw.cacheable || cw.overflow || cw.buf == nil {
+	// The upstream never responded (e.g. the client disconnected first), so
+	// the cache was neither used nor bypassed — record nothing either way.
+	if !cw.headerSent {
+		return
+	}
+
+	if !cw.cacheable {
+		if cw.store.OnUncacheable != nil {
+			cw.store.OnUncacheable()
+		}
+		return
+	}
+
+	// Cache-eligible but not already cached: a genuine miss.
+	if cw.store.OnMiss != nil {
+		cw.store.OnMiss()
+	}
+
+	if cw.overflow || cw.buf == nil {
 		if cw.overflow && cw.store.OnSkip != nil {
 			cw.store.OnSkip()
 		}
