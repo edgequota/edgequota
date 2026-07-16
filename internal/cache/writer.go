@@ -177,14 +177,12 @@ func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
 	headers.Del("Cache-Tag")
 
 	entry := &Entry{
-		StatusCode:   cw.statusCode,
-		Headers:      headers,
-		Body:         cw.buf.Bytes(),
-		ETag:         headers.Get("ETag"),
-		LastModified: headers.Get("Last-Modified"),
-		Vary:         cw.vary,
-		Tags:         cw.tags,
-		CreatedAt:    time.Now(),
+		StatusCode: cw.statusCode,
+		Headers:    headers,
+		Body:       cw.buf.Bytes(),
+		Vary:       cw.vary,
+		Tags:       cw.tags,
+		CreatedAt:  time.Now(),
 	}
 
 	cw.store.Set(ctx, storeKey, entry, cw.ttl)

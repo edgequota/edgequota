@@ -830,7 +830,7 @@ func (p *Proxy) Close(ctx context.Context) error {
 // response from a fragment and decline to cache the latter.
 func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
 	cacheKey := p.cache.KeyFromRequest(r, nil)
-	p.logger.Debug("response cache miss", "key", cacheKey)
+	p.logger.Debug("response cache lookup not served from cache", "key", cacheKey)
 
 	cw := cache.NewCachingResponseWriter(w, p.cache, r)
 	defer cw.Finish(r.Context(), cacheKey)

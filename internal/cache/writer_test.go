@@ -430,8 +430,10 @@ func TestCachingResponseWriterETagAndLastModified(t *testing.T) {
 
 	got, ok := store.Get(context.Background(), key)
 	require.True(t, ok)
-	assert.Equal(t, `"v1"`, got.ETag)
-	assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", got.LastModified)
+	// The validators survive in the stored headers, so a hit replays them to
+	// the client even though nothing revalidates against them.
+	assert.Equal(t, `"v1"`, got.Headers.Get("ETag"))
+	assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", got.Headers.Get("Last-Modified"))
 }
 
 func TestCachingResponseWriterSurrogateKeyStripped(t *testing.T) {

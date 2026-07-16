@@ -121,9 +121,9 @@ When a tag-based purge is issued, EdgeQuota invalidates every cached response th
 
 ## Conditional Requests
 
-**Not supported.** EdgeQuota does not revalidate cached entries: it never sends `If-None-Match` / `If-Modified-Since` to the backend, and does not act on a `304 Not Modified`. An entry lives until its `max-age` expires or it is purged, and the next request after that is a full miss proxied to the backend.
+**Not supported.** EdgeQuota does not revalidate cached entries. It never *originates* `If-None-Match` / `If-Modified-Since` against the backend, and it does not act on a `304 Not Modified` — a 304 is not cacheable (only 200 and 301 are), so it passes straight through. An entry lives until its `max-age` expires or it is purged, and the next request after that is a full miss proxied to the backend.
 
-A cached entry does retain the backend's `ETag` and `Last-Modified` headers, and they are replayed to clients on a hit — but they are stored, not used.
+A client's own conditional headers are forwarded to the backend like any other request header, and a cached entry replays the backend's `ETag` / `Last-Modified` to clients on a hit — so clients can revalidate against the backend. EdgeQuota itself does not.
 
 ---
 

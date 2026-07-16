@@ -32,10 +32,12 @@ func TestStoreGetSetRoundTrip(t *testing.T) {
 
 	entry := &Entry{
 		StatusCode: 200,
-		Headers:    http.Header{"Content-Type": []string{"text/html"}},
-		Body:       []byte("<html>hello</html>"),
-		ETag:       `"abc123"`,
-		CreatedAt:  time.Now(),
+		Headers: http.Header{
+			"Content-Type": []string{"text/html"},
+			"Etag":         []string{`"abc123"`},
+		},
+		Body:      []byte("<html>hello</html>"),
+		CreatedAt: time.Now(),
 	}
 
 	ctx := context.Background()
@@ -45,7 +47,7 @@ func TestStoreGetSetRoundTrip(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 200, got.StatusCode)
 	assert.Equal(t, []byte("<html>hello</html>"), got.Body)
-	assert.Equal(t, `"abc123"`, got.ETag)
+	assert.Equal(t, `"abc123"`, got.Headers.Get("ETag"))
 	assert.Equal(t, "text/html", got.Headers.Get("Content-Type"))
 }
 
