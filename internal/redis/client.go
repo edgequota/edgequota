@@ -109,6 +109,13 @@ func IsReadOnlyErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "READONLY")
 }
 
+// IsNilErr reports whether the error is the "key does not exist" sentinel.
+// A negative lookup is a normal result, not a failure, so callers that count
+// Redis errors must exclude it.
+func IsNilErr(err error) bool {
+	return errors.Is(err, goredis.Nil)
+}
+
 // IsConnectivityErr classifies errors as connectivity-class (unreachable, timeout, EOF).
 // READONLY and context.Canceled are NOT connectivity errors.
 func IsConnectivityErr(err error) bool {

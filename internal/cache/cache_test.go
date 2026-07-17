@@ -26,6 +26,75 @@ func newTestRedis(t *testing.T) (redis.Client, *miniredis.Miniredis) {
 	return client, mr
 }
 
+// A cold cache must not look like a broken one: a missing key is an ordinary
+// negative lookup, so counting it would fire the Redis error alert on every miss.
+func TestStoreMissIsNotARedisError(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	var redisErrors int
+	var health []bool
+	store.OnRedisError = func() { redisErrors++ }
+	store.OnHealthy = func(ok bool) { health = append(health, ok) }
+
+	_, ok := store.Get(context.Background(), "absent")
+
+	assert.False(t, ok, "absent key is a miss")
+	assert.Zero(t, redisErrors, "a miss is not a Redis error")
+	assert.Empty(t, health, "a miss must not change reported health")
+}
+
+// A Redis outage has to be visible: the store cannot claim a write it never
+// made, and the pool must report itself unreachable so the alert can fire.
+func TestStoreReportsRedisOutage(t *testing.T) {
+	client, mr := newTestRedis(t)
+	store := NewStore(client)
+
+	var stores, redisErrors int
+	var health []bool
+	store.OnStore = func() { stores++ }
+	store.OnRedisError = func() { redisErrors++ }
+	store.OnHealthy = func(ok bool) { health = append(health, ok) }
+
+	mr.Close() // the pool disappears underneath us
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	store.Set(ctx, "k", &Entry{StatusCode: 200, Body: []byte("x")}, time.Minute)
+
+	assert.Zero(t, stores, "a write that never reached Redis is not a store")
+	assert.Positive(t, redisErrors, "the failed write must be counted")
+	assert.Equal(t, []bool{false}, health, "the pool must report itself unreachable")
+}
+
+// Reachability is reported on transitions only, so a recovered pool clears the
+// alert and a healthy pool serving traffic does not re-report on every call.
+func TestStoreReportsRedisRecovery(t *testing.T) {
+	client, mr := newTestRedis(t)
+	store := NewStore(client)
+
+	var health []bool
+	store.OnHealthy = func(ok bool) { health = append(health, ok) }
+
+	addr := mr.Addr()
+	mr.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = store.Get(ctx, "k")
+	require.Equal(t, []bool{false}, health, "outage must report unhealthy")
+
+	revived := miniredis.NewMiniRedis()
+	require.NoError(t, revived.StartAddr(addr))
+	t.Cleanup(revived.Close)
+
+	_, _ = store.Get(context.Background(), "k")
+	assert.Equal(t, []bool{false, true}, health, "recovery must report healthy again")
+
+	_, _ = store.Get(context.Background(), "k")
+	assert.Equal(t, []bool{false, true}, health, "a healthy pool must not re-report")
+}
+
 func TestStoreGetSetRoundTrip(t *testing.T) {
 	client, _ := newTestRedis(t)
 	store := NewStore(client)

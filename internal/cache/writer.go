@@ -174,7 +174,7 @@ func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
 				Vary:       cw.vary,
 				CreatedAt:  time.Now(),
 			}
-			cw.store.Set(ctx, cacheKey, pointer, cw.ttl)
+			cw.store.setIndex(ctx, cacheKey, pointer, cw.ttl)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -31,6 +32,34 @@ func newTrackingRedis(t *testing.T) *closeTrackingRedis {
 	})
 	require.NoError(t, err)
 	return &closeTrackingRedis{Client: c}
+}
+
+// Every hook on the store feeds a metric, and an unwired one takes its signal
+// silently dark with the whole suite still green -- which is how the response
+// cache's Redis health gauge sat at "healthy" through any outage. Reflection
+// rather than a fixed list, so a hook added later fails here until it is wired.
+func TestInstallResponseCacheWiresEveryHook(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cache.Enabled = true
+
+	c := &Chain{metrics: testMetrics()}
+	c.installResponseCache(cfg, testLogger(), newTrackingRedis(t))
+
+	store := c.responseCache.Load()
+	require.NotNil(t, store, "response cache must be installed")
+
+	v := reflect.ValueOf(store).Elem()
+	typ := v.Type()
+	var checked int
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if !field.IsExported() || field.Type.Kind() != reflect.Func {
+			continue
+		}
+		checked++
+		assert.False(t, v.Field(i).IsNil(), "hook %s is declared but never wired", field.Name)
+	}
+	assert.Positive(t, checked, "reflection must actually find the hooks")
 }
 
 func TestInstallResponseCacheClosesPrior(t *testing.T) {

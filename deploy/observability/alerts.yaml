@@ -269,6 +269,16 @@ groups:
       #    clock, via EdgeQuotaRedisUnhealthy / EdgeQuotaRedisErrors on
       #    edgequota_redis_pool="response_cache". A hit-rate rule adds no
       #    coverage for the failure it appears to watch.
+      #
+      #    That coverage is only real because the response-cache pool reports
+      #    into both signals — Store.OnRedisError / Store.OnHealthy, wired in
+      #    middleware.installResponseCache. It did NOT always: the pool seeded
+      #    to healthy and nothing ever flipped it, so the gauge read 1 forever,
+      #    the error counter had no series at all, and both rules were
+      #    structurally unable to fire while an outage passed in silence. A
+      #    declared-but-unwired hook is invisible — the suite stays green — so
+      #    TestInstallResponseCacheWiresEveryHook now fails if any hook is
+      #    dropped. If that guard ever goes, this justification goes with it.
       # 2. Hit rate is not decidable from a small sample. It is a ratio over
       #    cache-ELIGIBLE responses only, and a deployment's eligible volume is
       #    whatever its backends happen to mark cacheable. In a quiet window

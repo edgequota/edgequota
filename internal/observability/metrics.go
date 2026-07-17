@@ -272,8 +272,14 @@ func NewMetrics(logger *slog.Logger) *Metrics {
 		respCacheBodySize: int64Histogram(m, logger, metricRespCacheBodySize, "Distribution of cached response body sizes.", "By"),
 	}
 
-	// All pools start healthy; the middleware flips a pool to 0 on connectivity
-	// failure and back to 1 on recovery.
+	// All pools start healthy and are flipped to 0 on connectivity failure, then
+	// back to 1 on recovery.
+	//
+	// A pool that nothing reports for therefore reads healthy forever, which is
+	// indistinguishable from a reachable pool and silences any rule watching it.
+	// poolRateLimit reports from the chain's limiter path and poolResponseCache
+	// from the cache store's hooks; poolExternalRLCache does NOT report yet, so
+	// do not alert on it until it does.
 	for _, v := range mx.redisHealthy {
 		v.Store(1)
 	}

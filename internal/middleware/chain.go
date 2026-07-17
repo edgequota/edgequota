@@ -612,6 +612,8 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 	store.OnSkip = c.metrics.IncRespCacheSkip
 	store.OnPurge = c.metrics.IncRespCachePurge
 	store.OnBodySize = c.metrics.ObserveRespCacheBodySize
+	store.OnRedisError = func() { c.metrics.IncRedisErrors("response_cache") }
+	store.OnHealthy = func(healthy bool) { c.metrics.SetRedisHealthy("response_cache", healthy) }
 
 	c.responseCache.Store(store)
 	if c.proxyRef != nil {

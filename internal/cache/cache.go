@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/redis"
@@ -52,6 +53,17 @@ type Store struct {
 	OnSkip        func()
 	OnPurge       func()
 	OnBodySize    func(float64)
+
+	// OnRedisError fires for every Redis operation that fails for a reason
+	// other than a missing key, which is an ordinary negative lookup.
+	// OnHealthy fires only when reachability changes, so a healthy pool
+	// serving traffic does not re-report on every operation.
+	OnRedisError func()
+	OnHealthy    func(healthy bool)
+
+	// healthy tracks whether Redis is currently reachable. The store owns this
+	// because it owns the client: nothing else sees these operations fail.
+	healthy atomic.Bool
 }
 
 // Option configures a Store.
@@ -80,7 +92,30 @@ func NewStore(client redis.Client, opts ...Option) *Store {
 	for _, o := range opts {
 		o(s)
 	}
+	s.healthy.Store(true)
 	return s
+}
+
+// noteRedis records the outcome of a Redis operation. A missing key is a normal
+// negative lookup, so it counts as neither an error nor unreachability.
+//
+// Only a connectivity-class failure flips the pool unhealthy: a malformed
+// command or a READONLY replica means Redis answered, so reporting it as
+// unreachable would page for the wrong thing.
+func (s *Store) noteRedis(err error) {
+	if err == nil || redis.IsNilErr(err) {
+		if s.healthy.CompareAndSwap(false, true) && s.OnHealthy != nil {
+			s.OnHealthy(true)
+		}
+		return
+	}
+
+	if s.OnRedisError != nil {
+		s.OnRedisError()
+	}
+	if redis.IsConnectivityErr(err) && s.healthy.CompareAndSwap(true, false) && s.OnHealthy != nil {
+		s.OnHealthy(false)
+	}
 }
 
 // MaxBodySize returns the configured maximum cacheable body size.
@@ -89,6 +124,7 @@ func (s *Store) MaxBodySize() int64 { return s.maxBodySize }
 // Get retrieves a cached entry by key. Returns nil, false on miss.
 func (s *Store) Get(ctx context.Context, key string) (*Entry, bool) {
 	data, err := s.client.Get(ctx, keyPrefix+key).Bytes()
+	s.noteRedis(err)
 	if err != nil {
 		return nil, false
 	}
@@ -100,35 +136,68 @@ func (s *Store) Get(ctx context.Context, key string) (*Entry, bool) {
 	return &e, true
 }
 
-// Set stores an entry with the given TTL. Tags are indexed for
-// tag-based purging. Entries with empty body or TTL <= 0 are skipped.
+// Set stores a cached response with the given TTL and counts it. Tags are
+// indexed for tag-based purging. Entries with TTL <= 0 are skipped.
 func (s *Store) Set(ctx context.Context, key string, entry *Entry, ttl time.Duration) {
-	if ttl <= 0 {
+	if !s.write(ctx, key, entry, ttl) {
 		return
 	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		s.logger.Debug("cache: marshal error", "key", key, "error", err)
-		return
-	}
-	_ = s.client.Set(ctx, keyPrefix+key, data, ttl).Err()
-
-	for _, tag := range entry.Tags {
-		_ = s.client.SAdd(ctx, tagPrefix+tag, key).Err()
-	}
-
 	if s.OnStore != nil {
 		s.OnStore()
 	}
 	if s.OnBodySize != nil {
 		s.OnBodySize(float64(len(entry.Body)))
 	}
+}
+
+// setIndex stores an internal index entry -- a Vary pointer, which carries no
+// body and stands for no response of its own. It deliberately skips OnStore and
+// OnBodySize: those count cached responses, and a Vary'd response is written
+// twice (pointer plus the vary-qualified entry), so counting both would double
+// every Vary'd response and feed a bodyless 0-byte observation into the
+// body-size histogram.
+func (s *Store) setIndex(ctx context.Context, key string, entry *Entry, ttl time.Duration) {
+	s.write(ctx, key, entry, ttl)
+}
+
+// write persists the entry and its tag index, reporting whether the entry
+// reached Redis. A write that failed is not a store: reporting it as one would
+// hold the store metric at full rate straight through a Redis outage.
+func (s *Store) write(ctx context.Context, key string, entry *Entry, ttl time.Duration) bool {
+	if ttl <= 0 {
+		return false
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		s.logger.Debug("cache: marshal error", "key", key, "error", err)
+		return false
+	}
+
+	err = s.client.Set(ctx, keyPrefix+key, data, ttl).Err()
+	s.noteRedis(err)
+	if err != nil {
+		s.logger.Debug("cache: store error", "key", key, "error", err)
+		return false
+	}
+
+	// The entry is cached either way; a failed tag index only costs the entry
+	// its tag-based purge, so it must not discard the store.
+	for _, tag := range entry.Tags {
+		tagErr := s.client.SAdd(ctx, tagPrefix+tag, key).Err()
+		s.noteRedis(tagErr)
+		if tagErr != nil {
+			s.logger.Debug("cache: tag index error", "key", key, "tag", tag, "error", tagErr)
+		}
+	}
+
 	s.logger.Debug("cache: stored", "key", key, "ttl", ttl, "body_size", len(entry.Body), "tags", entry.Tags)
+	return true
 }
 
 // Delete removes a single cache entry by key.
 func (s *Store) Delete(ctx context.Context, key string) bool {
 	n, err := s.client.Del(ctx, keyPrefix+key).Result()
+	s.noteRedis(err)
 	if err != nil || n == 0 {
 		return false
 	}
@@ -143,6 +212,7 @@ func (s *Store) Delete(ctx context.Context, key string) bool {
 // Returns the number of entries deleted.
 func (s *Store) DeleteByTag(ctx context.Context, tag string) int {
 	members, err := s.client.SMembers(ctx, tagPrefix+tag).Result()
+	s.noteRedis(err)
 	if err != nil || len(members) == 0 {
 		return 0
 	}
@@ -151,7 +221,8 @@ func (s *Store) DeleteByTag(ctx context.Context, tag string) int {
 	for _, m := range members {
 		redisKeys = append(redisKeys, keyPrefix+m)
 	}
-	n, _ := s.client.Del(ctx, redisKeys...).Result()
+	n, delErr := s.client.Del(ctx, redisKeys...).Result()
+	s.noteRedis(delErr)
 	_ = s.client.Del(ctx, tagPrefix+tag)
 
 	if s.OnPurge != nil {
