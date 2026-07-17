@@ -116,6 +116,15 @@ func IsNilErr(err error) bool {
 	return errors.Is(err, goredis.Nil)
 }
 
+// IsCanceledErr reports whether the error is a caller-canceled context. A
+// client that disconnects cancels the request context, which says nothing about
+// Redis reachability, so callers that count Redis errors must exclude it.
+// context.DeadlineExceeded is deliberately NOT included: it is a connectivity
+// signal (see IsConnectivityErr).
+func IsCanceledErr(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
 // IsConnectivityErr classifies errors as connectivity-class (unreachable, timeout, EOF).
 // READONLY and context.Canceled are NOT connectivity errors.
 func IsConnectivityErr(err error) bool {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,7 +64,11 @@ type Store struct {
 
 	// healthy tracks whether Redis is currently reachable. The store owns this
 	// because it owns the client: nothing else sees these operations fail.
-	healthy atomic.Bool
+	// healthMu serializes a reachability transition with its OnHealthy emission
+	// so the reported gauge can never latch to the opposite of healthy after a
+	// flap; the atomic lets the common no-transition case skip the lock.
+	healthy  atomic.Bool
+	healthMu sync.Mutex
 }
 
 // Option configures a Store.
@@ -99,22 +104,61 @@ func NewStore(client redis.Client, opts ...Option) *Store {
 // noteRedis records the outcome of a Redis operation. A missing key is a normal
 // negative lookup, so it counts as neither an error nor unreachability.
 //
+// A caller-canceled context means the client disconnected before the operation
+// finished; it reveals nothing about Redis, so it is neither counted nor a
+// health transition. Counting it would page EdgeQuotaRedisErrors for a burst of
+// client cancellations while Redis is perfectly healthy.
+//
 // Only a connectivity-class failure flips the pool unhealthy: a malformed
 // command or a READONLY replica means Redis answered, so reporting it as
 // unreachable would page for the wrong thing.
 func (s *Store) noteRedis(err error) {
 	if err == nil || redis.IsNilErr(err) {
-		if s.healthy.CompareAndSwap(false, true) && s.OnHealthy != nil {
-			s.OnHealthy(true)
-		}
+		s.setHealthy(true)
+		return
+	}
+	if redis.IsCanceledErr(err) {
 		return
 	}
 
 	if s.OnRedisError != nil {
 		s.OnRedisError()
 	}
-	if redis.IsConnectivityErr(err) && s.healthy.CompareAndSwap(true, false) && s.OnHealthy != nil {
-		s.OnHealthy(false)
+	if redis.IsConnectivityErr(err) {
+		s.setHealthy(false)
+	}
+}
+
+// setHealthy records a reachability transition and emits it exactly once. The
+// atomic read is a lock-free fast path for the overwhelmingly common case where
+// nothing changes; a genuine flip takes the lock so the OnHealthy emission is
+// ordered with the state change. Because every flip writes the state and emits
+// under the same lock, the reported gauge stays in lockstep with healthy even
+// when concurrent goroutines see opposite outcomes during a Redis flap.
+func (s *Store) setHealthy(healthy bool) {
+	if s.healthy.Load() == healthy {
+		return
+	}
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if s.healthy.Load() == healthy {
+		return
+	}
+	s.healthy.Store(healthy)
+	if s.OnHealthy != nil {
+		s.OnHealthy(healthy)
+	}
+}
+
+// ReportHealth emits the store's current reachability through OnHealthy. Call it
+// once at install, before the store is published to request goroutines, so the
+// reported gauge reconciles with this store: a boot-time outage flips the gauge
+// unhealthy while no store exists, and the store that finally connects must
+// clear it. A freshly installed store is healthy (its client connected), so
+// this also keeps the normal path a harmless no-op.
+func (s *Store) ReportHealth() {
+	if s.OnHealthy != nil {
+		s.OnHealthy(s.healthy.Load())
 	}
 }
 

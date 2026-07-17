@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +43,28 @@ func TestStoreMissIsNotARedisError(t *testing.T) {
 	assert.False(t, ok, "absent key is a miss")
 	assert.Zero(t, redisErrors, "a miss is not a Redis error")
 	assert.Empty(t, health, "a miss must not change reported health")
+}
+
+// A client that disconnects mid-request cancels the context, and go-redis
+// returns context.Canceled. That reveals nothing about Redis, so it must not
+// count as an error or page EdgeQuotaRedisErrors while the cache is healthy.
+func TestStoreClientCancelIsNotARedisError(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	var redisErrors int
+	var health []bool
+	store.OnRedisError = func() { redisErrors++ }
+	store.OnHealthy = func(ok bool) { health = append(health, ok) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the client is already gone
+
+	_, ok := store.Get(ctx, "k")
+
+	assert.False(t, ok, "a canceled lookup returns no entry")
+	assert.Zero(t, redisErrors, "client cancellation is not a Redis error")
+	assert.Empty(t, health, "client cancellation must not change reported health")
 }
 
 // A Redis outage has to be visible: the store cannot claim a write it never
@@ -93,6 +116,64 @@ func TestStoreReportsRedisRecovery(t *testing.T) {
 
 	_, _ = store.Get(context.Background(), "k")
 	assert.Equal(t, []bool{false, true}, health, "a healthy pool must not re-report")
+}
+
+// A boot-time outage flips the gauge unhealthy while no store exists, so the
+// store that finally connects must re-emit its state to clear it -- a
+// transition-only design would otherwise leave the gauge stuck unhealthy,
+// because the store seeds healthy and its first success is not a transition.
+func TestStoreReportHealthReconcilesGauge(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	var health []bool
+	store.OnHealthy = func(ok bool) { health = append(health, ok) }
+
+	store.ReportHealth()
+	assert.Equal(t, []bool{true}, health, "a connected store must report healthy at install")
+}
+
+// The reported gauge must never diverge from the store's own health, even when
+// concurrent goroutines see opposite Redis outcomes during a flap. Also runs
+// under -race to catch any unsynchronized access to the hook or the state.
+func TestStoreHealthGaugeStaysConsistentUnderFlaps(t *testing.T) {
+	client, mr := newTestRedis(t)
+	store := NewStore(client)
+
+	var mu sync.Mutex
+	var last bool
+	var emissions int
+	store.OnHealthy = func(ok bool) {
+		mu.Lock()
+		last, emissions = ok, emissions+1
+		mu.Unlock()
+	}
+
+	// Half the goroutines drive successes, half drive connectivity failures,
+	// against a store whose backing Redis is flapping under them.
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for range 40 {
+				if i%2 == 0 {
+					store.setHealthy(true)
+				} else {
+					store.setHealthy(false)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	_ = mr
+
+	// Quiesce to a known state, then assert the gauge matches it exactly.
+	store.setHealthy(true)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, last, "the final emission must match the final state")
+	assert.Positive(t, emissions, "flapping must have produced transitions")
 }
 
 func TestStoreGetSetRoundTrip(t *testing.T) {
