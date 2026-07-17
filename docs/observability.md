@@ -45,7 +45,7 @@ EdgeQuota emits **portable OpenTelemetry metrics** and **pushes them over OTLP**
 
 | Metric | Attributes | Description |
 |--------|-----------|-------------|
-| `edgequota.redis.healthy` | `edgequota.redis.pool` (`ratelimit`\|`external_rl_cache`\|`response_cache`) | `1` = reachable, `0` = unhealthy |
+| `edgequota.redis.healthy` | `edgequota.redis.pool` (`ratelimit`\|`external_rl_cache`\|`response_cache`) | `1` = reachable, `0` = unhealthy. **Only `ratelimit` and `response_cache` report.** `external_rl_cache` is seeded to `1` and nothing ever flips it, so it reads healthy through an outage — do not alert on that pool until it reports. |
 | `edgequota.reload.last_success.timestamp` | `edgequota.reload.target` (`config`\|`tls`\|`mtls_ca`) | Unix seconds of the last successful reload (`0` until the first) |
 
 ### Histograms
@@ -358,6 +358,8 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 Cache hit rate is a dashboard signal, not a paging condition.
 
 A cache outage already pages via `EdgeQuotaRedisUnhealthy` / `EdgeQuotaRedisErrors` on `edgequota_redis_pool="response_cache"`, at critical severity within a minute and independently of traffic. A hit-rate rule adds no coverage for that.
+
+That is true because the response cache reports into both signals: every Redis operation it makes is classified, a connectivity failure flips the pool unhealthy, and the next success flips it back. A missing key is a normal negative lookup and counts as neither. This is worth stating because it was not always so — before v0.11.5 the pool was seeded healthy and nothing ever flipped it, so the gauge read `1` through any outage and the rules could not fire. Before you lean on a pool's health signal, confirm something reports into it.
 
 What it would add is false pages. Hit rate is a ratio over cache-**eligible** responses, and how much eligible traffic a deployment sees is a property of what its backends mark cacheable — not something the proxy controls. In a quiet window that can be a handful of lookups, where the ratio is quantized (one hit in four reads as 0.25) and its confidence interval spans tens of percentage points. Any fixed threshold then sits inside the noise and fires on a perfectly healthy cache. Neither a wider window nor a minimum-traffic guard fixes that: a guard expressed as a request rate encodes one deployment's volume, so a value that means "too quiet to judge" for one deployment silences the alert entirely for a smaller one.
 

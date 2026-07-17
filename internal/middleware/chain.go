@@ -584,6 +584,10 @@ func (c *Chain) initResponseCache(cfg *config.Config, logger *slog.Logger) {
 	client, err := redis.NewClient(redisCfg)
 	if err != nil {
 		logger.Warn("response cache redis unavailable, retrying in background", "error", err)
+		// No store exists yet, so nothing will report this outage; mark the pool
+		// unhealthy up front so it is not silently seeded healthy for the whole
+		// recovery window. installResponseCache clears it once a store connects.
+		c.metrics.SetRedisHealthy("response_cache", false)
 		go c.responseCacheRecoveryLoop(cfg, logger, redisCfg)
 		return
 	}
@@ -612,6 +616,13 @@ func (c *Chain) installResponseCache(cfg *config.Config, logger *slog.Logger, cl
 	store.OnSkip = c.metrics.IncRespCacheSkip
 	store.OnPurge = c.metrics.IncRespCachePurge
 	store.OnBodySize = c.metrics.ObserveRespCacheBodySize
+	store.OnRedisError = func() { c.metrics.IncRedisErrors("response_cache") }
+	store.OnHealthy = func(healthy bool) { c.metrics.SetRedisHealthy("response_cache", healthy) }
+
+	// Reconcile the gauge with this store before any request goroutine can see
+	// it: a boot-time outage (below) flips the pool unhealthy while no store
+	// exists, and the store that finally connects must clear it.
+	store.ReportHealth()
 
 	c.responseCache.Store(store)
 	if c.proxyRef != nil {

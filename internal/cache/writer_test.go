@@ -575,6 +575,43 @@ func TestCachingResponseWriterXCacheMissCacheable(t *testing.T) {
 	assert.Equal(t, "MISS", rec.Header().Get("X-Cache"), "cacheable response on first request should have X-Cache: MISS")
 }
 
+// A Vary'd response is written twice -- a pointer under the base key, then the
+// entry under the vary-qualified key -- but it is still ONE cached response, and
+// only the entry carries a body.
+func TestFinishCountsVariedResponseOnce(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	var stores int
+	var bodySizes []float64
+	store.OnStore = func() { stores++ }
+	store.OnBodySize = func(n float64) { bodySizes = append(bodySizes, n) }
+
+	req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	cw := NewCachingResponseWriter(httptest.NewRecorder(), store, req)
+
+	cw.Header().Set("Cache-Control", "max-age=60")
+	cw.Header().Set("Vary", "Accept-Encoding")
+	cw.WriteHeader(http.StatusOK)
+	_, _ = cw.Write([]byte("body"))
+	cw.MarkComplete()
+
+	baseKey := store.KeyFromRequest(req, nil)
+	cw.Finish(context.Background(), baseKey)
+
+	// Both writes must land: the pointer is what lets a later lookup discover
+	// the Vary list and recompute the real key.
+	_, pointerStored := store.Get(context.Background(), baseKey)
+	require.True(t, pointerStored, "vary pointer must be stored under the base key")
+	_, entryStored := store.Get(context.Background(), store.KeyFromRequest(req, []string{"Accept-Encoding"}))
+	require.True(t, entryStored, "entry must be stored under the vary-qualified key")
+
+	assert.Equal(t, 1, stores, "one response must count as one store")
+	// The pointer has no body, so counting it would drag the histogram to zero.
+	assert.Equal(t, []float64{4}, bodySizes, "only the real body is measured")
+}
+
 func TestKeyFromRequestLongQuery(t *testing.T) {
 	client, _ := newTestRedis(t)
 	store := NewStore(client)
