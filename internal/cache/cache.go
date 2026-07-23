@@ -308,68 +308,138 @@ func (s *Store) KeyFromRequest(r *http.Request, varyHeaders []string) string {
 	return b.String()
 }
 
-// ParseCacheControl extracts cache directives from a Cache-Control header value.
-func ParseCacheControl(cc string) (maxAge time.Duration, noStore, noCache, isPrivate, isPublic bool) {
-	for _, directive := range strings.Split(cc, ",") {
-		directive = strings.TrimSpace(directive)
-		lower := strings.ToLower(directive)
+// CacheControl holds the response Cache-Control directives edgequota acts on.
+// A directive with an argument (RFC 9111's qualified forms no-cache="field" and
+// private="field") is treated exactly like its bare form: edgequota does not
+// revalidate or strip named fields, so the safe reading is the restrictive one.
+type CacheControl struct {
+	MaxAge     time.Duration // max-age (0 when absent or non-positive)
+	SMaxAge    time.Duration // s-maxage value; only meaningful when HasSMaxAge
+	HasSMaxAge bool          // s-maxage was present (its value may be 0)
+	NoStore    bool
+	NoCache    bool
+	Private    bool
+	Public     bool
+}
 
+// splitDirectives splits a Cache-Control value into directives on commas that
+// are not inside a quoted-string argument (RFC 9110 §5.6.4). A bare comma split
+// would tear an opaque quoted value such as ext="a, max-age=99, b" into pieces
+// and re-read its interior as real directives — caching a response that carries
+// no valid directive at all.
+func splitDirectives(cc string) []string {
+	var out []string
+	var b strings.Builder
+	inQuotes := false
+	escaped := false
+	for _, r := range cc {
 		switch {
-		case strings.HasPrefix(lower, "max-age="):
-			if after, found := strings.CutPrefix(lower, "max-age="); found {
-				seconds, err := strconv.Atoi(strings.TrimSpace(after))
-				if err == nil && seconds > 0 {
-					maxAge = time.Duration(seconds) * time.Second
-				}
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\' && inQuotes:
+			b.WriteRune(r)
+			escaped = true
+		case r == '"':
+			inQuotes = !inQuotes
+			b.WriteRune(r)
+		case r == ',' && !inQuotes:
+			out = append(out, b.String())
+			b.Reset()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out = append(out, b.String())
+	return out
+}
+
+// ParseCacheControl parses a Cache-Control header value. Pass every field line
+// joined with commas (see IsCacheable): RFC 9110 makes repeated Cache-Control
+// lines one combined list, so a restrictive directive on a second line must not
+// be dropped. Directives are split quoted-string-aware, so a comma inside a
+// quoted argument stays with its directive.
+func ParseCacheControl(cc string) CacheControl {
+	var c CacheControl
+	for _, directive := range splitDirectives(cc) {
+		name, value, _ := strings.Cut(directive, "=")
+		name = strings.ToLower(strings.TrimSpace(name))
+		// An argument may be a token or a quoted-string; we only ever look at
+		// the numeric deltas, so strip surrounding quotes and ignore the rest.
+		value = strings.Trim(strings.TrimSpace(value), `"`)
+
+		switch name {
+		case "max-age":
+			if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+				c.MaxAge = time.Duration(seconds) * time.Second
 			}
-		case lower == "no-store":
-			noStore = true
-		case lower == "no-cache":
-			noCache = true
-		case lower == "private":
-			isPrivate = true
-		case lower == "public":
-			isPublic = true
+		case "s-maxage":
+			// A shared cache honors s-maxage over max-age, and s-maxage=0 is a
+			// valid instruction not to store, so record even a zero value.
+			if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+				c.SMaxAge = time.Duration(seconds) * time.Second
+				c.HasSMaxAge = true
+			}
+		case "no-store":
+			c.NoStore = true
+		case "no-cache":
+			c.NoCache = true
+		case "private":
+			c.Private = true
+		case "public":
+			c.Public = true
 		}
 	}
 
-	return maxAge, noStore, noCache, isPrivate, isPublic
+	return c
 }
 
 // IsCacheable returns true if the response should be cached based on its
 // status code and Cache-Control header. Only 200 and 301 are cached.
+//
+// All Cache-Control field lines are considered, not just the first: an origin
+// (or a middleware layered on it) may emit "public, max-age=N" from one layer
+// and "no-store" from another, and the restrictive directive must win. Being a
+// shared cache, edgequota honors s-maxage over max-age when present, so
+// s-maxage=0 makes a response uncacheable even alongside a positive max-age.
 func IsCacheable(statusCode int, header http.Header) (ttl time.Duration, ok bool) {
 	if statusCode != http.StatusOK && statusCode != http.StatusMovedPermanently {
 		return 0, false
 	}
-	cc := header.Get("Cache-Control")
-	if cc == "" {
+	lines := header.Values("Cache-Control")
+	if len(lines) == 0 {
 		return 0, false
 	}
-	maxAge, noStore, noCache, private, _ := ParseCacheControl(cc)
-	if noStore || noCache || private {
+	cc := ParseCacheControl(strings.Join(lines, ","))
+	if cc.NoStore || cc.NoCache || cc.Private {
 		return 0, false
 	}
-	if maxAge <= 0 {
+	ttl = cc.MaxAge
+	if cc.HasSMaxAge {
+		ttl = cc.SMaxAge
+	}
+	if ttl <= 0 {
 		return 0, false
 	}
-	return maxAge, true
+	return ttl, true
 }
 
-// ParseVary extracts header names from a Vary response header.
-// Returns nil for "Vary: *" (uncacheable).
+// ParseVary extracts header names from a response's Vary header(s). Every field
+// line is read (RFC 9110 makes repeated Vary lines one combined list), and a "*"
+// appearing anywhere makes the response uncacheable — dropping a second Vary
+// line, or missing a "*" mixed with real names, would collapse variants and
+// serve one client's response to another.
 func ParseVary(header http.Header) ([]string, bool) {
-	vary := header.Get("Vary")
-	if vary == "" {
-		return nil, true
-	}
-	if vary == "*" {
-		return nil, false
-	}
 	var headers []string
-	for _, h := range strings.Split(vary, ",") {
-		h = strings.TrimSpace(h)
-		if h != "" {
+	for _, line := range header.Values("Vary") {
+		for _, h := range strings.Split(line, ",") {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if h == "*" {
+				return nil, false
+			}
 			headers = append(headers, http.CanonicalHeaderKey(h))
 		}
 	}
