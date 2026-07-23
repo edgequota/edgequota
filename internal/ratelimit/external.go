@@ -20,6 +20,7 @@ import (
 	ratelimitv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/ratelimit/v1"
 	ratelimitv1http "github.com/edgequota/edgequota/api/gen/http/ratelimit/v1"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/redis"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -725,7 +726,7 @@ func (ec *ExternalClient) getLimitsHTTP(ctx context.Context, req *ExternalReques
 	if err != nil {
 		return nil, 0, fmt.Errorf("create request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(httphdr.ContentType, "application/json")
 
 	resp, err := ec.httpClient.Do(httpReq)
 	if err != nil {

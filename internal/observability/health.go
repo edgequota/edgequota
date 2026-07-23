@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/edgequota/edgequota/internal/httphdr"
 )
 
 // Pre-serialized JSON responses avoid runtime encoding errors entirely.
@@ -69,7 +71,7 @@ func (h *HealthChecker) IsReady() bool {
 // Kubernetes startup probes use this to gate liveness/readiness checks.
 func (h *HealthChecker) StartzHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(httphdr.ContentType, "application/json")
 
 		if h.IsStarted() {
 			w.WriteHeader(http.StatusOK)
@@ -84,7 +86,7 @@ func (h *HealthChecker) StartzHandler() http.HandlerFunc {
 // HealthzHandler returns 200 if the process is alive.
 func (h *HealthChecker) HealthzHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(httphdr.ContentType, "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(jsonAlive)
 	}
@@ -103,7 +105,7 @@ func (h *HealthChecker) SetRedisPinger(p Pinger) {
 // registered, it actively PINGs Redis and returns 503 if unreachable.
 func (h *HealthChecker) ReadyzHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(httphdr.ContentType, "application/json")
 
 		if !h.IsReady() {
 			w.WriteHeader(http.StatusServiceUnavailable)

@@ -179,5 +179,5 @@ func instanceID() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
 	}
-	return "unknown"
+	return unknownValue
 }

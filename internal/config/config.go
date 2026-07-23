@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -510,12 +511,12 @@ type HeaderFilterConfig struct {
 // credentials and session data that external services should not receive
 // by default.
 var DefaultSensitiveHeaders = []string{
-	"Authorization",
-	"Cookie",
+	httphdr.Authorization,
+	httphdr.Cookie,
 	"Set-Cookie",
 	"Proxy-Authorization",
 	"Proxy-Authenticate",
-	"X-Api-Key",
+	httphdr.XAPIKey,
 	"X-Csrf-Token",
 	"X-Xsrf-Token",
 }
@@ -528,7 +529,7 @@ var DefaultSensitiveHeaders = []string{
 // service has no use for them and forwarding them unnecessarily increases
 // attack surface.
 var DefaultAuthDenyHeaders = []string{
-	"Cookie",
+	httphdr.Cookie,
 	"Set-Cookie",
 	"Proxy-Authorization",
 	"Proxy-Authenticate",
@@ -579,7 +580,7 @@ var DefaultEphemeralHeaders = []string{
 	"X-Envoy-Upstream-Service-Time",
 
 	// Miscellaneous per-request headers
-	"X-Forwarded-For",
+	httphdr.XForwardedFor,
 	"X-Forwarded-Proto",
 	"X-Forwarded-Host",
 	"X-Forwarded-Port",
@@ -1470,7 +1471,7 @@ func validateLogging(cfg *Config) error {
 var eventsHeaderDenySet = map[string]struct{}{
 	"Host":                {},
 	"Content-Length":      {},
-	"Content-Type":        {},
+	httphdr.ContentType:   {},
 	"Transfer-Encoding":   {},
 	"Connection":          {},
 	"Te":                  {},
@@ -1491,7 +1492,7 @@ func validateEvents(cfg *Config) error {
 		}
 		headerName := httpCfg.AuthHeader
 		if headerName == "" {
-			headerName = "Authorization"
+			headerName = httphdr.Authorization
 		}
 		// Only migrate if the same header is not already set explicitly.
 		if _, exists := httpCfg.Headers[headerName]; !exists {
