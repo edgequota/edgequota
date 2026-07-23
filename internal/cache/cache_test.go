@@ -416,47 +416,83 @@ func TestStoreMetricHooks(t *testing.T) {
 
 func TestParseCacheControl(t *testing.T) {
 	t.Run("max-age", func(t *testing.T) {
-		maxAge, noStore, noCache, private, public := ParseCacheControl("max-age=300")
-		assert.Equal(t, 300*time.Second, maxAge)
-		assert.False(t, noStore)
-		assert.False(t, noCache)
-		assert.False(t, private)
-		assert.False(t, public)
+		cc := ParseCacheControl("max-age=300")
+		assert.Equal(t, 300*time.Second, cc.MaxAge)
+		assert.False(t, cc.NoStore)
+		assert.False(t, cc.NoCache)
+		assert.False(t, cc.Private)
+		assert.False(t, cc.Public)
 	})
 
 	t.Run("no-store", func(t *testing.T) {
-		_, noStore, _, _, _ := ParseCacheControl("no-store")
-		assert.True(t, noStore)
+		assert.True(t, ParseCacheControl("no-store").NoStore)
 	})
 
 	t.Run("no-cache", func(t *testing.T) {
-		_, _, noCache, _, _ := ParseCacheControl("no-cache")
-		assert.True(t, noCache)
+		assert.True(t, ParseCacheControl("no-cache").NoCache)
 	})
 
 	t.Run("private", func(t *testing.T) {
-		_, _, _, private, _ := ParseCacheControl("private, max-age=60")
-		assert.True(t, private)
+		assert.True(t, ParseCacheControl("private, max-age=60").Private)
 	})
 
 	t.Run("public with max-age", func(t *testing.T) {
-		maxAge, _, _, _, public := ParseCacheControl("public, max-age=3600")
-		assert.True(t, public)
-		assert.Equal(t, 3600*time.Second, maxAge)
+		cc := ParseCacheControl("public, max-age=3600")
+		assert.True(t, cc.Public)
+		assert.Equal(t, 3600*time.Second, cc.MaxAge)
 	})
 
 	t.Run("case insensitive", func(t *testing.T) {
-		maxAge, _, _, _, _ := ParseCacheControl("Max-Age=120")
-		assert.Equal(t, 120*time.Second, maxAge)
+		assert.Equal(t, 120*time.Second, ParseCacheControl("Max-Age=120").MaxAge)
 	})
 
 	t.Run("empty string", func(t *testing.T) {
-		maxAge, noStore, noCache, private, public := ParseCacheControl("")
-		assert.Zero(t, maxAge)
-		assert.False(t, noStore)
-		assert.False(t, noCache)
-		assert.False(t, private)
-		assert.False(t, public)
+		cc := ParseCacheControl("")
+		assert.Zero(t, cc.MaxAge)
+		assert.False(t, cc.NoStore)
+		assert.False(t, cc.NoCache)
+		assert.False(t, cc.Private)
+		assert.False(t, cc.Public)
+	})
+
+	t.Run("qualified no-cache is restrictive", func(t *testing.T) {
+		// RFC 9111 no-cache="Set-Cookie" means "revalidate that field"; edgequota
+		// does not revalidate, so the safe reading is a full no-cache.
+		assert.True(t, ParseCacheControl(`no-cache="Set-Cookie"`).NoCache)
+	})
+
+	t.Run("qualified private is restrictive", func(t *testing.T) {
+		assert.True(t, ParseCacheControl(`private="Set-Cookie", max-age=60`).Private)
+	})
+
+	t.Run("s-maxage is parsed and recorded", func(t *testing.T) {
+		cc := ParseCacheControl("s-maxage=120")
+		assert.True(t, cc.HasSMaxAge)
+		assert.Equal(t, 120*time.Second, cc.SMaxAge)
+	})
+
+	t.Run("s-maxage=0 is present with a zero value", func(t *testing.T) {
+		cc := ParseCacheControl("s-maxage=0, max-age=300")
+		assert.True(t, cc.HasSMaxAge)
+		assert.Zero(t, cc.SMaxAge)
+		assert.Equal(t, 300*time.Second, cc.MaxAge)
+	})
+
+	t.Run("absent s-maxage is not recorded", func(t *testing.T) {
+		assert.False(t, ParseCacheControl("max-age=300").HasSMaxAge)
+	})
+
+	t.Run("qualified no-cache with a comma in its argument stays restrictive", func(t *testing.T) {
+		// The quoted argument contains a comma; splitting must keep the whole
+		// directive together so no-cache is still recognized.
+		cc := ParseCacheControl(`no-cache="Set-Cookie, Authorization"`)
+		assert.True(t, cc.NoCache)
+	})
+
+	t.Run("unknown extension with a quoted comma leaks no directive", func(t *testing.T) {
+		cc := ParseCacheControl(`ext="a, max-age=99999, no-store, b"`)
+		assert.Zero(t, cc.MaxAge, "interior max-age must not leak from a quoted arg")
+		assert.False(t, cc.NoStore, "interior no-store must not leak from a quoted arg")
 	})
 }
 
@@ -502,6 +538,55 @@ func TestIsCacheable(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, 86400*time.Second, ttl)
 	})
+
+	t.Run("no-store on a second field line still wins", func(t *testing.T) {
+		h := http.Header{}
+		h.Add("Cache-Control", "public, max-age=60")
+		h.Add("Cache-Control", "no-store")
+		_, ok := IsCacheable(200, h)
+		assert.False(t, ok, "a restrictive directive on any line must veto caching")
+	})
+
+	t.Run("s-maxage overrides max-age", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "max-age=300, s-maxage=60")
+		ttl, ok := IsCacheable(200, h)
+		assert.True(t, ok)
+		assert.Equal(t, 60*time.Second, ttl, "a shared cache honors s-maxage")
+	})
+
+	t.Run("s-maxage=0 makes it uncacheable despite a positive max-age", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "max-age=300, s-maxage=0")
+		_, ok := IsCacheable(200, h)
+		assert.False(t, ok)
+	})
+
+	t.Run("qualified no-cache is not cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", `no-cache="Set-Cookie", max-age=60`)
+		_, ok := IsCacheable(200, h)
+		assert.False(t, ok)
+	})
+
+	t.Run("s-maxage alone is honored as the ttl", func(t *testing.T) {
+		// No max-age: this pins that the s-maxage override runs before the
+		// ttl<=0 early return, not merely that it wins a tie with max-age.
+		h := http.Header{}
+		h.Set("Cache-Control", "s-maxage=60")
+		ttl, ok := IsCacheable(200, h)
+		assert.True(t, ok)
+		assert.Equal(t, 60*time.Second, ttl)
+	})
+
+	t.Run("comma inside a quoted extension arg does not leak a directive", func(t *testing.T) {
+		// The only directive is an unknown extension whose opaque value happens
+		// to contain "max-age=99999"; it must be ignored, not cached fail-open.
+		h := http.Header{}
+		h.Set("Cache-Control", `ext="a, max-age=99999, b"`)
+		_, ok := IsCacheable(200, h)
+		assert.False(t, ok, "an extension's quoted value must not be parsed as directives")
+	})
 }
 
 func TestParseVary(t *testing.T) {
@@ -531,6 +616,31 @@ func TestParseVary(t *testing.T) {
 	t.Run("star is uncacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Vary", "*")
+		_, ok := ParseVary(h)
+		assert.False(t, ok)
+	})
+
+	t.Run("second field line is not dropped", func(t *testing.T) {
+		h := http.Header{}
+		h.Add("Vary", "Accept-Encoding")
+		h.Add("Vary", "Cookie")
+		headers, ok := ParseVary(h)
+		assert.True(t, ok)
+		assert.Equal(t, []string{"Accept-Encoding", "Cookie"}, headers,
+			"a dropped Vary dimension collapses variants across clients")
+	})
+
+	t.Run("star mixed with names is still uncacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Vary", "Accept-Encoding, *")
+		_, ok := ParseVary(h)
+		assert.False(t, ok)
+	})
+
+	t.Run("star on a second line is uncacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Add("Vary", "Accept-Encoding")
+		h.Add("Vary", "*")
 		_, ok := ParseVary(h)
 		assert.False(t, ok)
 	})

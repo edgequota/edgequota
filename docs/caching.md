@@ -40,6 +40,8 @@ Per-request ephemeral headers are **automatically stripped** from the cache key.
 
 When a cached response includes a `Vary` header, the listed headers are included in the cache key. For example, `Vary: Accept-Encoding` causes the `Accept-Encoding` request header value to participate in the key, producing separate cache entries per encoding.
 
+All `Vary` field lines are honored — an origin that emits `Vary: Accept-Encoding` and `Vary: Cookie` from different layers varies on both. A `Vary: *` (whole value or mixed with other names, on any line) makes the response uncacheable.
+
 ---
 
 ## Cache-Control Semantics
@@ -49,6 +51,7 @@ EdgeQuota honors standard HTTP `Cache-Control` directives on backend responses:
 | Directive | Behavior |
 |-----------|----------|
 | `max-age=N` | Cache the response for `N` seconds. |
+| `s-maxage=N` | Shared-cache freshness. Takes precedence over `max-age`; `s-maxage=0` prevents caching. |
 | `no-store` | Do not cache the response. |
 | `no-cache` | Do not cache the response (must revalidate every time). |
 | `private` | Do not cache the response (intended for a single user). |
@@ -58,7 +61,9 @@ EdgeQuota honors standard HTTP `Cache-Control` directives on backend responses:
 
 - Only **200 OK** and **301 Moved Permanently** responses are cached.
 - There is **no implicit caching**. If the backend response has no `Cache-Control` header, EdgeQuota passes it through without caching.
-- `no-store`, `no-cache`, and `private` directives all prevent caching.
+- `no-store`, `no-cache`, and `private` directives all prevent caching. Their RFC 9111 qualified forms (`no-cache="field"`, `private="field"`) are treated the same as the bare directive — EdgeQuota does not revalidate or strip individual fields, so it takes the safe reading and does not cache.
+- Every `Cache-Control` field line is considered. A restrictive directive on any line (e.g. `no-store` added by a downstream layer) wins over a permissive one on another.
+- As a **shared** cache, EdgeQuota honors `s-maxage` over `max-age`; `s-maxage=0` makes a response uncacheable even alongside a positive `max-age`.
 
 ---
 
