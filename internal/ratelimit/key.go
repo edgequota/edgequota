@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 )
 
 // Key strategy type aliases for local readability.
@@ -77,7 +78,7 @@ func (s *ClientIPStrategy) Extract(req *http.Request) (string, error) {
 	callerIP := remoteIP(req.RemoteAddr)
 
 	if s.isTrusted(callerIP) {
-		if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		if xff := req.Header.Get(httphdr.XForwardedFor); xff != "" {
 			parts := strings.Split(xff, ",")
 			for i := range parts {
 				parts[i] = strings.TrimSpace(parts[i])

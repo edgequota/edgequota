@@ -25,6 +25,7 @@ import (
 
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/ratelimit"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -662,10 +663,10 @@ func setForwardedFor(req *http.Request) {
 	if err != nil {
 		return
 	}
-	if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
-		req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+	if prior := req.Header.Get(httphdr.XForwardedFor); prior != "" {
+		req.Header.Set(httphdr.XForwardedFor, prior+", "+clientIP)
 	} else {
-		req.Header.Set("X-Forwarded-For", clientIP)
+		req.Header.Set(httphdr.XForwardedFor, clientIP)
 	}
 }
 
@@ -873,7 +874,7 @@ func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.Header().Set("X-Cache", "HIT")
 	w.WriteHeader(entry.StatusCode)
-	_, _ = w.Write(entry.Body) //nolint:gosec // body is from our own cache, not user input
+	_, _ = w.Write(entry.Body)
 	return true
 }
 
@@ -1132,7 +1133,7 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 
 // IsGRPC returns true if the request appears to be a gRPC call.
 func IsGRPC(r *http.Request) bool {
-	return strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
+	return strings.HasPrefix(r.Header.Get(httphdr.ContentType), "application/grpc")
 }
 
 // IsWebSocketUpgrade returns true if the request is a WebSocket upgrade.

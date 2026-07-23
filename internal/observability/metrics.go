@@ -21,6 +21,10 @@ import (
 // service-prefixed.
 const meterName = "github.com/edgequota/edgequota/internal/observability"
 
+// unknownValue is the bounded fallback label used when a value cannot be
+// determined (e.g. an out-of-range status code or a missing instance identity).
+const unknownValue = "unknown"
+
 // Metric names (portable OTel semconv: dotted, lowercase, no unit suffix — the
 // unit is a separate instrument field). Kept as consts so emission sites and the
 // bucket Views can't drift on a typo.
@@ -693,6 +697,6 @@ func StatusFamily(code int) string {
 	case code >= 500 && code < 600:
 		return "5xx"
 	default:
-		return "unknown"
+		return unknownValue
 	}
 }

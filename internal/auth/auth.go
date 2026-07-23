@@ -27,6 +27,7 @@ import (
 	authv1 "github.com/edgequota/edgequota/api/gen/grpc/edgequota/auth/v1"
 	authv1http "github.com/edgequota/edgequota/api/gen/http/auth/v1"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
@@ -418,7 +419,7 @@ func (c *Client) checkHTTP(ctx context.Context, req *CheckRequest) (*CheckRespon
 		return nil, fmt.Errorf("create auth request: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(httphdr.ContentType, "application/json")
 
 	if c.forwardOriginalHeaders {
 		for k, v := range req.Headers {

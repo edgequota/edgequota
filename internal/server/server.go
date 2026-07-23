@@ -22,6 +22,7 @@ import (
 	adminv1 "github.com/edgequota/edgequota/api/gen/http/admin/v1"
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/middleware"
 	"github.com/edgequota/edgequota/internal/observability"
 	"github.com/edgequota/edgequota/internal/proxy"
@@ -459,7 +460,7 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, m
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(httphdr.ContentType, "application/json")
 		data, err := json.MarshalIndent(cfg.Sanitized(), "", "  ")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -472,7 +473,7 @@ func buildAdminServer(cfg *config.Config, health *observability.HealthChecker, m
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(httphdr.ContentType, "application/json")
 		snapshot := metrics.Snapshot()
 		data, err := json.MarshalIndent(snapshot, "", "  ")
 		if err != nil {
@@ -626,7 +627,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.certs = ch
 
 		minVer := max(tlsMinVersion(s.cfg), tls.VersionTLS12)
-		tlsCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
+		tlsCfg := &tls.Config{
 			MinVersion:     minVer,
 			GetCertificate: ch.GetCertificate,
 			NextProtos:     []string{"h2", "http/1.1"},
@@ -657,14 +658,14 @@ func (s *Server) Run(ctx context.Context) error {
 			s.mtlsCAs = caHolder
 
 			clientAuth := mtlsClientAuth(mtlsCfg.ResolvedClientAuth())
-			mtlsTLSCfg := &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
+			mtlsTLSCfg := &tls.Config{
 				MinVersion:     minVer,
 				GetCertificate: ch.GetCertificate,
 				NextProtos:     []string{"h2", "http/1.1"},
 				ClientCAs:      caHolder.GetPool(),
 				ClientAuth:     clientAuth,
 				GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
-					return &tls.Config{ //nolint:gosec // G402: MinVersion is always >= TLS 1.2; clamped above.
+					return &tls.Config{
 						MinVersion:     minVer,
 						GetCertificate: ch.GetCertificate,
 						NextProtos:     []string{"h2", "http/1.1"},

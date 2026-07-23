@@ -34,7 +34,10 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.11.2
+          # Keep pinned to the latest golangci-lint release; bump in the same PR
+          # whenever you touch lint. A stale pin hides findings (v2.11.2 missed
+          # goconst's module-wide counting and unused-nolint detection).
+          version: v2.12.2
           args: --timeout=5m
 
       - name: Verify go mod tidy

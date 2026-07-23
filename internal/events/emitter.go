@@ -17,6 +17,7 @@ import (
 
 	eventsv1http "github.com/edgequota/edgequota/api/gen/http/events/v1"
 	"github.com/edgequota/edgequota/internal/config"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/observability"
 )
 
@@ -263,7 +264,7 @@ func (e *Emitter) trySendHTTP(body []byte, count int) bool {
 		e.logger.Error("failed to create events HTTP request", "error", err)
 		return false
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(httphdr.ContentType, "application/json")
 	for k, vals := range e.httpHeaders {
 		for _, v := range vals {
 			req.Header.Set(k, v)

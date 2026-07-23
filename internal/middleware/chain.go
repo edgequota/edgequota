@@ -29,6 +29,7 @@ import (
 	"github.com/edgequota/edgequota/internal/cache"
 	"github.com/edgequota/edgequota/internal/config"
 	"github.com/edgequota/edgequota/internal/events"
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/mtls"
 	"github.com/edgequota/edgequota/internal/observability"
 	"github.com/edgequota/edgequota/internal/proxy"
@@ -108,7 +109,7 @@ var injectionDenyHeaders = map[string]struct{}{
 	"Proxy-Connection":    {},
 	"Keep-Alive":          {},
 	"Trailer":             {},
-	"X-Forwarded-For":     {},
+	httphdr.XForwardedFor: {},
 	"X-Forwarded-Host":    {},
 	"X-Forwarded-Proto":   {},
 	"X-Real-Ip":           {},
@@ -139,7 +140,7 @@ func writeJSONError(w http.ResponseWriter, code int, errType, message string, re
 		RequestID:  w.Header().Get(requestIDHeader),
 	}
 	body, _ := json.Marshal(resp)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httphdr.ContentType, "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(body)
 }

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/edgequota/edgequota/internal/httphdr"
 	"github.com/edgequota/edgequota/internal/redis"
 )
 
@@ -434,7 +435,7 @@ func IsCacheable(r *http.Request, statusCode int, header http.Header) (ttl time.
 	if cc.NoStore || cc.NoCache || cc.Private {
 		return 0, false
 	}
-	if r != nil && r.Header.Get("Authorization") != "" &&
+	if r != nil && r.Header.Get(httphdr.Authorization) != "" &&
 		!cc.Public && !cc.HasSMaxAge && !cc.MustRevalidate {
 		return 0, false
 	}
