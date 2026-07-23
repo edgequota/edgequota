@@ -313,13 +313,14 @@ func (s *Store) KeyFromRequest(r *http.Request, varyHeaders []string) string {
 // private="field") is treated exactly like its bare form: edgequota does not
 // revalidate or strip named fields, so the safe reading is the restrictive one.
 type CacheControl struct {
-	MaxAge     time.Duration // max-age (0 when absent or non-positive)
-	SMaxAge    time.Duration // s-maxage value; only meaningful when HasSMaxAge
-	HasSMaxAge bool          // s-maxage was present (its value may be 0)
-	NoStore    bool
-	NoCache    bool
-	Private    bool
-	Public     bool
+	MaxAge         time.Duration // max-age (0 when absent or non-positive)
+	SMaxAge        time.Duration // s-maxage value; only meaningful when HasSMaxAge
+	HasSMaxAge     bool          // s-maxage was present (its value may be 0)
+	NoStore        bool
+	NoCache        bool
+	Private        bool
+	Public         bool
+	MustRevalidate bool
 }
 
 // splitDirectives splits a Cache-Control value into directives on commas that
@@ -388,22 +389,41 @@ func ParseCacheControl(cc string) CacheControl {
 			c.Private = true
 		case "public":
 			c.Public = true
+		case "must-revalidate":
+			c.MustRevalidate = true
 		}
 	}
 
 	return c
 }
 
-// IsCacheable returns true if the response should be cached based on its
-// status code and Cache-Control header. Only 200 and 301 are cached.
+// IsCacheable reports whether a response may be stored by this shared cache,
+// given the request that produced it, its status code, and its headers. Only
+// 200 and 301 are cached. A nil request means no request-identity constraints
+// apply (the response-only rules still do).
 //
 // All Cache-Control field lines are considered, not just the first: an origin
 // (or a middleware layered on it) may emit "public, max-age=N" from one layer
 // and "no-store" from another, and the restrictive directive must win. Being a
 // shared cache, edgequota honors s-maxage over max-age when present, so
 // s-maxage=0 makes a response uncacheable even alongside a positive max-age.
-func IsCacheable(statusCode int, header http.Header) (ttl time.Duration, ok bool) {
+//
+// Two request/response-coupled rules keep one client's data from reaching
+// another under edgequota's identity-free key:
+//
+//   - A response carrying Set-Cookie is never stored: the cookie is per-client
+//     state, and replaying it from cache to every later hit is session
+//     fixation. This holds whatever the Cache-Control says.
+//   - RFC 9111 §3.5: a response to a request that carried an Authorization
+//     header is stored only if the response explicitly permits shared reuse via
+//     public, s-maxage, or must-revalidate. Otherwise an authenticated response
+//     would be keyed without identity and served to other (even anonymous)
+//     clients.
+func IsCacheable(r *http.Request, statusCode int, header http.Header) (ttl time.Duration, ok bool) {
 	if statusCode != http.StatusOK && statusCode != http.StatusMovedPermanently {
+		return 0, false
+	}
+	if responseHasSetCookie(header) {
 		return 0, false
 	}
 	lines := header.Values("Cache-Control")
@@ -414,6 +434,10 @@ func IsCacheable(statusCode int, header http.Header) (ttl time.Duration, ok bool
 	if cc.NoStore || cc.NoCache || cc.Private {
 		return 0, false
 	}
+	if r != nil && r.Header.Get("Authorization") != "" &&
+		!cc.Public && !cc.HasSMaxAge && !cc.MustRevalidate {
+		return 0, false
+	}
 	ttl = cc.MaxAge
 	if cc.HasSMaxAge {
 		ttl = cc.SMaxAge
@@ -422,6 +446,26 @@ func IsCacheable(statusCode int, header http.Header) (ttl time.Duration, ok bool
 		return 0, false
 	}
 	return ttl, true
+}
+
+// responseHasSetCookie reports whether the response carries a Set-Cookie header,
+// including one delivered as an HTTP trailer. A trailer arrives after the
+// response head is committed, so the eligibility veto in WriteHeader cannot see
+// it; the store-time check in Finish uses this to keep the "never cache a
+// Set-Cookie response" invariant true. httputil.ReverseProxy deposits an
+// announced trailer under its canonical name and an unannounced one under an
+// http.TrailerPrefix-prefixed key, so both forms are checked.
+func responseHasSetCookie(header http.Header) bool {
+	for name := range header {
+		key := name
+		if trimmed, ok := strings.CutPrefix(key, http.TrailerPrefix); ok {
+			key = trimmed
+		}
+		if http.CanonicalHeaderKey(key) == "Set-Cookie" {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseVary extracts header names from a response's Vary header(s). Every field

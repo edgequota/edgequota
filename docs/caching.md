@@ -56,6 +56,7 @@ EdgeQuota honors standard HTTP `Cache-Control` directives on backend responses:
 | `no-cache` | Do not cache the response (must revalidate every time). |
 | `private` | Do not cache the response (intended for a single user). |
 | `public` | Explicitly cacheable. Combined with `max-age`, enables caching. |
+| `must-revalidate` | Permits a shared cache to store a response to an `Authorization`-bearing request (see *What Gets Cached*). EdgeQuota never serves stale entries — they simply expire at `max-age`/`s-maxage` — so it honors this only as such a storage permit. |
 
 ### What Gets Cached
 
@@ -64,6 +65,9 @@ EdgeQuota honors standard HTTP `Cache-Control` directives on backend responses:
 - `no-store`, `no-cache`, and `private` directives all prevent caching. Their RFC 9111 qualified forms (`no-cache="field"`, `private="field"`) are treated the same as the bare directive — EdgeQuota does not revalidate or strip individual fields, so it takes the safe reading and does not cache.
 - Every `Cache-Control` field line is considered. A restrictive directive on any line (e.g. `no-store` added by a downstream layer) wins over a permissive one on another.
 - As a **shared** cache, EdgeQuota honors `s-maxage` over `max-age`; `s-maxage=0` makes a response uncacheable even alongside a positive `max-age`.
+- A response to a request that carried an **`Authorization`** header is cached only if it explicitly permits shared reuse via `public`, `s-maxage`, or `must-revalidate` (RFC 9111 §3.5). Without one of those, an authenticated response is never stored — otherwise it could be served to another (even anonymous) client from the shared, identity-free cache.
+- A response carrying a **`Set-Cookie`** header is never cached, whatever its `Cache-Control` says — the cookie is per-client state, and replaying it from cache would leak one client's session to another. This holds even when the cookie arrives as an HTTP trailer.
+- **1xx informational** responses (e.g. `103 Early Hints`) are relayed to the client but do not participate in caching; the final response status decides cacheability.
 
 ---
 

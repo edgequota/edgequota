@@ -442,6 +442,12 @@ func TestParseCacheControl(t *testing.T) {
 		assert.Equal(t, 3600*time.Second, cc.MaxAge)
 	})
 
+	t.Run("must-revalidate is parsed", func(t *testing.T) {
+		cc := ParseCacheControl("must-revalidate, max-age=60")
+		assert.True(t, cc.MustRevalidate)
+		assert.False(t, cc.Public)
+	})
+
 	t.Run("case insensitive", func(t *testing.T) {
 		assert.Equal(t, 120*time.Second, ParseCacheControl("Max-Age=120").MaxAge)
 	})
@@ -497,10 +503,14 @@ func TestParseCacheControl(t *testing.T) {
 }
 
 func TestIsCacheable(t *testing.T) {
+	// The response-only rules do not depend on the request; a nil request
+	// exercises exactly the same paths production takes for an anonymous GET.
+	noAuth := (*http.Request)(nil)
+
 	t.Run("200 with max-age is cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "max-age=60")
-		ttl, ok := IsCacheable(200, h)
+		ttl, ok := IsCacheable(noAuth, 200, h)
 		assert.True(t, ok)
 		assert.Equal(t, 60*time.Second, ttl)
 	})
@@ -508,33 +518,33 @@ func TestIsCacheable(t *testing.T) {
 	t.Run("200 with no-store is not cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "no-store")
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok)
 	})
 
 	t.Run("200 with private is not cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "private, max-age=300")
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok)
 	})
 
 	t.Run("no Cache-Control is not cacheable", func(t *testing.T) {
-		_, ok := IsCacheable(200, http.Header{})
+		_, ok := IsCacheable(noAuth, 200, http.Header{})
 		assert.False(t, ok)
 	})
 
 	t.Run("500 is not cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "max-age=60")
-		_, ok := IsCacheable(500, h)
+		_, ok := IsCacheable(noAuth, 500, h)
 		assert.False(t, ok)
 	})
 
 	t.Run("301 with max-age is cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "max-age=86400")
-		ttl, ok := IsCacheable(301, h)
+		ttl, ok := IsCacheable(noAuth, 301, h)
 		assert.True(t, ok)
 		assert.Equal(t, 86400*time.Second, ttl)
 	})
@@ -543,14 +553,14 @@ func TestIsCacheable(t *testing.T) {
 		h := http.Header{}
 		h.Add("Cache-Control", "public, max-age=60")
 		h.Add("Cache-Control", "no-store")
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok, "a restrictive directive on any line must veto caching")
 	})
 
 	t.Run("s-maxage overrides max-age", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "max-age=300, s-maxage=60")
-		ttl, ok := IsCacheable(200, h)
+		ttl, ok := IsCacheable(noAuth, 200, h)
 		assert.True(t, ok)
 		assert.Equal(t, 60*time.Second, ttl, "a shared cache honors s-maxage")
 	})
@@ -558,14 +568,14 @@ func TestIsCacheable(t *testing.T) {
 	t.Run("s-maxage=0 makes it uncacheable despite a positive max-age", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", "max-age=300, s-maxage=0")
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok)
 	})
 
 	t.Run("qualified no-cache is not cacheable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Cache-Control", `no-cache="Set-Cookie", max-age=60`)
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok)
 	})
 
@@ -574,7 +584,7 @@ func TestIsCacheable(t *testing.T) {
 		// ttl<=0 early return, not merely that it wins a tie with max-age.
 		h := http.Header{}
 		h.Set("Cache-Control", "s-maxage=60")
-		ttl, ok := IsCacheable(200, h)
+		ttl, ok := IsCacheable(noAuth, 200, h)
 		assert.True(t, ok)
 		assert.Equal(t, 60*time.Second, ttl)
 	})
@@ -584,8 +594,93 @@ func TestIsCacheable(t *testing.T) {
 		// to contain "max-age=99999"; it must be ignored, not cached fail-open.
 		h := http.Header{}
 		h.Set("Cache-Control", `ext="a, max-age=99999, b"`)
-		_, ok := IsCacheable(200, h)
+		_, ok := IsCacheable(noAuth, 200, h)
 		assert.False(t, ok, "an extension's quoted value must not be parsed as directives")
+	})
+
+	// Bug E: a Set-Cookie response carries per-client state and must never be
+	// stored, or the cookie replays from cache to every later client.
+	t.Run("Set-Cookie is never cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "public, max-age=60")
+		h.Set("Set-Cookie", "session=abc123; Path=/")
+		_, ok := IsCacheable(noAuth, 200, h)
+		assert.False(t, ok, "a response with Set-Cookie must not be cached")
+	})
+
+	t.Run("Set-Cookie on a second header line is still caught", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "public, max-age=60")
+		h.Add("Set-Cookie", "a=1")
+		h.Add("Set-Cookie", "b=2")
+		_, ok := IsCacheable(noAuth, 200, h)
+		assert.False(t, ok)
+	})
+
+	// Bug A (RFC 9111 §3.5): a response to an Authorization'd request is
+	// storable by a shared cache only when it explicitly permits reuse.
+	authReq := func() *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/resource", nil)
+		r.Header.Set("Authorization", "Bearer token")
+		return r
+	}
+
+	t.Run("authorized request with bare max-age is not cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "max-age=60")
+		_, ok := IsCacheable(authReq(), 200, h)
+		assert.False(t, ok, "an authenticated response needs an explicit shared-reuse permit")
+	})
+
+	t.Run("authorized request with public is cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "public, max-age=60")
+		ttl, ok := IsCacheable(authReq(), 200, h)
+		assert.True(t, ok, "public authorizes shared caching of an authenticated response")
+		assert.Equal(t, 60*time.Second, ttl)
+	})
+
+	t.Run("authorized request with s-maxage is cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "s-maxage=60")
+		_, ok := IsCacheable(authReq(), 200, h)
+		assert.True(t, ok, "s-maxage authorizes shared caching")
+	})
+
+	t.Run("authorized request with must-revalidate is cacheable", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Cache-Control", "must-revalidate, max-age=60")
+		_, ok := IsCacheable(authReq(), 200, h)
+		assert.True(t, ok, "must-revalidate authorizes shared caching")
+	})
+
+	t.Run("unauthenticated request with bare max-age stays cacheable", func(t *testing.T) {
+		// The Authorization rule must not tighten the ordinary case: a request
+		// with no Authorization header caches on a bare max-age as before.
+		r := httptest.NewRequest(http.MethodGet, "/resource", nil)
+		h := http.Header{}
+		h.Set("Cache-Control", "max-age=60")
+		_, ok := IsCacheable(r, 200, h)
+		assert.True(t, ok)
+	})
+
+	t.Run("authorized request with s-maxage=0 is not cacheable despite the permit", func(t *testing.T) {
+		// s-maxage satisfies the Authorization permit, but a zero ttl must still
+		// veto: the permit gate runs before the ttl<=0 check and must not let a
+		// zero-lifetime entry through.
+		h := http.Header{}
+		h.Set("Cache-Control", "s-maxage=0, max-age=300")
+		_, ok := IsCacheable(authReq(), 200, h)
+		assert.False(t, ok)
+	})
+
+	t.Run("authorized request with bare must-revalidate is not cacheable", func(t *testing.T) {
+		// must-revalidate permits shared reuse of an authenticated response, but
+		// with no max-age/s-maxage the ttl is zero, so nothing is stored.
+		h := http.Header{}
+		h.Set("Cache-Control", "must-revalidate")
+		_, ok := IsCacheable(authReq(), 200, h)
+		assert.False(t, ok)
 	})
 }
 
