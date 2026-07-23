@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -619,4 +620,207 @@ func TestKeyFromRequestLongQuery(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/search?q="+strings.Repeat("x", 100), nil)
 	key := store.KeyFromRequest(r, nil)
 	assert.Contains(t, key, "POST|/search?q=")
+}
+
+// interimRecordingWriter faithfully models net/http's 1xx contract: a WriteHeader
+// with a 1xx code is an interim response that is recorded but does NOT commit,
+// so a later final WriteHeader still fixes the committed status (and a bare
+// Write commits an implicit 200). httptest.ResponseRecorder does not model
+// interim responses, so bug D needs this.
+type interimRecordingWriter struct {
+	header    http.Header
+	codes     []int // every WriteHeader code, in order
+	committed int   // the final committed status
+	wrote     bool
+	body      bytes.Buffer
+}
+
+func (w *interimRecordingWriter) Header() http.Header { return w.header }
+
+func (w *interimRecordingWriter) WriteHeader(code int) {
+	w.codes = append(w.codes, code)
+	if code >= 100 && code < 200 {
+		return // interim: relayed but does not commit
+	}
+	if w.wrote {
+		return
+	}
+	w.committed = code
+	w.wrote = true
+}
+
+func (w *interimRecordingWriter) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.committed = http.StatusOK
+		w.wrote = true
+	}
+	return w.body.Write(b)
+}
+
+// Bug D: a 1xx informational response (103 Early Hints) relayed through the
+// writer must not latch headerSent, or it swallows the real final status and
+// disables caching for the response.
+func TestCachingResponseWriter1xxIsRelayedNotLatched(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	req := httptest.NewRequest(http.MethodGet, "/moved", nil)
+	rw := &interimRecordingWriter{header: http.Header{}}
+	cw := NewCachingResponseWriter(rw, store, req)
+
+	// 103 Early Hints, exactly as httputil.ReverseProxy relays it.
+	cw.Header().Set("Link", "</style.css>; rel=preload")
+	cw.WriteHeader(http.StatusEarlyHints)
+
+	// The real response: a cacheable 301.
+	cw.Header().Set("Cache-Control", "max-age=60")
+	cw.Header().Set("Location", "/new")
+	cw.WriteHeader(http.StatusMovedPermanently)
+	_, _ = cw.Write([]byte("moved"))
+
+	cw.MarkComplete()
+	key := store.KeyFromRequest(req, nil)
+	cw.Finish(context.Background(), key)
+
+	assert.Equal(t, []int{http.StatusEarlyHints, http.StatusMovedPermanently}, rw.codes,
+		"both the 103 and the final 301 must reach the client")
+	assert.Equal(t, http.StatusMovedPermanently, rw.committed,
+		"a latched 1xx would corrupt the final status into an implicit 200")
+
+	got, ok := store.Get(context.Background(), key)
+	require.True(t, ok, "a cacheable 301 after a 103 must still be cached")
+	assert.Equal(t, http.StatusMovedPermanently, got.StatusCode)
+}
+
+// Bug A: the writer threads its request into eligibility, so a response to an
+// Authorization'd request is cached only with an explicit shared-reuse permit.
+func TestCachingResponseWriterAuthorizedResponseNeedsPermit(t *testing.T) {
+	t.Run("bare max-age is not cached", func(t *testing.T) {
+		client, _ := newTestRedis(t)
+		store := NewStore(client)
+
+		req := httptest.NewRequest(http.MethodGet, "/account", nil)
+		req.Header.Set("Authorization", "Bearer token")
+		cw := NewCachingResponseWriter(httptest.NewRecorder(), store, req)
+		cw.Header().Set("Cache-Control", "max-age=60")
+		cw.WriteHeader(http.StatusOK)
+		_, _ = cw.Write([]byte("private data"))
+
+		key := store.KeyFromRequest(req, nil)
+		cw.MarkComplete()
+		cw.Finish(context.Background(), key)
+
+		_, ok := store.Get(context.Background(), key)
+		assert.False(t, ok, "an authenticated response without a permit must not be cached")
+	})
+
+	t.Run("public is cached", func(t *testing.T) {
+		client, _ := newTestRedis(t)
+		store := NewStore(client)
+
+		req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
+		req.Header.Set("Authorization", "Bearer token")
+		cw := NewCachingResponseWriter(httptest.NewRecorder(), store, req)
+		cw.Header().Set("Cache-Control", "public, max-age=60")
+		cw.WriteHeader(http.StatusOK)
+		_, _ = cw.Write([]byte("shared data"))
+
+		key := store.KeyFromRequest(req, nil)
+		cw.MarkComplete()
+		cw.Finish(context.Background(), key)
+
+		_, ok := store.Get(context.Background(), key)
+		assert.True(t, ok, "public authorizes shared caching of an authenticated response")
+	})
+}
+
+// Bug E: a response carrying Set-Cookie is never cached, so its per-client
+// cookie cannot replay from cache to a later client.
+func TestCachingResponseWriterSetCookieNotCached(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	req := httptest.NewRequest(http.MethodGet, "/login-landing", nil)
+	rec := httptest.NewRecorder()
+	cw := NewCachingResponseWriter(rec, store, req)
+	cw.Header().Set("Cache-Control", "public, max-age=60")
+	cw.Header().Set("Set-Cookie", "session=abc123; Path=/")
+	cw.WriteHeader(http.StatusOK)
+	_, _ = cw.Write([]byte("landing"))
+
+	key := store.KeyFromRequest(req, nil)
+	cw.MarkComplete()
+	cw.Finish(context.Background(), key)
+
+	_, ok := store.Get(context.Background(), key)
+	assert.False(t, ok, "a Set-Cookie response must not be cached")
+	assert.Equal(t, "MISS", rec.Header().Get("X-Cache"))
+	// The client still receives its cookie -- the veto only stops caching.
+	assert.Equal(t, "session=abc123; Path=/", rec.Header().Get("Set-Cookie"))
+}
+
+// Bug E, store-time: a Set-Cookie delivered AFTER WriteHeader -- as an HTTP
+// trailer the reverse proxy copies into the response headers -- evades the
+// WriteHeader-time veto. Finish must re-assert the veto on the final headers, or
+// the cookie is stored under the shared key and replayed to later clients.
+func TestCachingResponseWriterLateSetCookieNotCached(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string // header key set after WriteHeader
+	}{
+		{"announced trailer (canonical key)", "Set-Cookie"},
+		{"unannounced trailer (TrailerPrefix key)", http.TrailerPrefix + "Set-Cookie"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _ := newTestRedis(t)
+			store := NewStore(client)
+
+			req := httptest.NewRequest(http.MethodGet, "/page", nil)
+			cw := NewCachingResponseWriter(httptest.NewRecorder(), store, req)
+			// At head-commit there is no Set-Cookie: the response is deemed cacheable.
+			cw.Header().Set("Cache-Control", "public, max-age=60")
+			cw.WriteHeader(http.StatusOK)
+			_, _ = cw.Write([]byte("<html>hi</html>"))
+			// The cookie arrives later, as a trailer, exactly as ReverseProxy deposits it.
+			cw.Header()[tc.key] = []string{"session=abc123; Path=/"}
+			cw.MarkComplete()
+
+			key := store.KeyFromRequest(req, nil)
+			cw.Finish(context.Background(), key)
+
+			_, ok := store.Get(context.Background(), key)
+			assert.False(t, ok, "a trailer-delivered Set-Cookie must not be stored")
+		})
+	}
+}
+
+// Bug D lower bound: a 100 Continue is also a 1xx and must be relayed without
+// latching, so the eventual final status still commits. Pins the >=100 edge of
+// the 1xx branch (a `code > 100` mutant would latch a 100 Continue).
+func TestCachingResponseWriter100ContinueDoesNotLatch(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	rw := &interimRecordingWriter{header: http.Header{}}
+	cw := NewCachingResponseWriter(rw, store, req)
+
+	cw.WriteHeader(http.StatusContinue) // 100
+
+	cw.Header().Set("Cache-Control", "max-age=60")
+	cw.WriteHeader(http.StatusOK) // final
+	_, _ = cw.Write([]byte("body"))
+
+	cw.MarkComplete()
+	key := store.KeyFromRequest(req, nil)
+	cw.Finish(context.Background(), key)
+
+	assert.Equal(t, []int{http.StatusContinue, http.StatusOK}, rw.codes,
+		"the 100 and the final 200 must both reach the client")
+	assert.Equal(t, http.StatusOK, rw.committed,
+		"a latched 100 Continue would corrupt the committed status")
+	got, ok := store.Get(context.Background(), key)
+	require.True(t, ok, "a cacheable 200 after a 100 Continue must still be cached")
+	assert.Equal(t, http.StatusOK, got.StatusCode)
 }

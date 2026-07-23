@@ -39,13 +39,26 @@ func NewCachingResponseWriter(w http.ResponseWriter, store *Store, req *http.Req
 
 // WriteHeader captures the status code and decides cache eligibility.
 func (cw *CachingResponseWriter) WriteHeader(code int) {
+	// A 1xx informational response (e.g. 103 Early Hints) precedes the final
+	// status. httputil.ReverseProxy relays it through WriteHeader via httptrace,
+	// and net/http sends it as an interim response without committing. Forward
+	// it untouched and return BEFORE latching, so the eventual final WriteHeader
+	// is the one that fixes the status and decides cacheability. Latching on a
+	// 1xx would swallow the real status (an implicit 200 would replace e.g. a
+	// 301) and, with statusCode stuck below 200, disable caching entirely for
+	// Early-Hints origins.
+	if code >= 100 && code < 200 {
+		cw.ResponseWriter.WriteHeader(code)
+		return
+	}
+
 	if cw.headerSent {
 		return
 	}
 	cw.headerSent = true
 	cw.statusCode = code
 
-	ttl, ok := IsCacheable(code, cw.Header())
+	ttl, ok := IsCacheable(cw.req, code, cw.Header())
 	if !ok {
 		cw.ResponseWriter.Header().Set("X-Cache", "MISS")
 		cw.ResponseWriter.WriteHeader(code)
@@ -159,6 +172,16 @@ func (cw *CachingResponseWriter) Finish(ctx context.Context, cacheKey string) {
 		if cw.overflow && cw.store.OnSkip != nil {
 			cw.store.OnSkip()
 		}
+		return
+	}
+
+	// The Set-Cookie veto in IsCacheable ran against the header snapshot at
+	// WriteHeader time. A per-client Set-Cookie can still arrive later as an HTTP
+	// trailer, which the reverse proxy deposits into these headers after the head
+	// was committed. Re-assert the veto here, on the final headers and before any
+	// write, so a trailer-delivered cookie can never be stored under the shared,
+	// identity-free key and replayed to a later client.
+	if responseHasSetCookie(cw.Header()) {
 		return
 	}
 
