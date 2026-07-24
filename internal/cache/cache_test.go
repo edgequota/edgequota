@@ -768,3 +768,103 @@ func TestParseSurrogateKey(t *testing.T) {
 		assert.Equal(t, []string{"api-v2"}, tags)
 	})
 }
+
+// Bug G: the cache key must use the ESCAPED path, so an encoded separator cannot
+// fold a distinct resource onto another's key. "/a%3Fx=1" (an encoded '?') and
+// the genuine "/a?x=1" are different resources the backend serves differently,
+// and the reverse proxy forwards the escaped form, so they must not share a slot.
+func TestKeyFromRequestEscapedPathAvoidsCollision(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	encoded := store.KeyFromRequest(httptest.NewRequest(http.MethodGet, "/a%3Fx=1", nil), nil)
+	genuine := store.KeyFromRequest(httptest.NewRequest(http.MethodGet, "/a?x=1", nil), nil)
+
+	assert.NotEqual(t, encoded, genuine, "an encoded '?' in the path must not collide with a genuine query")
+	assert.Equal(t, "GET|/a%3Fx=1", encoded)
+	assert.Equal(t, "GET|/a?x=1", genuine)
+}
+
+// Bug J: a tag set must expire, or it outlives every entry it indexes and grows
+// without bound as new keys are SAdd-ed and never removed.
+func TestStoreTagSetExpires(t *testing.T) {
+	client, mr := newTestRedis(t)
+	store := NewStore(client)
+
+	entry := &Entry{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"text/plain"}},
+		Body:       []byte("x"),
+		Tags:       []string{"tag-a"},
+		CreatedAt:  time.Now(),
+	}
+	store.Set(context.Background(), "k1", entry, 60*time.Second)
+
+	ttl := mr.TTL(tagPrefix + "tag-a")
+	assert.Greater(t, ttl, time.Duration(0), "the tag set must have a bounded TTL, not persist forever")
+	assert.LessOrEqual(t, ttl, 60*time.Second, "the tag set TTL must not exceed the entry TTL it was refreshed with")
+}
+
+// Bug J (grow-only): the tag set's TTL must equal the LONGEST-lived member's,
+// regardless of write order, so the set never expires while a longer-lived member
+// is still cached (which would make purge-by-tag silently miss it). This is
+// order-robust on purpose: long-then-short catches a shrinking/plain EXPIRE and a
+// GT-only (no seed) impl; short-then-long catches an NX-only (no raise) impl.
+func TestStoreTagSetTTLIsGrowOnly(t *testing.T) {
+	client, mr := newTestRedis(t)
+	store := NewStore(client)
+	ctx := context.Background()
+
+	mkEntry := func(body, tag string) *Entry {
+		return &Entry{StatusCode: 200, Headers: http.Header{}, Body: []byte(body), Tags: []string{tag}, CreatedAt: time.Now()}
+	}
+	const long, short = 3600 * time.Second, 30 * time.Second
+
+	// tag "t-ls": long written first, then short (a plain/shrinking EXPIRE drops to short).
+	store.Set(ctx, "kLA", mkEntry("a", "t-ls"), long)
+	store.Set(ctx, "kLB", mkEntry("b", "t-ls"), short)
+	// tag "t-sl": short first, then long (an NX-only impl leaves it at short).
+	store.Set(ctx, "kSB", mkEntry("b", "t-sl"), short)
+	store.Set(ctx, "kSA", mkEntry("a", "t-sl"), long)
+
+	assert.Greater(t, mr.TTL(tagPrefix+"t-ls"), 3000*time.Second, "long-then-short must keep the long TTL")
+	assert.Greater(t, mr.TTL(tagPrefix+"t-sl"), 3000*time.Second, "short-then-long must raise to the long TTL")
+
+	// Past the short TTL both long entries + their tag sets must survive, so
+	// purge-by-tag still reaches them.
+	mr.FastForward(31 * time.Second)
+	if _, ok := store.Get(ctx, "kLA"); !ok {
+		t.Fatal("precondition: long-lived kLA must still be cached")
+	}
+	assert.GreaterOrEqual(t, store.DeleteByTag(ctx, "t-ls"), 1, "purge-by-tag must still evict the long entry (long-first)")
+	assert.GreaterOrEqual(t, store.DeleteByTag(ctx, "t-sl"), 1, "purge-by-tag must still evict the long entry (short-first)")
+}
+
+// Bug G (purge/request key parity): KeyFromURL must derive the SAME base key as
+// KeyFromRequest for the same on-the-wire target, so an admin purge-by-URL hits
+// the entry a request cached. url.Parse and url.ParseRequestURI disagree on
+// "//host/path" (authority-stripping) and a literal "#" (fragment); the server
+// uses ParseRequestURI, so KeyFromURL must too.
+func TestKeyFromURLMatchesKeyFromRequest(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	for _, target := range []string{
+		"/static/app.css?v=2",
+		"/a%3Fx=1", // encoded '?'
+		"/a?x=1",
+		"//foo/bar",  // network-path reference: url.Parse would strip "//foo"
+		"///foo/bar", //
+		"/a?x=1#y=2", // literal '#': url.Parse would drop "#y=2"
+		"/caf%C3%A9", // encoded UTF-8
+	} {
+		reqKey := store.KeyFromRequest(httptest.NewRequest(http.MethodGet, target, nil), nil)
+		urlKey, err := store.KeyFromURL("GET", target)
+		require.NoError(t, err, "target %q", target)
+		assert.Equal(t, reqKey, urlKey, "purge-by-URL key must equal the cached key for %q", target)
+	}
+
+	// A rootless/relative target is never a stored key: error, not a silent miss.
+	_, err := store.KeyFromURL("GET", "not-a-request-target")
+	assert.Error(t, err)
+}

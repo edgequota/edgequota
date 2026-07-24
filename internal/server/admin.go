@@ -33,7 +33,14 @@ func (h *adminHandler) PurgeResponseCacheURL(ctx context.Context, req adminv1.Pu
 	if req.Body.Method != nil {
 		method = *req.Body.Method
 	}
-	key := method + "|" + req.Body.Url
+	// Derive the key exactly as the request that cached the entry did (escaped
+	// path), so a purge matches what is stored. A URL that will not parse can
+	// never be a stored key, so treat it as not found rather than a server error.
+	key, err := store.KeyFromURL(method, req.Body.Url)
+	if err != nil {
+		h.logger.Debug("admin: cache purge, unparsable url", "url", req.Body.Url, "error", err)
+		return adminv1.PurgeResponseCacheURL404Response{}, nil
+	}
 	if store.Delete(ctx, key) {
 		h.logger.Debug("admin: cache purge", "key", key)
 		return adminv1.PurgeResponseCacheURL204Response{}, nil

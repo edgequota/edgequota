@@ -452,6 +452,29 @@ func TestCachePurgeByURLDefaultMethod(t *testing.T) {
 	assert.False(t, ok, "entry should be deleted when method defaults to GET")
 }
 
+// Bug G (purge consistency): the cache key uses EscapedPath, so purge-by-URL must
+// derive its key the same way — not from the verbatim URL — or an entry cached
+// under a normalized/escaped path can never be purged.
+func TestCachePurgeByURLDerivesEscapedKey(t *testing.T) {
+	store := newTestCacheStore(t)
+
+	// A request to "/a b" caches under the escaped key "GET|/a%20b".
+	key, err := store.KeyFromURL("GET", "/a b")
+	require.NoError(t, err)
+	require.Equal(t, "GET|/a%20b", key)
+	store.Set(context.Background(), key, &cache.Entry{StatusCode: 200, Body: []byte("x")}, time.Minute)
+
+	mux := newTestAdminMux(t, store, &stubAuthPurger{})
+	method := "GET"
+	// Purge with the un-normalized readable form; the handler must derive the
+	// same escaped key (a verbatim "GET|/a b" would miss the entry).
+	w := postJSON(mux, "/v1/cache/purge", adminv1.PurgeURLRequest{Url: "/a b", Method: &method})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	_, ok := store.Get(context.Background(), key)
+	assert.False(t, ok, "purge-by-URL must derive the same escaped key the request cached under")
+}
+
 func TestCachePurgeNotFound(t *testing.T) {
 	store := newTestCacheStore(t)
 	mux := newTestAdminMux(t, store, &stubAuthPurger{})
