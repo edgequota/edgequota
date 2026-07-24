@@ -19,8 +19,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgequota/edgequota/internal/cache"
@@ -154,15 +156,15 @@ func WithDenyPrivateNetworks() Option {
 // from cache on subsequent matching requests.
 func WithCache(store *cache.Store) Option {
 	return func(p *Proxy) {
-		p.cache = store
+		p.cache.Store(store)
 	}
 }
 
-// SetCache sets the response cache store. Thread-safe for use during
-// hot-reload, but callers should ensure no in-flight requests reference
-// a stale store.
+// SetCache sets the response cache store. Safe to call concurrently with
+// in-flight requests: the store is swapped atomically, and each request loads it
+// once, so a hot-reload swap is seen whole (never a torn pointer) by ServeHTTP.
 func (p *Proxy) SetCache(store *cache.Store) {
-	p.cache = store
+	p.cache.Store(store)
 }
 
 func WithAllowedWSOrigins(origins []string) Option {
@@ -300,12 +302,12 @@ type Proxy struct {
 	backendTLSInsecure  bool
 	denyPrivateNetworks bool // re-validate IPs at dial time (DNS rebinding protection)
 	wsDialTimeout       time.Duration
-	wsLimiter           *WSLimiter          // nil when no per-key WS limit is configured.
-	maxRequestBodySize  int64               // 0 = unlimited
-	maxWSTransferBytes  int64               // 0 = unlimited per-direction
-	wsIdleTimeout       time.Duration       // 0 = no idle timeout
-	allowedWSOrigins    map[string]struct{} // nil = allow all origins
-	cache               *cache.Store        // nil when response caching is disabled
+	wsLimiter           *WSLimiter                  // nil when no per-key WS limit is configured.
+	maxRequestBodySize  int64                       // 0 = unlimited
+	maxWSTransferBytes  int64                       // 0 = unlimited per-direction
+	wsIdleTimeout       time.Duration               // 0 = no idle timeout
+	allowedWSOrigins    map[string]struct{}         // nil = allow all origins
+	cache               atomic.Pointer[cache.Store] // nil when response caching is disabled; swapped on hot-reload
 
 	// inflight tracks non-WebSocket request lifetime so Close can wait for
 	// drain. WebSocket sessions are excluded — they hijack the connection
@@ -754,11 +756,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.cache != nil && r.Method == http.MethodGet && !IsSSE(r) {
-		if p.serveCached(w, r) {
+	if store := p.cache.Load(); store != nil && r.Method == http.MethodGet && !IsSSE(r) {
+		if p.serveCached(w, r, store) {
 			return
 		}
-		p.proxyWithCache(w, r)
+		p.proxyWithCache(w, r, store)
 		return
 	}
 
@@ -829,11 +831,11 @@ func (p *Proxy) Close(ctx context.Context) error {
 // ReverseProxy panic with http.ErrAbortHandler, and the lookup still has to be
 // counted; MarkComplete runs only on a normal return, so Finish can tell a whole
 // response from a fragment and decline to cache the latter.
-func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
-	cacheKey := p.cache.KeyFromRequest(r, nil)
+func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request, store *cache.Store) {
+	cacheKey := store.KeyFromRequest(r, nil)
 	p.logger.Debug("response cache lookup not served from cache", "key", cacheKey)
 
-	cw := cache.NewCachingResponseWriter(w, p.cache, r)
+	cw := cache.NewCachingResponseWriter(w, store, r)
 	defer cw.Finish(r.Context(), cacheKey)
 
 	p.httpProxy.ServeHTTP(cw, r)
@@ -841,11 +843,13 @@ func (p *Proxy) proxyWithCache(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveCached checks the response cache and serves a cached entry if available.
-// Returns true if the response was served from cache, false on miss.
-func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request) bool {
-	cacheKey := p.cache.KeyFromRequest(r, nil)
+// Returns true if the response was served from cache, false on miss. The store
+// is passed in (loaded once by ServeHTTP) so a concurrent hot-reload swap cannot
+// change it mid-request.
+func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request, store *cache.Store) bool {
+	cacheKey := store.KeyFromRequest(r, nil)
 
-	entry, ok := p.cache.Get(r.Context(), cacheKey)
+	entry, ok := store.Get(r.Context(), cacheKey)
 	if !ok {
 		return false
 	}
@@ -853,17 +857,17 @@ func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request) bool {
 	// If the entry has a Vary header, recompute the cache key with
 	// the Vary headers and re-check.
 	if len(entry.Vary) > 0 {
-		varyKey := p.cache.KeyFromRequest(r, entry.Vary)
+		varyKey := store.KeyFromRequest(r, entry.Vary)
 		if varyKey != cacheKey {
-			entry, ok = p.cache.Get(r.Context(), varyKey)
+			entry, ok = store.Get(r.Context(), varyKey)
 			if !ok {
 				return false
 			}
 		}
 	}
 
-	if p.cache.OnHit != nil {
-		p.cache.OnHit()
+	if store.OnHit != nil {
+		store.OnHit()
 	}
 	p.logger.Debug("response cache hit", "key", cacheKey)
 
@@ -872,6 +876,27 @@ func (p *Proxy) serveCached(w http.ResponseWriter, r *http.Request) bool {
 			w.Header().Add(k, v)
 		}
 	}
+	// Age (RFC 9111 §4.2.3): current_age is the age the entry already carried
+	// upstream when it was stored (its own Age header, if any) plus how long we
+	// have held it since. CreatedAt was stored but never surfaced, and any
+	// upstream Age was dropped by the Set below, so hits understated true age —
+	// which matters when this response was itself served from an upstream cache.
+	// This approximates corrected_initial_age with the stored Age alone, omitting
+	// the Date-based apparent_age (the request→response transit delay), which is
+	// sub-second for a direct backend. The Set replaces the upstream Age copied in
+	// the header loop above. Clamp each component (skew / malformed / negative
+	// values) and cap the total at 2^31 per RFC 9111 §5.1, which also prevents any
+	// integer overflow.
+	const maxAge = 2147483648 // 2^31
+	upstreamAge := 0
+	if a, err := strconv.Atoi(strings.TrimSpace(entry.Headers.Get("Age"))); err == nil && a > 0 {
+		upstreamAge = min(a, maxAge)
+	}
+	resident := int(time.Since(entry.CreatedAt).Seconds())
+	if resident < 0 {
+		resident = 0
+	}
+	w.Header().Set("Age", strconv.Itoa(min(upstreamAge+resident, maxAge)))
 	w.Header().Set("X-Cache", "HIT")
 	w.WriteHeader(entry.StatusCode)
 	_, _ = w.Write(entry.Body)

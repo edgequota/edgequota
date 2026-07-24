@@ -87,21 +87,21 @@ Responses that exceed this limit are served directly to the client. The `Content
 
 EdgeQuota provides two invalidation mechanisms via the admin API.
 
-### Purge by URL/Key
+### Purge by URL
 
 ```
 POST /v1/cache/purge
 Content-Type: application/json
 
 {
-  "keys": [
-    "GET|/static/app.css?v=2||",
-    "GET|/api/v1/config||"
-  ]
+  "url": "/static/app.css?v=2",
+  "method": "GET"
 }
 ```
 
-Removes specific cache entries by their exact cache key.
+Removes the single cache entry for the given request target. `method` is optional and defaults to `GET`. The `url` is matched as the **on-the-wire (escaped) request target** — the same form the proxy forwards and keys the cache under — so a percent-encoded path (e.g. `/a%3Fx=1`) must be given in that escaped form, not its decoded equivalent. EdgeQuota derives the key from `url` exactly as it does for an incoming request, so a normalized/escaped path is matched consistently.
+
+For a resource that **varies** (the response carried a `Vary` header), purge by URL removes the base entry so it stops being served, but does not eagerly evict every stored variant body. To reliably invalidate all variants of a resource, purge by tag with a `Surrogate-Key`.
 
 ### Purge by Tag
 

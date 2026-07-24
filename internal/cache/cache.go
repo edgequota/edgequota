@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,20 @@ const (
 	keyPrefix = "eq:cache:"
 	tagPrefix = "eq:tags:"
 )
+
+// growOnlyExpireLua bounds a tag set's lifetime without ever shrinking it: it
+// sets the TTL when the key has none (PTTL < 0) and otherwise only raises it
+// (new > current). One atomic round trip, and portable across Redis versions —
+// EXPIRE's NX/GT flags need Redis 7, but PTTL/PEXPIRE are ancient.
+// Keys: KEYS[1] = tag set key. Args: ARGV[1] = ttl in milliseconds.
+const growOnlyExpireLua = `
+local cur = redis.call('PTTL', KEYS[1])
+local ms = tonumber(ARGV[1])
+if cur < 0 or ms > cur then
+  redis.call('PEXPIRE', KEYS[1], ms)
+end
+return 1
+`
 
 // Entry is a cached HTTP response. The backend's validators (ETag,
 // Last-Modified) need no dedicated fields: they travel in Headers and are
@@ -228,10 +243,26 @@ func (s *Store) write(ctx context.Context, key string, entry *Entry, ttl time.Du
 	// The entry is cached either way; a failed tag index only costs the entry
 	// its tag-based purge, so it must not discard the store.
 	for _, tag := range entry.Tags {
-		tagErr := s.client.SAdd(ctx, tagPrefix+tag, key).Err()
+		tagKey := tagPrefix + tag
+		tagErr := s.client.SAdd(ctx, tagKey, key).Err()
 		s.noteRedis(tagErr)
 		if tagErr != nil {
 			s.logger.Debug("cache: tag index error", "key", key, "tag", tag, "error", tagErr)
+			continue
+		}
+		// Bound the tag set's lifetime, GROW-ONLY. Without a TTL the set outlives
+		// every entry it indexes and grows forever (members are added but never
+		// removed). But the TTL must never shrink: entries sharing a tag can have
+		// different TTLs, and if a shorter-lived one shortened the set, the set
+		// would expire while a longer-lived member is still cached, silently
+		// dropping that member from tag-based purge. growOnlyExpireLua sets the
+		// TTL only if the set has none and otherwise only raises it, atomically
+		// in one round trip, so TTL == the longest-lived member's. A failed
+		// expire only risks the set living longer, so it must not discard the store.
+		expErr := s.client.Eval(ctx, growOnlyExpireLua, []string{tagKey}, ttl.Milliseconds()).Err()
+		s.noteRedis(expErr)
+		if expErr != nil {
+			s.logger.Debug("cache: tag expire error", "key", key, "tag", tag, "error", expErr)
 		}
 	}
 
@@ -279,34 +310,62 @@ func (s *Store) DeleteByTag(ctx context.Context, tag string) int {
 	return int(n)
 }
 
-// KeyFromRequest computes a deterministic cache key from an HTTP request.
-// The base key is always method|path?query. When varyHeaders is non-empty,
-// the listed request header values are appended to the key. Without Vary
-// headers, the key is just method|path?query — request headers do not
-// participate unless the origin explicitly lists them via Vary.
-func (s *Store) KeyFromRequest(r *http.Request, varyHeaders []string) string {
+// baseKey is the identity-free part of a cache key: method|EscapedPath?RawQuery.
+// The path comes from EscapedPath, not the decoded Path: the reverse proxy
+// forwards the escaped form, so distinct on-the-wire targets that decode to the
+// same Path must not share a slot (an encoded "?" in "/a%3Fx=1" decodes to Path
+// "/a?x=1", colliding with the genuine "/a?x=1"). KeyFromRequest and KeyFromURL
+// both derive it here, so an admin purge-by-URL keys identically to the request
+// that cached the entry.
+func baseKey(method string, u *url.URL) string {
 	var b strings.Builder
-	b.WriteString(r.Method)
+	b.WriteString(method)
 	b.WriteByte('|')
-	b.WriteString(r.URL.Path)
-	if r.URL.RawQuery != "" {
+	b.WriteString(u.EscapedPath())
+	if u.RawQuery != "" {
 		b.WriteByte('?')
-		b.WriteString(r.URL.RawQuery)
+		b.WriteString(u.RawQuery)
 	}
-
-	if len(varyHeaders) > 0 {
-		sorted := make([]string, len(varyHeaders))
-		copy(sorted, varyHeaders)
-		sort.Strings(sorted)
-		for _, h := range sorted {
-			b.WriteByte('|')
-			b.WriteString(h)
-			b.WriteByte('=')
-			b.WriteString(r.Header.Get(h))
-		}
-	}
-
 	return b.String()
+}
+
+// KeyFromRequest computes a deterministic cache key from an HTTP request. The
+// base key is method|EscapedPath?query (see baseKey); when varyHeaders is
+// non-empty the listed request header values are appended, so a Vary'd response
+// keys separately per variant. Without Vary headers the key is just the base key
+// — request headers do not participate unless the origin lists them via Vary.
+func (s *Store) KeyFromRequest(r *http.Request, varyHeaders []string) string {
+	key := baseKey(r.Method, r.URL)
+	if len(varyHeaders) == 0 {
+		return key
+	}
+	var b strings.Builder
+	b.WriteString(key)
+	sorted := make([]string, len(varyHeaders))
+	copy(sorted, varyHeaders)
+	sort.Strings(sorted)
+	for _, h := range sorted {
+		b.WriteByte('|')
+		b.WriteString(h)
+		b.WriteByte('=')
+		b.WriteString(r.Header.Get(h))
+	}
+	return b.String()
+}
+
+// KeyFromURL computes the base cache key (no Vary) for a method and request
+// target, deriving it exactly as KeyFromRequest so an admin purge-by-URL matches
+// the key a request produced. It uses url.ParseRequestURI — the same parser the
+// net/http server applies to the request-target — because url.Parse disagrees on
+// exactly the inputs this must unify: a "//host/path" target (url.Parse strips
+// "//host" as an authority) and a literal "#" (url.Parse drops it as a fragment).
+// rawURL must be the on-the-wire (escaped) target the reverse proxy forwards.
+func (s *Store) KeyFromURL(method, rawURL string) (string, error) {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return baseKey(method, u), nil
 }
 
 // CacheControl holds the response Cache-Control directives edgequota acts on.

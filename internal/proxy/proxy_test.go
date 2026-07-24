@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -899,4 +901,179 @@ func TestProxyCacheDisabled(t *testing.T) {
 	}
 
 	assert.Equal(t, int64(2), backendHits.Load(), "without WithCache both requests must hit the backend")
+}
+
+// Bug V: a cache hit must carry an Age header derived from the entry's CreatedAt,
+// so clients and downstream caches can tell a fresh entry from a nearly-stale one.
+func TestProxyCacheHitSetsAgeHeader(t *testing.T) {
+	var backendHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	store := newTestCacheStore(t)
+	// Prime a cached entry created 5s ago, so Age must be a non-zero elapsed time.
+	primeReq := httptest.NewRequest(http.MethodGet, "/aged", nil)
+	store.Set(context.Background(), store.KeyFromRequest(primeReq, nil), &cache.Entry{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": {"text/plain"}},
+		Body:       []byte("hi"),
+		CreatedAt:  time.Now().Add(-5 * time.Second),
+	}, 60*time.Second)
+
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/aged", nil))
+
+	assert.Equal(t, "HIT", rr.Header().Get("X-Cache"))
+	assert.Zero(t, backendHits.Load(), "a cache hit must not call the backend")
+	age, err := strconv.Atoi(rr.Header().Get("Age"))
+	require.NoError(t, err, "a cache hit must carry a numeric Age header")
+	assert.GreaterOrEqual(t, age, 4, "Age must reflect elapsed time since the entry was created")
+	assert.LessOrEqual(t, age, 30)
+}
+
+// Bug V (RFC 9111 §4.2.3): Age must add the age the entry already had upstream
+// (its stored Age header) to the resident time, and emit exactly ONE Age header
+// (the upstream copy is replaced, not appended).
+func TestProxyCacheHitAgeIncludesUpstreamAge(t *testing.T) {
+	store := newTestCacheStore(t)
+	req := httptest.NewRequest(http.MethodGet, "/aged", nil)
+	store.Set(context.Background(), store.KeyFromRequest(req, nil), &cache.Entry{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Age": {"100"}}, // already 100s old upstream
+		Body:       []byte("hi"),
+		CreatedAt:  time.Now().Add(-5 * time.Second),
+	}, 600*time.Second)
+
+	p, err := New("http://127.0.0.1:1", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/aged", nil))
+
+	require.Len(t, rr.Header().Values("Age"), 1, "must emit exactly one Age header")
+	age, err := strconv.Atoi(rr.Header().Get("Age"))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, age, 104, "Age must include the 100s upstream age plus ~5s resident")
+	assert.LessOrEqual(t, age, 130)
+}
+
+// Bug V: a future CreatedAt (clock skew) must clamp resident time to 0, never go
+// negative.
+func TestProxyCacheHitAgeClampedOnClockSkew(t *testing.T) {
+	store := newTestCacheStore(t)
+	req := httptest.NewRequest(http.MethodGet, "/skew", nil)
+	store.Set(context.Background(), store.KeyFromRequest(req, nil), &cache.Entry{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{},
+		Body:       []byte("hi"),
+		CreatedAt:  time.Now().Add(30 * time.Second), // in the future
+	}, 600*time.Second)
+
+	p, err := New("http://127.0.0.1:1", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/skew", nil))
+
+	assert.Equal(t, "0", rr.Header().Get("Age"), "a future CreatedAt must clamp to Age 0")
+}
+
+// Bug V (C4): an absurd/malicious upstream Age must not overflow to a negative or
+// bogus value; RFC 9111 §5.1 caps it at 2^31.
+func TestProxyCacheHitAgeCappedOnOverflow(t *testing.T) {
+	store := newTestCacheStore(t)
+	req := httptest.NewRequest(http.MethodGet, "/huge", nil)
+	store.Set(context.Background(), store.KeyFromRequest(req, nil), &cache.Entry{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Age": {"9223372036854775807"}}, // max int64
+		Body:       []byte("hi"),
+		CreatedAt:  time.Now().Add(-5 * time.Second),
+	}, 600*time.Second)
+
+	p, err := New("http://127.0.0.1:1", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/huge", nil))
+
+	assert.Equal(t, "2147483648", rr.Header().Get("Age"), "Age must be capped at 2^31, never overflow")
+}
+
+// Bug V (C6): a negative upstream Age (malformed) must be clamped to 0, so the
+// emitted Age is just the resident time.
+func TestProxyCacheHitAgeClampsNegativeUpstream(t *testing.T) {
+	store := newTestCacheStore(t)
+	req := httptest.NewRequest(http.MethodGet, "/neg", nil)
+	store.Set(context.Background(), store.KeyFromRequest(req, nil), &cache.Entry{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Age": {"-100"}},
+		Body:       []byte("hi"),
+		CreatedAt:  time.Now().Add(-5 * time.Second),
+	}, 600*time.Second)
+
+	p, err := New("http://127.0.0.1:1", 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(store))
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/neg", nil))
+
+	age, err := strconv.Atoi(rr.Header().Get("Age"))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, age, 4, "a negative upstream Age must be dropped, leaving resident time")
+	assert.LessOrEqual(t, age, 30, "a negative upstream Age must not be added")
+}
+
+// Bug N: SetCache is documented thread-safe but was an unsynchronized field write
+// read concurrently by ServeHTTP. Swapping the store under concurrent traffic
+// must be race-free; under `go test -race` a plain field trips the detector while
+// atomic.Pointer's Store/Load is clean. The pass/fail signal is the race report.
+func TestProxyCacheHotReloadIsRaceFree(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer backend.Close()
+
+	storeA := newTestCacheStore(t)
+	storeB := newTestCacheStore(t)
+	p, err := New(backend.URL, 30*time.Second, 100, 90*time.Second, config.TransportConfig{}, testLogger(), WithCache(storeA))
+	require.NoError(t, err)
+
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	stop := make(chan struct{})
+	var swapper sync.WaitGroup
+	swapper.Add(1)
+	go func() {
+		defer swapper.Done()
+		stores := []*cache.Store{storeA, storeB}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				p.SetCache(stores[i%2]) // concurrent hot-reload swap
+			}
+		}
+	}()
+
+	var reqs sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		reqs.Add(1)
+		go func() {
+			defer reqs.Done()
+			resp, err := http.Get(front.URL + "/x")
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	reqs.Wait()
+	close(stop)
+	swapper.Wait()
 }
