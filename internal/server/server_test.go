@@ -66,6 +66,61 @@ func TestUnderHTTPServerContext(t *testing.T) {
 	})
 }
 
+// TestBuildMainServerWiresHTTP3AbortContext proves buildMainServer actually
+// wraps the HTTP/3 handler with underHTTPServerContext -- the wiring the unit
+// test above cannot see. quic-go never sets http.ServerContextKey, so without
+// the wrap httputil.ReverseProxy treats a mid-body upstream failure as a clean
+// finish and caches the truncated fragment for the full TTL. We build a real
+// HTTP/3-enabled server, then drive its h3 handler with a request that -- like
+// every quic-go request -- carries no http.ServerContextKey, against a backend
+// that dies mid-body. The fragment must never reach the cache. Delete the wrap
+// in buildMainServer and this fails: the fragment gets stored.
+func TestBuildMainServerWiresHTTP3AbortContext(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Length", "1000") // promises far more than it sends
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok)
+		conn, _, err := hj.Hijack()
+		require.NoError(t, err)
+		conn.Close()
+	}))
+	defer backend.Close()
+
+	mr := miniredis.RunT(t)
+	cfg := config.Defaults()
+	cfg.RateLimit.Static.BackendURL = backend.URL
+	cfg.RateLimit.Static.Average = 0 // disable limiting so the request reaches the proxy
+	cfg.Redis.Endpoints = []string{mr.Addr()}
+	cfg.Cache.Enabled = true
+	cfg.Server.TLS.HTTP3Enabled = true
+
+	srv, err := New(cfg, testLogger(), "test")
+	require.NoError(t, err)
+	defer srv.chain.Close()
+	require.NotNil(t, srv.http3Server, "HTTP/3 enabled must build an h3 server")
+
+	store := srv.chain.ResponseCache()
+	require.NotNil(t, store, "cache must be enabled for this test to observe a store")
+
+	// httptest.NewRequest roots the request at context.Background(), so it has no
+	// http.ServerContextKey -- exactly the shape quic-go hands the handler.
+	req := httptest.NewRequest(http.MethodGet, "/aborted", nil)
+	func() {
+		// With the wrap, ReverseProxy aborts the truncated body with
+		// http.ErrAbortHandler; quic-go recovers that panic, so we do too.
+		defer func() { _ = recover() }()
+		srv.http3Server.Handler.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	_, ok := store.Get(context.Background(), store.KeyFromRequest(req, nil))
+	assert.False(t, ok, "a truncated HTTP/3 response must abort and never be cached; "+
+		"this holds only because buildMainServer wraps the h3 handler with underHTTPServerContext")
+}
+
 func TestSkipStreaming(t *testing.T) {
 	newReq := func(method string, headers map[string]string) *http.Request {
 		r := httptest.NewRequest(method, "/", nil)

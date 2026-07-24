@@ -20,21 +20,13 @@ EdgeQuota derives a cache key from the request's stable attributes:
 
 Headers in the key are sorted alphabetically for determinism.
 
-### Ephemeral Header Stripping
+`<PATH>` is the request's **URL-escaped** path — the exact form EdgeQuota forwards to the origin — so two requests that decode to the same path but were sent differently (e.g. `/a%3Fb` versus `/a?b`) never collide on one cache entry.
 
-Per-request ephemeral headers are **automatically stripped** from the cache key. No user configuration is needed. The built-in ephemeral list covers:
+### Which request headers participate
 
-| Category | Headers stripped |
-|----------|-----------------|
-| **W3C / OpenTelemetry** | `Traceparent`, `Tracestate` |
-| **Zipkin / B3** | `X-B3-Traceid`, `X-B3-Spanid`, `X-B3-Parentspanid`, `X-B3-Sampled`, `X-B3-Flags`, `B3` |
-| **Jaeger** | `Uber-Trace-Id` |
-| **AWS X-Ray** | `X-Amzn-Trace-Id` |
-| **Google Cloud Trace** | `X-Cloud-Trace-Context` |
-| **Request / correlation IDs** | `X-Request-Id`, `X-Correlation-Id`, `Request-Id`, `X-Req-Id` |
-| **Proxy / forwarding** | `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Real-Ip`, `Forwarded`, `Via`, `True-Client-Ip` |
-| **Envoy / service mesh** | `X-Envoy-Attempt-Count`, `X-Envoy-External-Address`, `X-Envoy-Decorator-Operation`, `X-Envoy-Upstream-Service-Time` |
-| **CDN / edge** | `X-Amz-Cf-Id`, `Cf-Ray`, `Cdn-Loop`, `X-Request-Start`, `X-Queue-Start` |
+The response cache does **not** strip, normalize, or filter request headers. A request header contributes to the key **only** when the origin's `Vary` response header names it (see below) — nothing is added or removed implicitly.
+
+> This differs from EdgeQuota's **auth** and **external rate-limit** caches, whose keys are derived broadly from the request's headers (after any configured header filtering) and therefore exclude a built-in list of per-request ephemeral headers (trace IDs, `X-Request-Id`, `X-Forwarded-*`, and similar). The response cache needs no such exclusion list: its key is driven by the *response's* `Vary`, so only headers the origin explicitly varies on ever take part.
 
 ### Vary Header Support
 

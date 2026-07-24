@@ -815,11 +815,11 @@ module "mockextrl" {
 
 # --- dynamic-backend: Tenant-aware backend URL via external RL service ---
 module "eq_dynamic_backend" {
-  source    = "./modules/edgequota"
-  namespace = local.ns
-  scenario  = "dynamic-backend"
-  image     = var.edgequota_image
-  node_port = 30116
+  source      = "./modules/edgequota"
+  namespace   = local.ns
+  scenario    = "dynamic-backend"
+  image       = var.edgequota_image
+  node_port   = 30116
   config_yaml = <<-YAML
     server:
       address: ":8080"
@@ -997,6 +997,85 @@ module "eq_cache_extrl" {
   YAML
 
   depends_on = [module.redis_single, module.whoami, module.mockextrl]
+}
+
+# --- cache-h3: Response cache + HTTP/3 together. This is the exact intersection
+# that produced the H3 cache-poisoning bug (a truncated body buffered under the
+# full response's key); it exercises the underHTTPServerContext wiring end-to-end
+# so the fix cannot silently regress. TLS/QUIC on the client side, plain backend. ---
+module "eq_cache_h3" {
+  source    = "./modules/edgequota"
+  namespace = local.ns
+  scenario  = "cache-h3"
+  image     = var.edgequota_image
+  node_port = 30121
+
+  tls_secret_name = module.tls_certs.secret_name
+
+  extra_ports = [
+    {
+      name        = "tls"
+      port        = 8443
+      target_port = 8443
+      protocol    = "TCP"
+      node_port   = 30220
+    },
+    {
+      name        = "quic"
+      port        = 8443
+      target_port = 8443
+      protocol    = "UDP"
+      node_port   = 30220
+    },
+  ]
+
+  config_yaml = <<-YAML
+    server:
+      address: ":8443"
+      read_timeout: "30s"
+      write_timeout: "60s"
+      idle_timeout: "120s"
+      drain_timeout: "5s"
+      tls:
+        enabled: true
+        cert_file: "/etc/edgequota/tls/tls.crt"
+        key_file: "/etc/edgequota/tls/tls.key"
+        http3_enabled: true
+    admin:
+      address: ":9090"
+    backend:
+      timeout: "10s"
+      max_idle_conns: 50
+      idle_conn_timeout: "60s"
+      url_policy:
+        deny_private_networks: false
+    cache:
+      enabled: true
+      max_body_size: "1MB"
+    rate_limit:
+      failure_policy: "passThrough"
+      key_prefix: "cache-h3"
+      static:
+        backend_url: "${local.testbackend_url}"
+        average: 0
+        burst: 1
+        period: "1s"
+        key_strategy:
+          type: "clientIP"
+    redis:
+      endpoints:
+        - "${local.redis_single_ep}"
+      mode: "single"
+      pool_size: 5
+      dial_timeout: "3s"
+      read_timeout: "2s"
+      write_timeout: "2s"
+    logging:
+      level: "debug"
+      format: "json"
+  YAML
+
+  depends_on = [module.redis_single, module.testbackend, module.tls_certs]
 }
 
 # --- mtls: Dual-listener mTLS test (TLS + mTLS on separate ports) ---

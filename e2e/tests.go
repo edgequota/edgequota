@@ -71,6 +71,7 @@ var scenarioNodePorts = map[string]int{
 	"dynamic-backend": 30116,
 	"cache-basic":     30117,
 	"cache-extrl":     30118,
+	"cache-h3":        30220, // TLS/QUIC NodePort — response cache + HTTP/3 together
 	"mtls":            30219, // mTLS listener (RequireAndVerifyClientCert)
 	"mtls-tls":        30119, // Normal TLS listener of the mtls scenario (no client cert)
 }
@@ -92,7 +93,7 @@ func runAllTests() bool {
 	for scenario, port := range scenarioNodePorts {
 		scheme := "http"
 		switch scenario {
-		case "protocol-h3", "mtls", "mtls-tls":
+		case "protocol-h3", "cache-h3", "mtls", "mtls-tls":
 			scheme = "https"
 		}
 		baseURLs[scenario] = fmt.Sprintf("%s://%s:%d", scheme, minikubeIP, port)
@@ -311,6 +312,9 @@ func allTestCases(urls, adminURLs map[string]string) []testCase {
 		}},
 		{"Cache — external RL response not cached without headers", "cache-extrl", func() testResult {
 			return testExtRLNoCache(urls["cache-extrl"])
+		}},
+		{"Cache — static asset cached on second GET over HTTP/3", "cache-h3", func() testResult {
+			return testCacheStaticAssetHTTP3(urls["cache-h3"])
 		}},
 	}
 }
@@ -1408,6 +1412,71 @@ func testCacheStaticAsset(base string) testResult {
 	}
 
 	return pass(name, "second GET served from cache (call counter=%.0f unchanged)", call1)
+}
+
+// testCacheStaticAssetHTTP3 exercises the response cache and HTTP/3 together --
+// the exact intersection that produced the H3 cache-poisoning bug (a truncated
+// body buffered under the full response's key). A cacheable static asset fetched
+// twice over QUIC must be served from cache on the second fetch (same backend
+// call counter), proving the H3 path caches the whole response, not a fragment.
+func testCacheStaticAssetHTTP3(base string) testResult {
+	const name = "cache-static-h3"
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // e2e self-signed certs
+	h3Client := &http.Client{
+		Transport: &http3.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   10 * time.Second,
+	}
+
+	// Target a key only this scenario populates. The cache-basic instance shares
+	// the same Redis and backend, so a bare "/cache/static" would already be
+	// cached under "GET|/cache/static" — this test's first GET would then be a
+	// cross-instance HIT that never drives the H3 -> backend -> store path it
+	// exists to guard. The query makes the key distinct (baseKey includes
+	// RawQuery); the backend ignores the query and still returns a cacheable
+	// body, so the first GET is a guaranteed miss that stores over HTTP/3.
+	const target = "/cache/static?scenario=cache-h3"
+	get := func() (map[string]any, error) {
+		resp, err := h3Client.Get(base + target)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("expected 200, got %d, body: %s", resp.StatusCode, body)
+		}
+		if resp.ProtoMajor != 3 {
+			return nil, fmt.Errorf("expected HTTP/3, got %s", resp.Proto)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			return nil, fmt.Errorf("decode response: %v (body %s)", err, body)
+		}
+		return m, nil
+	}
+
+	// First request — cache miss, hits backend over HTTP/3.
+	body1, err := get()
+	if err != nil {
+		return fail(name, "first HTTP/3 request: %v", err)
+	}
+	call1, _ := body1["call"].(float64)
+	if call1 == 0 {
+		return fail(name, "first request: missing call counter in body: %v", body1)
+	}
+
+	// Second request — must be served from cache with the same counter.
+	body2, err := get()
+	if err != nil {
+		return fail(name, "second HTTP/3 request: %v", err)
+	}
+	call2, _ := body2["call"].(float64)
+	if call2 != call1 {
+		return fail(name, "cache miss over HTTP/3: call counter changed %.0f → %.0f (fragment cached or not cached at all)", call1, call2)
+	}
+
+	return pass(name, "second HTTP/3 (QUIC) GET served from cache (call counter=%.0f unchanged)", call1)
 }
 
 // testCacheNoStore verifies that responses with Cache-Control: no-store
