@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -611,15 +610,6 @@ func TestFinishCountsVariedResponseOnce(t *testing.T) {
 	assert.Equal(t, 1, stores, "one response must count as one store")
 	// The pointer has no body, so counting it would drag the histogram to zero.
 	assert.Equal(t, []float64{4}, bodySizes, "only the real body is measured")
-}
-
-func TestKeyFromRequestLongQuery(t *testing.T) {
-	client, _ := newTestRedis(t)
-	store := NewStore(client)
-
-	r := httptest.NewRequest(http.MethodPost, "/search?q="+strings.Repeat("x", 100), nil)
-	key := store.KeyFromRequest(r, nil)
-	assert.Contains(t, key, "POST|/search?q=")
 }
 
 // interimRecordingWriter faithfully models net/http's 1xx contract: a WriteHeader

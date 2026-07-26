@@ -445,7 +445,7 @@ The service returns rate limit parameters and optional per-tenant overrides:
 
 External service responses and backend responses are cached using EdgeQuota's CDN-style response cache. Cache behavior is driven entirely by the response — via `Cache-Control` headers (HTTP) or body fields like `cache_max_age_seconds` and `cache_no_store` (gRPC). If the external service returns no cache directives, every request hits the service.
 
-Ephemeral headers (tracing IDs, `X-Request-Id`, `X-Forwarded-*`, etc.) are automatically stripped from cache keys. No configuration is needed.
+The response-cache key is the request method, path, and query, plus any request headers the origin's `Vary` response header names — nothing else. The response cache does **not** strip or normalize request headers, so no ephemeral-header exclusion list applies here. (EdgeQuota's separate rate-limit *key* derivation does exclude ephemeral headers such as tracing and correlation IDs, but that governs quota bucketing, not response caching.)
 
 See [Response Caching](caching.md) for full details on cache key construction, `Cache-Control` semantics, conditional requests, invalidation, and Redis configuration.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -390,6 +391,18 @@ func TestKeyFromRequestDeterministic(t *testing.T) {
 		assert.Equal(t, store.KeyFromRequest(r1, vary), store.KeyFromRequest(r2, vary),
 			"Vary headers should be sorted for deterministic keys")
 	})
+}
+
+func TestKeyFromRequestLongQuery(t *testing.T) {
+	client, _ := newTestRedis(t)
+	store := NewStore(client)
+
+	query := "q=" + strings.Repeat("x", 100)
+	r := httptest.NewRequest(http.MethodPost, "/search?"+query, nil)
+	// Assert the WHOLE key, not just its prefix: a prefix check ("POST|/search?q=")
+	// is satisfied by the method+path alone and would pass even if the query were
+	// dropped from the key, silently collapsing distinct long queries onto one slot.
+	assert.Equal(t, "POST|/search?"+query, store.KeyFromRequest(r, nil))
 }
 
 func TestMaxBodySize(t *testing.T) {
