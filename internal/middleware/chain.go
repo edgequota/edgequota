@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2074,25 +2075,41 @@ func (c *Chain) markUnhealthyLocked() bool {
 	return true
 }
 
-// redisPingerAdapter wraps a redis.Client to satisfy the observability.Pinger interface.
+var errRedisUnavailable = errors.New("rate-limit redis client is unavailable")
+
+// redisPingerAdapter resolves the current limiter client at ping time. Recovery
+// replaces and closes the old client, so holding a client reference here would
+// leave deep readiness permanently stale after a successful reconnect.
 type redisPingerAdapter struct {
-	client redis.Client
+	chain *Chain
 }
 
 func (a *redisPingerAdapter) Ping(ctx context.Context) error {
-	return a.client.Ping(ctx).Err()
-}
-
-// RedisPinger returns a Pinger that can probe the current Redis connection.
-// Returns nil if no Redis limiter is configured. The pinger delegates to the
-// underlying Redis client's Ping command. It's safe to call concurrently.
-func (c *Chain) RedisPinger() observability.Pinger {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.limiter == nil {
+	if !a.chain.redisHealthConfigured() {
 		return nil
 	}
-	return &redisPingerAdapter{client: c.limiter.Client()}
+
+	a.chain.mu.RLock()
+	defer a.chain.mu.RUnlock()
+	if a.chain.limiter == nil {
+		return errRedisUnavailable
+	}
+	return a.chain.limiter.Client().Ping(ctx).Err()
+}
+
+func (c *Chain) redisHealthConfigured() bool {
+	cfg := c.cfg.Load()
+	return cfg != nil && (cfg.RateLimit.Static.Average > 0 || cfg.RateLimit.External.Enabled)
+}
+
+// RedisPinger returns a Pinger that probes the current Redis connection. It
+// remains valid across recovery swaps and returns an unavailable error while a
+// configured rate limiter is in fallback mode. It is safe to call concurrently.
+func (c *Chain) RedisPinger() observability.Pinger {
+	if !c.redisHealthConfigured() {
+		return nil
+	}
+	return &redisPingerAdapter{chain: c}
 }
 
 // ResponseCache returns the current response cache store, or nil if
