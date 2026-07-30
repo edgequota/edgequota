@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/edgequota/edgequota/internal/config"
@@ -250,5 +251,50 @@ func TestExternalRLRedisLimiterInit(t *testing.T) {
 
 		assert.NotNil(t, limAfter,
 			"recoveryInstall must create a limiter in external RL mode even when ratePerSecond=0")
+	})
+}
+
+func TestRedisPingerTracksCurrentLimiter(t *testing.T) {
+	t.Run("continues to use the recovered Redis client", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		chain, err := NewChain(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}), cfg, testLogger(), testMetrics())
+		require.NoError(t, err)
+		defer chain.Close()
+
+		pinger := chain.RedisPinger()
+		require.NotNil(t, pinger)
+
+		freshClient, err := redis.NewClient(cfg.Redis)
+		require.NoError(t, err)
+		chain.recoveryInstall(freshClient)
+
+		require.NoError(t, pinger.Ping(context.Background()),
+			"a pinger captured before recovery must use the replacement limiter client")
+	})
+
+	t.Run("reports unavailable during configured startup fallback", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		cfg := testConfig(mr.Addr())
+		cfg.RateLimit.FailurePolicy = config.FailurePolicyInMemoryFallback
+		cfg.Redis.DialTimeout = "10ms"
+		mr.Close()
+
+		chain, err := NewChain(
+			context.Background(),
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+			cfg,
+			testLogger(),
+			testMetrics(),
+			WithRecoveryBackoff(time.Hour, time.Hour, func(delay time.Duration) time.Duration { return delay }),
+		)
+		require.NoError(t, err)
+		defer chain.Close()
+
+		pinger := chain.RedisPinger()
+		require.NotNil(t, pinger)
+		assert.ErrorIs(t, pinger.Ping(context.Background()), errRedisUnavailable)
 	})
 }

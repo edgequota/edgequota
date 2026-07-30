@@ -112,6 +112,9 @@ Returns 200 when the instance is accepting traffic. During graceful shutdown, it
 #### Deep Health Check: `GET /readyz?deep=true`
 
 When `?deep=true` is passed, the readiness probe actively pings Redis before responding. This verifies end-to-end connectivity to the rate-limit backing store, not just process liveness.
+The check resolves the limiter's current Redis client when it runs: it reports
+unavailable while configured rate limiting is in fallback mode and automatically
+follows the replacement client after Redis recovery.
 
 | State | Status | Body |
 |-------|--------|------|
