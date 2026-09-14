@@ -174,8 +174,20 @@ groups:
             Rate limiting may be degraded (in-memory fallback or fail-closed).
 
       - alert: EdgeQuotaRedisErrors
-        expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.redis.errors"}[5m])) > 1
-        for: 2m
+        # Fires on ANY Redis error sustained for 10m (errors keep landing in the
+        # 5m rate window for 10m straight), not on an error RATE. The counter
+        # increments once per failed operation, so its rate scales with traffic:
+        # a fixed per-second threshold (this rule used to be > 1/s) is
+        # unreachable at low request volume, even through a complete Redis outage.
+        # The 10m `for` is what separates a real, lasting failure from a transient
+        # burst (a failover, a single timeout). This is still a traffic-driven
+        # signal: with no requests there are no Redis operations to fail, so the
+        # load-independent outage alert is EdgeQuotaRedisUnhealthy, not this one.
+        # Depending on the backend, rate() may not count a brand-new series' first
+        # sample, so a pod's first-ever error can be missed; a sustained failure
+        # keeps erroring and still fires.
+        expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.redis.errors"}[5m])) > 0
+        for: 10m
         labels:
           severity: warning
           team: platform
@@ -183,8 +195,8 @@ groups:
         annotations:
           summary: "EdgeQuota Redis errors on pool {{ $labels.edgequota_redis_pool }}"
           description: >-
-            Redis errors are occurring at {{ $value | humanize }}/s on pool {{ $labels.edgequota_redis_pool }}.
-            Check Redis cluster health and network connectivity.
+            Redis errors on pool {{ $labels.edgequota_redis_pool }} have persisted for 10 minutes
+            (currently {{ $value | humanize }}/s). Check Redis cluster health and network connectivity.
 
       - alert: EdgeQuotaFallbackActive
         expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.ratelimit.fallback_used"}[5m])) > 0
@@ -266,12 +278,21 @@ groups:
       # one back:
       #
       # 1. A cache outage already pages, load-independently and around the
-      #    clock, via EdgeQuotaRedisUnhealthy / EdgeQuotaRedisErrors on
-      #    edgequota_redis_pool="response_cache". A hit-rate rule adds no
-      #    coverage for the failure it appears to watch.
+      #    clock, via EdgeQuotaRedisUnhealthy on
+      #    edgequota_redis_pool="response_cache": one connectivity failure
+      #    flips the pool unhealthy and the gauge holds until a later success,
+      #    however little traffic follows. A hit-rate rule adds no coverage
+      #    for the failure it appears to watch.
       #
-      #    That coverage is only real because the response-cache pool reports
-      #    into both signals — Store.OnRedisError / Store.OnHealthy, wired in
+      #    EdgeQuotaRedisErrors is NOT part of that guarantee. Its counter is
+      #    per failed operation, so it is a traffic-driven warning: it fires
+      #    only while failing operations keep arriving for its 10m `for`. An
+      #    outage shorter than that, or one too quiet to keep producing
+      #    failures, never reaches it. (Under its former > 1/s threshold it
+      #    could not fire at low volume at all.)
+      #
+      #    Both signals are only real because the response-cache pool reports
+      #    into them — Store.OnRedisError / Store.OnHealthy, wired in
       #    middleware.installResponseCache. It did NOT always: the pool seeded
       #    to healthy and nothing ever flipped it, so the gauge read 1 forever,
       #    the error counter had no series at all, and both rules were
