@@ -183,6 +183,14 @@ groups:
         # burst (a failover, a single timeout). This is still a traffic-driven
         # signal: with no requests there are no Redis operations to fail, so the
         # load-independent outage alert is EdgeQuotaRedisUnhealthy, not this one.
+        # On the ratelimit pool a lasting CONNECTIVITY failure is counted once
+        # (plus any requests already in flight): the first such error swaps the
+        # limiter out, requests then use the fallback without calling Redis, and
+        # the recovery loop's pings are not counted. A lasting ratelimit outage
+        # therefore does NOT fire this rule; EdgeQuotaRedisUnhealthy covers it.
+        # On that pool this rule catches errors that leave the limiter in place
+        # (READONLY, script, OOM) and flapping connectivity. The response_cache
+        # pool counts every failed operation, outage included.
         # Depending on the backend, rate() may not count a brand-new series' first
         # sample, so a pod's first-ever error can be missed; a sustained failure
         # keeps erroring and still fires.
@@ -195,8 +203,9 @@ groups:
         annotations:
           summary: "EdgeQuota Redis errors on pool {{ $labels.edgequota_redis_pool }}"
           description: >-
-            Redis errors on pool {{ $labels.edgequota_redis_pool }} have persisted for 10 minutes
-            (currently {{ $value | humanize }}/s). Check Redis cluster health and network connectivity.
+            The 5m Redis error rate on pool {{ $labels.edgequota_redis_pool }} has stayed above zero
+            for 10 minutes (currently {{ $value | humanize }}/s). Check Redis cluster health and
+            network connectivity.
 
       - alert: EdgeQuotaFallbackActive
         expr: sum by (edgequota_redis_pool)(rate({otel_metric_name="edgequota.ratelimit.fallback_used"}[5m])) > 0
@@ -286,13 +295,15 @@ groups:
       #
       #    EdgeQuotaRedisErrors is NOT part of that guarantee. Its counter is
       #    per failed operation, so it is a traffic-driven warning: it fires
-      #    only while failing operations keep arriving for its 10m `for`. An
-      #    outage shorter than that, or one too quiet to keep producing
-      #    failures, never reaches it. (Under its former > 1/s threshold it
-      #    could not fire at low volume at all.)
+      #    only once the 5m error rate has stayed above zero for its 10m
+      #    `for`, which needs failing operations to keep arriving. An outage
+      #    shorter than that, or one too quiet to keep producing failures,
+      #    never reaches it. (Under its former > 1/s threshold it could not
+      #    fire at low volume at all.)
       #
-      #    Both signals are only real because the response-cache pool reports
-      #    into them — Store.OnRedisError / Store.OnHealthy, wired in
+      #    Both signals (the health gauge and the error counter) are only real
+      #    because the response-cache pool reports into them —
+      #    Store.OnRedisError / Store.OnHealthy, wired in
       #    middleware.installResponseCache. It did NOT always: the pool seeded
       #    to healthy and nothing ever flipped it, so the gauge read 1 forever,
       #    the error counter had no series at all, and both rules were

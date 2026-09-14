@@ -346,7 +346,7 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 | EdgeQuotaHighRateLimitRatio | warning | > 50% of requests rate-limited |
 | EdgeQuotaConcurrencyRejections | warning | Requests rejected by concurrency limit |
 | EdgeQuotaRedisUnhealthy | critical | `edgequota.redis.healthy == 0` |
-| EdgeQuotaRedisErrors | warning | Any Redis error, sustained 10m (traffic-driven) |
+| EdgeQuotaRedisErrors | warning | 5m Redis error rate > 0, sustained 10m (traffic-driven) |
 | EdgeQuotaFallbackActive | warning | In-memory fallback in use |
 | EdgeQuotaAuthErrors | critical | Auth service returning errors |
 | EdgeQuotaAuthLatencyHigh | warning | Auth P95 > 1s |
@@ -360,11 +360,11 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 
 Cache hit rate is a dashboard signal, not a paging condition.
 
-A cache outage already pages via `EdgeQuotaRedisUnhealthy` on `edgequota_redis_pool="response_cache"`, at critical severity within a minute and independently of traffic: one connectivity failure flips the pool unhealthy and the gauge holds until a later success. A hit-rate rule adds no coverage for that.
+A cache outage already pages via `EdgeQuotaRedisUnhealthy` on `edgequota_redis_pool="response_cache"`, at critical severity and independently of traffic: one connectivity failure flips the pool unhealthy and the gauge holds until a later success, so the rule fires once the gauge has read `0` for its 1-minute `for` (plus the metric export interval, a minute by default). A hit-rate rule adds no coverage for that.
 
-That is true because the response cache reports into both signals: every Redis operation it makes is classified, a connectivity failure flips the pool unhealthy, and the next success flips it back. A missing key is a normal negative lookup and counts as neither. This is worth stating because it was not always so — before v0.11.5 the pool was seeded healthy and nothing ever flipped it, so the gauge read `1` through any outage and the rules could not fire. Before you lean on a pool's health signal, confirm something reports into it.
+That is true because the response cache reports into both the health gauge (`edgequota.redis.healthy`) and the error counter (`edgequota.redis.errors`): every Redis operation it makes is classified, a connectivity failure flips the pool unhealthy, and the next success flips it back. A missing key is a normal negative lookup and counts as neither. This is worth stating because it was not always so — before v0.11.5 the pool was seeded healthy and nothing ever flipped it, so the gauge read `1` through any outage and neither Redis rule could fire. Before you lean on a pool's health signal, confirm something reports into it.
 
-`EdgeQuotaRedisErrors` is not part of that guarantee. `edgequota.redis.errors` counts failed operations, so its rate scales with traffic: the rule is a warning that fires only while failing operations keep arriving for 10 minutes, and a short or low-traffic outage never reaches it. It used to require more than 1 error/s, which a low-volume deployment cannot produce even through a complete outage; it now fires on any error rate sustained for 10 minutes.
+`EdgeQuotaRedisErrors` is not part of that guarantee. `edgequota.redis.errors` counts failed operations, so its rate scales with traffic: the rule is a warning that fires only once the 5-minute error rate has stayed above zero for 10 minutes, which needs failing operations to keep arriving, and a short or low-traffic outage never reaches it. It used to require more than 1 error/s, which a low-volume deployment cannot produce even through a complete outage; it now fires on any non-zero 5-minute error rate sustained for 10 minutes. On the `ratelimit` pool a lasting connectivity failure is counted once (plus any requests already in flight): the limiter switches to its fallback and stops calling Redis, and recovery pings are not counted, so that outage is `EdgeQuotaRedisUnhealthy`'s to report, not this rule's.
 
 What a hit-rate rule would add is false pages. Hit rate is a ratio over cache-**eligible** responses, and how much eligible traffic a deployment sees is a property of what its backends mark cacheable — not something the proxy controls. In a quiet window that can be a handful of lookups, where the ratio is quantized (one hit in four reads as 0.25) and its confidence interval spans tens of percentage points. Any fixed threshold then sits inside the noise and fires on a perfectly healthy cache. Neither a wider window nor a minimum-traffic guard fixes that: a guard expressed as a request rate encodes one deployment's volume, so a value that means "too quiet to judge" for one deployment silences the alert entirely for a smaller one.
 
