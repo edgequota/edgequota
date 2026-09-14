@@ -190,7 +190,7 @@ Hit rate is `hit / (hit + miss)` — over eligible responses only. Measure it th
 **If hit rate is low while `miss` is healthy**, eligible responses are not being reused. Look at:
 
 1. **TTLs short relative to request spacing**: If the same resource is requested less often than its `max-age`, entries expire before reuse and every request is a miss. Low-traffic periods do this naturally.
-2. **Redis unavailable**: Lookups cannot find entries. Check `edgequota.redis.healthy` / `edgequota.redis.errors` (`edgequota.redis.pool=response_cache`) — `EdgeQuotaRedisUnhealthy` covers a real cache outage independently of traffic.
+2. **Redis unavailable**: Lookups cannot find entries. Check `edgequota.redis.healthy` / `edgequota.redis.errors` (`edgequota.redis.pool=response_cache`) — `EdgeQuotaRedisUnhealthy` covers a real cache outage: the first cache operation that fails to connect flips the pool unhealthy, and the gauge holds until a later success however little traffic follows (there is no background probe).
 3. **Response too large**: Responses exceeding `cache.max_body_size` (default: 1 MB) are eligible but never stored, so they stay misses forever. They also increment `edgequota.response_cache.operations` with `edgequota.cache.operation=skip`. Increase the limit if needed.
 4. **High cardinality `Vary` header**: A `Vary` over a header with many values produces a separate entry per variation, so entries are rarely reused.
 
