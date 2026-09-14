@@ -175,14 +175,17 @@ groups:
 
       - alert: EdgeQuotaRedisErrors
         # Fires on ANY Redis error sustained for 10m (errors keep landing in the
-        # 5m rate window for 10m straight), not on an error RATE. The counter
-        # increments once per failed operation, so its rate scales with traffic:
-        # a fixed per-second threshold (this rule used to be > 1/s) is
-        # unreachable at low request volume, even through a complete Redis outage.
+        # 5m rate window for 10m straight), not on a fixed positive rate
+        # threshold. The counter increments once per failed operation, so its
+        # rate scales with traffic: a fixed per-second threshold (this rule used
+        # to be > 1/s) is unreachable at low request volume, even through a
+        # complete Redis outage.
         # The 10m `for` is what separates a real, lasting failure from a transient
         # burst (a failover, a single timeout). This is still a traffic-driven
         # signal: with no requests there are no Redis operations to fail, so the
-        # load-independent outage alert is EdgeQuotaRedisUnhealthy, not this one.
+        # outage alert is EdgeQuotaRedisUnhealthy, not this one. It needs one
+        # observed connectivity failure (there is no background probe) and then
+        # holds however little traffic follows.
         # On the ratelimit pool a lasting CONNECTIVITY failure is counted once
         # (plus any requests already in flight): the first such error swaps the
         # limiter out, requests then use the fallback without calling Redis, and
@@ -286,12 +289,13 @@ groups:
       # dashboard, not on a pager, for two reasons — please read before adding
       # one back:
       #
-      # 1. A cache outage already pages, load-independently and around the
-      #    clock, via EdgeQuotaRedisUnhealthy on
-      #    edgequota_redis_pool="response_cache": one connectivity failure
-      #    flips the pool unhealthy and the gauge holds until a later success,
-      #    however little traffic follows. A hit-rate rule adds no coverage
-      #    for the failure it appears to watch.
+      # 1. A cache outage already pages via EdgeQuotaRedisUnhealthy on
+      #    edgequota_redis_pool="response_cache": the first cache operation
+      #    that fails to connect (or a connect failure at boot) flips the pool
+      #    unhealthy, and the gauge holds until a later success, however little
+      #    traffic follows. There is no background probe, so detection needs
+      #    that one failing operation; a hit-rate rule needs traffic too, and
+      #    adds no coverage for the failure it appears to watch.
       #
       #    EdgeQuotaRedisErrors is NOT part of that guarantee. Its counter is
       #    per failed operation, so it is a traffic-driven warning: it fires

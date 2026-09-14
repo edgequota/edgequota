@@ -360,7 +360,7 @@ The canonical alerting rules live in the repo at [`deploy/observability/alerts.y
 
 Cache hit rate is a dashboard signal, not a paging condition.
 
-A cache outage already pages via `EdgeQuotaRedisUnhealthy` on `edgequota_redis_pool="response_cache"`, at critical severity and independently of traffic: one connectivity failure flips the pool unhealthy and the gauge holds until a later success, so the rule fires once the gauge has read `0` for its 1-minute `for` (plus the metric export interval, a minute by default). A hit-rate rule adds no coverage for that.
+A cache outage already pages via `EdgeQuotaRedisUnhealthy` on `edgequota_redis_pool="response_cache"`, at critical severity: the first cache operation that fails to connect (or a connect failure at boot) flips the pool unhealthy, and the gauge holds until a later success however little traffic follows, so the rule fires once the gauge has read `0` for its 1-minute `for` (plus the metric export interval, a minute by default). There is no background probe, so detection needs that one failing operation. A hit-rate rule needs traffic too, and adds no coverage for that.
 
 That is true because the response cache reports into both the health gauge (`edgequota.redis.healthy`) and the error counter (`edgequota.redis.errors`): every Redis operation it makes is classified, a connectivity failure flips the pool unhealthy, and the next success flips it back. A missing key is a normal negative lookup and counts as neither. This is worth stating because it was not always so — before v0.11.5 the pool was seeded healthy and nothing ever flipped it, so the gauge read `1` through any outage and neither Redis rule could fire. Before you lean on a pool's health signal, confirm something reports into it.
 
