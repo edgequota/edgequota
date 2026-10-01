@@ -486,7 +486,7 @@ If both `auth_token` and an explicit `headers` entry for the same header name ex
 |-------|------|---------|---------|-------------|
 | `enabled` | bool | `false` | `EDGEQUOTA_TRACING_ENABLED` | Enable distributed tracing export via OTLP |
 | `protocol` | string | `"grpc"` | `EDGEQUOTA_TRACING_PROTOCOL` | OTLP transport: `grpc` or `http` |
-| `endpoint` | string | `""` | `EDGEQUOTA_TRACING_ENDPOINT` | For `grpc`: bare host:port (e.g. `collector:4317`). For `http`: full URL (e.g. `http://collector:4318`) |
+| `endpoint` | string | `""` | `EDGEQUOTA_TRACING_ENDPOINT` | For `grpc`: bare host:port (e.g. `collector:4317`). For `http`: full URL (e.g. `http://collector:4318`); a URL without a path sends traces to `/v1/traces` and metrics to `/v1/metrics`; a URL with a path (including `/`) sends both signals to that path instead, after the exporter's usual path cleanup |
 | `insecure` | bool | `true` | `EDGEQUOTA_TRACING_INSECURE` | Use plaintext (no TLS) for the exporter connection |
 | `service_name` | string | `"edgequota"` | `EDGEQUOTA_TRACING_SERVICE_NAME` | Service name in traces |
 | `sample_rate` | float64 | `0.1` | `EDGEQUOTA_TRACING_SAMPLE_RATE` | Sampling ratio (0.0–1.0); ignored when an upstream trace is present |

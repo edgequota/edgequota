@@ -100,6 +100,7 @@ func meterProviderOptions() []sdkmetric.Option {
 //   - grpc (default): expects a bare host:port endpoint (e.g. "collector:4317").
 //     When cfg.Insecure is true, plaintext gRPC is used.
 //   - http: expects a full URL with scheme (e.g. "http://collector:4318").
+//     A URL without a path posts to /v1/metrics (see endpointURLHasNoPath).
 //
 // Cumulative temporality is pinned on both transports: the downstream (Dash0's
 // OTLP→PromQL translation and any future rate() scalers) assumes monotonic
@@ -112,6 +113,9 @@ func newMetricExporter(ctx context.Context, cfg config.TracingConfig) (sdkmetric
 		opts := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpointURL(cfg.Endpoint),
 			otlpmetrichttp.WithTemporalitySelector(cumulativeTemporality),
+		}
+		if endpointURLHasNoPath(cfg.Endpoint) {
+			opts = append(opts, otlpmetrichttp.WithURLPath(otlpMetricsPath))
 		}
 		if cfg.Insecure {
 			opts = append(opts, otlpmetrichttp.WithInsecure())

@@ -23,12 +23,13 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
-          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
-          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
-          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
-          # which pulls the latest patch at build time and needs no pin.)
-          go-version: "1.26.5"
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
+          go-version: "1.26.6"
           cache: true
 
       - name: Run golangci-lint
@@ -68,12 +69,13 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
-          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
-          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
-          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
-          # which pulls the latest patch at build time and needs no pin.)
-          go-version: "1.26.5"
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
+          go-version: "1.26.6"
           cache: true
 
       - name: Run tests with race detector
@@ -127,12 +129,13 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
-          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
-          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
-          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
-          # which pulls the latest patch at build time and needs no pin.)
-          go-version: "1.26.5"
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
+          go-version: "1.26.6"
           cache: true
 
       - name: Build binary
@@ -149,12 +152,13 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Pinned to the patch that fixes GO-2026-5856 (crypto/tls, used by the
-          # HTTP/3 server path): setup-go reuses the runner's cached 1.26.4 for a
-          # bare "1.26", so the govulncheck gate needs an explicit patch. Bump as
-          # new stdlib fixes land. (The Docker build tracks golang:1.26-alpine,
-          # which pulls the latest patch at build time and needs no pin.)
-          go-version: "1.26.5"
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
+          go-version: "1.26.6"
           cache: true
 
       - name: Run govulncheck
