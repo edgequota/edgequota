@@ -114,8 +114,10 @@ const (
 // metrics share. OpenTelemetry's HTTP exporters appended the signal path
 // (/v1/traces, /v1/metrics) to such a URL up to v1.44.0; from v1.45.0 they
 // post to "/" instead, so the callers set the signal path explicitly. A URL
-// with any path, including "/", is used as given, as before. An unparsable
-// URL is left to the exporter, which reports it.
+// with any path, including "/", keeps that path instead of the signal path
+// (after the exporter's usual path cleanup), as before. An unparsable URL is
+// left to the exporter, which logs it and keeps its default or
+// environment-configured endpoint.
 func endpointURLHasNoPath(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	return err == nil && u.Path == ""
