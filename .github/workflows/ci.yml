@@ -23,11 +23,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Explicit patch: setup-go reuses the runner's cached older 1.26.x for
-          # a bare "1.26", so the govulncheck gate needs a pin on a patch that
-          # fixes every stdlib advisory it reports. Bump as new stdlib fixes
-          # land. (The Docker build tracks golang:1.26-alpine, which pulls the
-          # latest patch at build time and needs no pin.)
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
           go-version: "1.26.6"
           cache: true
 
@@ -68,11 +69,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Explicit patch: setup-go reuses the runner's cached older 1.26.x for
-          # a bare "1.26", so the govulncheck gate needs a pin on a patch that
-          # fixes every stdlib advisory it reports. Bump as new stdlib fixes
-          # land. (The Docker build tracks golang:1.26-alpine, which pulls the
-          # latest patch at build time and needs no pin.)
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
           go-version: "1.26.6"
           cache: true
 
@@ -127,11 +129,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Explicit patch: setup-go reuses the runner's cached older 1.26.x for
-          # a bare "1.26", so the govulncheck gate needs a pin on a patch that
-          # fixes every stdlib advisory it reports. Bump as new stdlib fixes
-          # land. (The Docker build tracks golang:1.26-alpine, which pulls the
-          # latest patch at build time and needs no pin.)
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
           go-version: "1.26.6"
           cache: true
 
@@ -149,11 +152,12 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          # Explicit patch: setup-go reuses the runner's cached older 1.26.x for
-          # a bare "1.26", so the govulncheck gate needs a pin on a patch that
-          # fixes every stdlib advisory it reports. Bump as new stdlib fixes
-          # land. (The Docker build tracks golang:1.26-alpine, which pulls the
-          # latest patch at build time and needs no pin.)
+          # Explicit patch: setup-go can reuse the runner's cached older 1.26.x
+          # for a bare "1.26", so the govulncheck gate needs a pin on a patch
+          # that fixes every stdlib advisory it reports. Bump as new stdlib
+          # fixes land. (The Docker build uses the floating golang:1.26-alpine
+          # tag, which resolves to the latest 1.26 patch when pulled fresh, as
+          # on CI's clean runners, so it needs no pin.)
           go-version: "1.26.6"
           cache: true
 
