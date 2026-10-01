@@ -306,7 +306,7 @@ EdgeQuota uses a **parent-based trace ID ratio sampler**:
 
 ## Dashboard
 
-The canonical dashboard definition lives in the repo at [`deploy/observability/dashboard.yaml`](../deploy/observability/dashboard.yaml) (vendor-neutral; the infra observability stack mirrors it byte-for-byte — the repo is the source of truth, infra never ahead). Its queries use the dotted OTel metric names via the backend's `otel_metric_name` surface (see [`deploy/observability/README.md`](../deploy/observability/README.md) for the surfaced-name convention).
+The canonical dashboard definition lives in the repo at [`deploy/observability/dashboard.yaml`](../deploy/observability/dashboard.yaml) (vendor-neutral). Its queries use the dotted OTel metric names via the backend's `otel_metric_name` surface (see [`deploy/observability/README.md`](../deploy/observability/README.md) for the surfaced-name convention).
 
 **Sections:**
 
@@ -334,7 +334,7 @@ Per-tenant panels were removed in the OTel migration (per-tenant cardinality bel
 
 ## Alerting Rules
 
-The canonical alerting rules live in the repo at [`deploy/observability/alerts.yaml`](../deploy/observability/alerts.yaml) (Prometheus rule format; mirrored into the infra observability stack, adapted to the backend's threshold model). They query the dotted OTel metric names via the backend's `otel_metric_name` surface. Traffic/error/no-traffic rules key off `edgequota.requests` (spans streaming); the goroutine alerts and the `EdgeQuotaNoTraffic` liveness guard use `go.goroutine.count` (OTel runtime metrics).
+The canonical alerting rules live in the repo at [`deploy/observability/alerts.yaml`](../deploy/observability/alerts.yaml) (Prometheus rule format). They query the dotted OTel metric names via the backend's `otel_metric_name` surface. Traffic/error/no-traffic rules key off `edgequota.requests` (spans streaming); the goroutine alerts and the `EdgeQuotaNoTraffic` liveness guard use `go.goroutine.count` (OTel runtime metrics).
 
 | Alert | Severity | Condition |
 |-------|----------|-----------|

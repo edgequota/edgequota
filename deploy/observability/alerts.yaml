@@ -9,9 +9,7 @@
 #     (edgequota.status_class -> edgequota_status_class);
 #   - histogram selectors carry otel_metric_type="histogram".
 # The metric emission itself is backend-agnostic; only this query dialect targets
-# the current consumer (Dash0). The infra mirror
-# (shoro/infrastructure .../08_dash0/main.tf) adapts each rule to Dash0's
-# $__threshold model — it MUST track this file, never lead it.
+# the current consumer (Dash0).
 #
 # Traffic/error/no-traffic rules key off edgequota.requests, the unconditional
 # terminal counter that spans streaming (SSE/WS/gRPC) — unlike
